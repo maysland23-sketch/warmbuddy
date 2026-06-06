@@ -7,6 +7,9 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
+const cookieParser = require('cookie-parser');
+app.use(cookieParser());
+
 // 简易密码验证中间件
 const ACCESS_PASSWORD = '851121'; // 改成你自己的，比如 'mays2026'
 
