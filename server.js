@@ -11,7 +11,7 @@ const cookieParser = require('cookie-parser');
 app.use(cookieParser());
 
 // 简易密码验证中间件
-const ACCESS_PASSWORD = '851121'; // 改成你自己的，比如 'mays2026'
+const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || 'mays2026'; // 第二个值是本地默认密码
 
 app.use((req, res, next) => {
   // 如果是请求 API 或者已经登录过，直接放行
