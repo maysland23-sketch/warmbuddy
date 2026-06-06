@@ -1,31 +1,24 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+app.use(cookieParser());   // cookie 解析必须在密码验证之前
 
-const cookieParser = require('cookie-parser');
-app.use(cookieParser());
-
-// 简易密码验证中间件
-const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || 'mays2026'; // 第二个值是本地默认密码
+// 1. 先进行密码验证
+const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || 'mays2026';
 
 app.use((req, res, next) => {
-  // 如果是请求 API 或者已经登录过，直接放行
   if (req.path.startsWith('/api/chat') || req.cookies?.auth === 'true') {
     return next();
   }
-
-  // 如果请求带了正确的密码参数
   if (req.query.pwd === ACCESS_PASSWORD) {
-    res.cookie('auth', 'true', { maxAge: 30 * 24 * 60 * 60 * 1000 }); // 30天免密
+    res.cookie('auth', 'true', { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true });
     return res.redirect('/');
   }
-
-  // 没有密码就显示输入页面
   res.send(`
     <!DOCTYPE html>
     <html><head><meta charset="utf-8"><title>暖伴</title>
@@ -37,6 +30,9 @@ app.use((req, res, next) => {
     </form></body></html>
   `);
 });
+
+// 2. 然后才托管静态文件
+app.use(express.static('public'));
 
 // 只保留聊天这一个核心接口
 app.post('/api/chat', async (req, res) => {
