@@ -698,6 +698,17 @@ const store = {
   activeBubble: null, activeBubbleMessageIndex: null,
 };
 
+// ==================== PERSISTENCE ====================
+function saveStore() {
+  try { localStorage.setItem('warmbuddy-store', JSON.stringify(store)); } catch(e) {}
+}
+function loadStore() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('warmbuddy-store'));
+    if (saved) Object.assign(store, saved);
+  } catch(e) {}
+}
+
 let nextTodoId = 20;
 let currentMemoryTab = 'memories';
 
@@ -1192,7 +1203,7 @@ async function genAIResponse(input) {
   ];
 
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch('http://192.168.1.11:3000/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages })
@@ -1502,13 +1513,15 @@ function goToDiaryDate(ds){
 
 // ==================== MISC ====================
 function clearAllData(){
-  showModal('Clear All Data',`<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要清除所有数据吗？此操作不可撤销。</p>`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'clear all',cls:'confirm',onclick:()=>{store.todos=[];store.litterThoughts=[];store.books=[];store.diaries=[];store.projects=[{id:'p1',name:'default',memories:[],chats:[{id:'c1',name:'default',sharedMemoryIds:[],weeklyExports:[],messages:[]}]}];store.tokenUsage.used=0;store.tokenUsage.history=[];store.activeProject='p1';store.activeChat='c1';closeModal();renderAll();toast('All data cleared');}}]);
+  showModal('Clear All Data',`<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要清除所有数据吗？此操作不可撤销。</p>`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'clear all',cls:'confirm',onclick:()=>{store.todos=[];store.litterThoughts=[];store.books=[];store.diaries=[];store.projects=[{id:'p1',name:'default',memories:[],chats:[{id:'c1',name:'default',sharedMemoryIds:[],weeklyExports:[],messages:[]}]}];store.tokenUsage.used=0;store.tokenUsage.history=[];store.activeProject='p1';store.activeChat='c1';saveStore();closeModal();renderAll();toast('All data cleared');}}]);
 }
 function renderAll(){renderHome();renderProjectList();renderChatMessages();renderBookshelf();renderDiary();}
 
 // ==================== INIT ====================
-function init(){updateSettingsUI();renderAll();}
+function init(){loadStore();updateSettingsUI();renderAll();}
 init();
+setInterval(saveStore, 2000);
+window.addEventListener('beforeunload', saveStore);
 </script>
 </body>
 </html>
