@@ -7,6 +7,34 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
+// 简易密码验证中间件
+const ACCESS_PASSWORD = '851121'; // 改成你自己的，比如 'mays2026'
+
+app.use((req, res, next) => {
+  // 如果是请求 API 或者已经登录过，直接放行
+  if (req.path.startsWith('/api/chat') || req.cookies?.auth === 'true') {
+    return next();
+  }
+
+  // 如果请求带了正确的密码参数
+  if (req.query.pwd === ACCESS_PASSWORD) {
+    res.cookie('auth', 'true', { maxAge: 30 * 24 * 60 * 60 * 1000 }); // 30天免密
+    return res.redirect('/');
+  }
+
+  // 没有密码就显示输入页面
+  res.send(`
+    <!DOCTYPE html>
+    <html><head><meta charset="utf-8"><title>暖伴</title>
+    <style>body{background:#F7F5F1;display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;}
+    input{padding:12px;border:1px solid #ddd;border-radius:8px;width:200px;margin-right:8px;}
+    button{padding:12px 20px;background:#6B7C93;color:white;border:none;border-radius:8px;}</style>
+    </head><body><form method="get">
+    <input type="password" name="pwd" placeholder="输入访问密码"><button type="submit">进入</button>
+    </form></body></html>
+  `);
+});
+
 // 只保留聊天这一个核心接口
 app.post('/api/chat', async (req, res) => {
   const { messages } = req.body; // 前端发来的对话历史
