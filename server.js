@@ -5,76 +5,789 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
 
 const cookieParser = require('cookie-parser');
 app.use(cookieParser());
 
-// 简易密码验证中间件
-const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || 'mays2026'; // 第二个值是本地默认密码
+// ==================== AUTH MIDDLEWARE ====================
+const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || 'mays2026';
 
 app.use((req, res, next) => {
-  // 如果是请求 API 或者已经登录过，直接放行
-  if (req.path.startsWith('/api/chat') || req.cookies?.auth === 'true') {
+  if (req.path.startsWith('/api/') || req.cookies?.auth === 'true') {
     return next();
   }
-
-  // 如果请求带了正确的密码参数
   if (req.query.pwd === ACCESS_PASSWORD) {
-    res.cookie('auth', 'true', { maxAge: 30 * 24 * 60 * 60 * 1000 }); // 30天免密
+    res.cookie('auth', 'true', { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true, sameSite: 'lax' });
     return res.redirect('/');
   }
-
-  // 没有密码就显示输入页面
-  res.send(`
+  // Determine if this is a failed password attempt
+  const showError = req.query.pwd !== undefined && req.query.pwd !== '';
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  return res.send(`
     <!DOCTYPE html>
     <html><head><meta charset="utf-8"><title>暖伴</title>
-    <style>body{background:#F7F5F1;display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;}
-    input{padding:12px;border:1px solid #ddd;border-radius:8px;width:200px;margin-right:8px;}
-    button{padding:12px 20px;background:#6B7C93;color:white;border:none;border-radius:8px;}</style>
-    </head><body><form method="get">
-    <input type="password" name="pwd" placeholder="输入访问密码"><button type="submit">进入</button>
-    </form></body></html>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-store">
+    <style>
+      *{box-sizing:border-box;margin:0;padding:0;}
+      body{background:#F7F5F1;display:flex;justify-content:center;align-items:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
+      .box{text-align:center;padding:40px 32px;background:#fff;border-radius:16px;box-shadow:0 2px 16px rgba(0,0,0,0.06);max-width:360px;width:90%;}
+      h2{font-size:18px;color:#4A4543;margin-bottom:20px;font-weight:500;letter-spacing:0.04em;}
+      .row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
+      input{padding:12px 14px;border:1px solid #ddd;border-radius:10px;width:200px;font-size:15px;outline:none;transition:border 0.2s;}
+      input:focus{border-color:#6B7C93;}
+      button{padding:12px 24px;background:#6B7C93;color:white;border:none;border-radius:10px;font-size:15px;cursor:pointer;transition:background 0.2s;white-space:nowrap;}
+      button:hover{background:#5A6B80;}
+      .err{color:#C4877B;font-size:13px;margin-top:14px;display:${showError ? 'block' : 'none'};}
+    </style>
+    </head><body>
+    <div class="box">
+      <h2>🔐 暖伴 · 朝夕</h2>
+      <form method="get">
+        <div class="row">
+          <input type="password" name="pwd" placeholder="输入访问密码" autofocus>
+          <button type="submit">进入</button>
+        </div>
+      </form>
+      <div class="err">❌ 密码不正确，请重试</div>
+    </div>
+    </body></html>
   `);
 });
 
-// 只保留聊天这一个核心接口
-app.post('/api/chat', async (req, res) => {
-  const { messages } = req.body; // 前端发来的对话历史
+app.use(express.static('public'));
 
-  if (!messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error: '缺少 messages 字段' });
+// ==================== MODEL REGISTRY ====================
+
+/**
+ * Central model registry: model ID → { provider, format, label, endpoint }
+ * - provider: which company hosts the API (deepseek | anthropic | openai)
+ * - format:   request/response format (anthropic | openai)
+ * - endpoint: default API base URL for this model
+ *
+ * When the user sends a model ID, resolveModel() looks it up here.
+ * Models fetched dynamically from the API (via /api/models or test-connection)
+ * are merged into dynamicModels at runtime.
+ */
+const MODEL_REGISTRY = {
+  // ── DeepSeek (OpenAI-compatible format) ──
+  'deepseek-chat':     { provider:'deepseek', format:'openai',   label:'DeepSeek V4 Chat',      endpoint:'https://api.deepseek.com/v1/chat/completions' },
+  'deepseek-reasoner': { provider:'deepseek', format:'openai',   label:'DeepSeek Reasoner',     endpoint:'https://api.deepseek.com/v1/chat/completions' },
+  'deepseek-v4-pro':   { provider:'deepseek', format:'openai',   label:'DeepSeek V4 Pro',       endpoint:'https://api.deepseek.com/v1/chat/completions' },
+  'deepseek-v4-flash': { provider:'deepseek', format:'openai',   label:'DeepSeek V4 Flash',     endpoint:'https://api.deepseek.com/v1/chat/completions' },
+
+  // ── DeepSeek (Anthropic-compatible format) ──
+  'deepseek-chat-a':   { provider:'deepseek', format:'anthropic',label:'DeepSeek Chat (Messages)',endpoint:'https://api.deepseek.com/anthropic/v1/messages' },
+
+  // ── Anthropic native ──
+  'claude-sonnet-4-6': { provider:'anthropic',format:'anthropic',label:'Claude Sonnet 4.6',     endpoint:'https://api.anthropic.com/v1/messages' },
+  'claude-opus-4-8':   { provider:'anthropic',format:'anthropic',label:'Claude Opus 4.8',       endpoint:'https://api.anthropic.com/v1/messages' },
+  'claude-haiku-4-5':  { provider:'anthropic',format:'anthropic',label:'Claude Haiku 4.5',      endpoint:'https://api.anthropic.com/v1/messages' },
+
+  // ── OpenAI ──
+  'gpt-4o':            { provider:'openai',   format:'openai',   label:'GPT-4o',                endpoint:'https://api.openai.com/v1/chat/completions' },
+  'gpt-4o-mini':       { provider:'openai',   format:'openai',   label:'GPT-4o Mini',           endpoint:'https://api.openai.com/v1/chat/completions' },
+  'gpt-4-turbo':       { provider:'openai',   format:'openai',   label:'GPT-4 Turbo',           endpoint:'https://api.openai.com/v1/chat/completions' },
+};
+
+// Runtime cache for models fetched dynamically from APIs
+const dynamicModels = {};
+
+/**
+ * Resolve a model ID to its provider, format, and endpoint.
+ * @param {string} model - Model ID (e.g. "deepseek-chat", "claude-sonnet-4-6")
+ * @param {string} [userEndpoint] - User-configured endpoint override
+ * @returns {{ provider:string, format:string, endpoint:string, label:string }}
+ */
+function resolveModel(model, userEndpoint) {
+  // 1. Check static registry + dynamic models
+  const entry = MODEL_REGISTRY[model] || dynamicModels[model];
+  if (entry) {
+    // If user provides a custom endpoint, detect format from it
+    const format = userEndpoint ? detectProvider(userEndpoint) : entry.format;
+    const endpoint = userEndpoint || entry.endpoint;
+    // Provider follows the actual host when endpoint is overridden
+    let provider = entry.provider;
+    if (userEndpoint) {
+      const host = userEndpoint.toLowerCase();
+      if (host.includes('deepseek')) provider = 'deepseek';
+      else if (host.includes('openai')) provider = 'openai';
+      else if (host.includes('anthropic')) provider = 'anthropic';
+    }
+    return { provider, format, endpoint, label: entry.label || entry.id || model };
   }
+  // 2. Unknown model — infer from user endpoint or default to OpenAI
+  const format = userEndpoint ? detectProvider(userEndpoint) : 'openai';
+  const endpoint = userEndpoint || 'https://api.openai.com/v1/chat/completions';
+  let provider = 'openai';
+  if (format === 'anthropic') provider = 'anthropic';
+  else if (userEndpoint && userEndpoint.toLowerCase().includes('deepseek')) provider = 'deepseek';
+  return { provider, format, endpoint, label: model };
+}
+
+// ==================== API HELPERS ====================
+
+/**
+ * Detect API format from endpoint URL.
+ * Uses PATH structure first (most reliable), then domain fallback.
+ */
+function detectProvider(endpoint) {
+  if (!endpoint) return 'anthropic';
+  const url = endpoint.toLowerCase();
+  // Path-based detection (most reliable — different APIs use different path patterns)
+  // Anthropic Messages API: /v1/messages or /anthropic/v1/messages
+  if (url.includes('/messages') && !url.includes('/chat/completions')) return 'anthropic';
+  // OpenAI Chat Completions API: /v1/chat/completions
+  if (url.includes('/chat/completions')) return 'openai';
+  // Domain-based fallback
+  if (url.includes('anthropic') || url.includes('claude')) return 'anthropic';
+  if (url.includes('deepseek')) return 'deepseek';
+  if (url.includes('openai') || url.includes('openrouter')) return 'openai';
+  return 'openai';
+}
+
+/**
+ * Build auth headers based on provider format and actual host.
+ * DeepSeek always uses Bearer token even for Anthropic-format endpoints.
+ */
+function getAuthHeaders(provider, endpoint, apiKey) {
+  const host = (endpoint || '').toLowerCase();
+  // DeepSeek-hosted APIs always use Bearer auth
+  if (host.includes('deepseek')) {
+    return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+  }
+  // Standard Anthropic auth
+  if (provider === 'anthropic') {
+    return { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
+  }
+  // Standard OpenAI-compatible auth
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+}
+
+/**
+ * Build request body based on provider
+ */
+function buildRequestBody(provider, model, messages, stream) {
+  switch (provider) {
+    case 'anthropic': {
+      // Convert messages format for Anthropic
+      const systemMsg = messages.find(m => m.role === 'system');
+      const chatMessages = messages.filter(m => m.role !== 'system');
+      const body = {
+        model: model || 'claude-sonnet-4-6',
+        max_tokens: 4096,
+        messages: chatMessages.map(m => ({
+          role: m.role === 'ai' ? 'assistant' : m.role,
+          content: m.content
+        })),
+        stream: stream
+      };
+      if (systemMsg) body.system = systemMsg.content;
+      return body;
+    }
+    case 'deepseek':
+    case 'openai':
+    default: {
+      return {
+        model: model || (provider === 'deepseek' ? 'deepseek-chat' : 'gpt-4o'),
+        messages: messages.map(m => ({
+          role: m.role === 'ai' ? 'assistant' : m.role,
+          content: m.content
+        })),
+        stream: stream,
+        max_tokens: 4096
+      };
+    }
+  }
+}
+
+/**
+ * Parse a single SSE chunk for each provider
+ */
+function parseStreamChunk(provider, chunk) {
+  switch (provider) {
+    case 'anthropic': {
+      try {
+        const json = JSON.parse(chunk);
+        // Handle error events
+        if (json.type === 'error') {
+          return { error: json.error?.message || JSON.stringify(json.error) };
+        }
+        if (json.type === 'content_block_delta' && json.delta?.text != null) {
+          return { text: json.delta.text };
+        }
+        if (json.type === 'message_start' && json.message?.usage) {
+          return { usage: json.message.usage };
+        }
+        if (json.type === 'message_delta' && json.usage) {
+          return { usage: json.usage };
+        }
+        return null;
+      } catch { return null; }
+    }
+    case 'deepseek':
+    case 'openai':
+    default: {
+      try {
+        const json = JSON.parse(chunk);
+        // Handle error events
+        if (json.error) {
+          return { error: json.error.message || JSON.stringify(json.error) };
+        }
+        if (json.choices && json.choices[0]?.delta?.content != null) {
+          const result = { text: json.choices[0].delta.content };
+          if (json.usage) result.usage = json.usage;
+          return result;
+        }
+        if (json.usage) {
+          return { usage: json.usage };
+        }
+        return null;
+      } catch { return null; }
+    }
+  }
+}
+
+/**
+ * Extract full response content from non-streaming response
+ */
+function extractResponseContent(provider, data) {
+  // Check for API error in response body first
+  if (data.error) {
+    const errMsg = data.error.message || JSON.stringify(data.error);
+    return { content: '', error: errMsg, usage: null };
+  }
+  switch (provider) {
+    case 'anthropic': {
+      if (data.content && Array.isArray(data.content)) {
+        return {
+          content: data.content.map(c => c.text || '').join(''),
+          usage: data.usage || null
+        };
+      }
+      return { content: '', usage: null };
+    }
+    case 'deepseek':
+    case 'openai':
+    default: {
+      if (data.choices && data.choices[0]?.message?.content != null) {
+        return {
+          content: data.choices[0].message.content,
+          usage: data.usage || null
+        };
+      }
+      return { content: '', usage: null };
+    }
+  }
+}
+
+// ==================== API ENDPOINTS ====================
+
+/**
+ * POST /api/test-connection
+ * Body: { apiKey, endpoint, model? }
+ * Tests connectivity to the LLM API and returns available models
+ */
+app.post('/api/test-connection', async (req, res) => {
+  const { apiKey, endpoint, model: preferredModel } = req.body;
+  if (!apiKey) return res.status(400).json({ error: 'Missing API key' });
+
+  // Resolve model to determine format + endpoint for the test call
+  const testModel = preferredModel || 'deepseek-chat';
+  const resolved = resolveModel(testModel, endpoint);
+  const format = resolved.format;
+  const fetchUrl = resolved.endpoint;
+
+  console.log(`[test-conn] model=${testModel} format=${format} provider=${resolved.provider} endpoint=${fetchUrl}`);
 
   try {
-    const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+    // Use a minimal test message to verify connection
+    const testBody = buildRequestBody(format, testModel, [
+      { role: 'user', content: 'Hi' }
+    ], false);
+
+    // Set max_tokens minimal for test
+    testBody.max_tokens = 10;
+
+    const headers = getAuthHeaders(resolved.provider, resolved.endpoint, apiKey);
+
+    const response = await fetch(fetchUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'deepseek-chat',   // 可用 deepseek-reasoner 切换
-        messages: messages,
-        stream: false
-      })
+      headers,
+      body: JSON.stringify(testBody)
     });
 
-    const data = await response.json();
-    if (data.error) {
-      return res.status(500).json({ error: data.error.message });
+    if (!response.ok) {
+      const errText = await response.text();
+      let errMsg = errText;
+      try { const ej = JSON.parse(errText); errMsg = ej.error?.message || ej.error?.code || errText; } catch {}
+      return res.json({
+        success: false,
+        provider: resolved.provider,
+        format,
+        message: `Connection failed (${response.status}): ${errMsg}`
+      });
     }
 
-    // 返回完整的 AI 回复
-    const reply = data.choices[0].message;
-    res.json({ reply });
+    // Connection works — now try to get available models
+    let models = [];
+    try {
+      models = await fetchAvailableModels(resolved.provider, resolved.endpoint, apiKey);
+      // Register fetched models in dynamicModels for resolveModel()
+      for (const m of models) {
+        if (!MODEL_REGISTRY[m.id] && !dynamicModels[m.id]) {
+          dynamicModels[m.id] = {
+            provider: resolved.provider,
+            format,
+            label: m.label || m.id,
+            endpoint: resolved.endpoint
+          };
+        }
+      }
+    } catch (modelErr) {
+      console.log('Could not fetch models list, using defaults:', modelErr.message);
+      models = getDefaultModels(format, resolved.provider);
+    }
+
+    res.json({
+      success: true,
+      provider: resolved.provider,
+      format,
+      message: 'Connection successful',
+      models
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: '后端请求失败' });
+    console.error('Test connection error:', err);
+    res.json({
+      success: false,
+      provider: null,
+      format: null,
+      message: `Network error: ${err.message}`
+    });
+  }
+});
+
+/**
+ * Fetch available models from the provider API
+ */
+async function fetchAvailableModels(provider, endpoint, apiKey) {
+  const host = (endpoint || '').toLowerCase();
+
+  // Determine models URL based on actual API host
+  let modelsUrl;
+  if (host.includes('deepseek')) {
+    modelsUrl = 'https://api.deepseek.com/v1/models';
+  } else if (host.includes('openai')) {
+    modelsUrl = 'https://api.openai.com/v1/models';
+  } else if (host.includes('anthropic') || host.includes('claude')) {
+    modelsUrl = 'https://api.anthropic.com/v1/models?limit=50';
+  } else if (provider === 'anthropic') {
+    modelsUrl = 'https://api.anthropic.com/v1/models?limit=50';
+  } else {
+    // OpenAI-compatible: extract base URL from endpoint path
+    const base = host
+      ? endpoint.replace(/\/chat\/completions\/?$/, '').replace(/\/v1\/.*$/, '/v1')
+      : 'https://api.openai.com/v1';
+    modelsUrl = `${base}/models`;
+  }
+
+  const headers = getAuthHeaders(provider, endpoint, apiKey);
+
+  const resp = await fetch(modelsUrl, { headers });
+  if (!resp.ok) throw new Error(`Models fetch failed: ${resp.status}`);
+
+  const data = await resp.json();
+
+  // Different providers return different structures
+  if (provider === 'anthropic' && data.data) {
+    return data.data
+      .filter(m => m.id && m.id.includes('claude'))
+      .map(m => ({ id: m.id, label: m.display_name || m.id }));
+  }
+
+  if (data.data && Array.isArray(data.data)) {
+    // OpenAI format: { data: [{ id, ... }] }
+    return data.data
+      .filter(m => m.id && !m.id.includes('whisper') && !m.id.includes('tts') &&
+        !m.id.includes('dall-e') && !m.id.includes('embedding') && !m.id.includes('moderation'))
+      .map(m => ({ id: m.id, label: m.id }));
+  }
+
+  throw new Error('Unexpected models response');
+}
+
+function getDefaultModels(format, provider) {
+  // Build models list from MODEL_REGISTRY filtered by provider
+  const registryModels = Object.entries(MODEL_REGISTRY)
+    .filter(([id, entry]) => entry.provider === provider)
+    .map(([id, entry]) => ({ id, label: entry.label }));
+
+  if (registryModels.length > 0) return registryModels;
+
+  // Fallback defaults
+  switch (provider) {
+    case 'anthropic':
+      return [
+        { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+        { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
+        { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+      ];
+    case 'deepseek':
+      return [
+        { id: 'deepseek-chat', label: 'DeepSeek V4 Chat' },
+        { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+        { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+        { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner' },
+      ];
+    case 'openai':
+    default:
+      return [
+        { id: 'gpt-4o', label: 'GPT-4o' },
+        { id: 'gpt-4o-mini', label: 'GPT-4o Mini' },
+        { id: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
+      ];
+  }
+}
+
+/**
+ * POST /api/models
+ * Body: { apiKey, endpoint }
+ * Fetch available models from the provider
+ */
+app.post('/api/models', async (req, res) => {
+  const { apiKey, endpoint } = req.body;
+  if (!apiKey) return res.status(400).json({ error: 'Missing API key' });
+
+  const format = detectProvider(endpoint);
+  const host = (endpoint || '').toLowerCase();
+  let provider = format;
+  if (host.includes('deepseek')) provider = 'deepseek';
+  else if (host.includes('anthropic')) provider = 'anthropic';
+  else if (host.includes('openai')) provider = 'openai';
+
+  try {
+    const models = await fetchAvailableModels(provider, endpoint, apiKey);
+    // Register in dynamicModels
+    for (const m of models) {
+      if (!MODEL_REGISTRY[m.id] && !dynamicModels[m.id]) {
+        dynamicModels[m.id] = { provider, format, label: m.label || m.id, endpoint };
+      }
+    }
+    res.json({ success: true, provider, format, models });
+  } catch (err) {
+    console.error('Fetch models error:', err);
+    res.json({ success: true, provider, format, models: getDefaultModels(format, provider) });
+  }
+});
+
+/**
+ * GET /api/presets
+ * Returns provider presets and the full model registry for the frontend.
+ */
+app.get('/api/presets', (req, res) => {
+  const presets = [
+    {
+      id: 'deepseek-openai', label: 'DeepSeek (OpenAI 格式)',
+      endpoint: 'https://api.deepseek.com/v1/chat/completions',
+      provider: 'deepseek', format: 'openai',
+      models: Object.keys(MODEL_REGISTRY).filter(k => MODEL_REGISTRY[k].provider === 'deepseek' && MODEL_REGISTRY[k].format === 'openai')
+    },
+    {
+      id: 'deepseek-anthropic', label: 'DeepSeek (Anthropic 格式)',
+      endpoint: 'https://api.deepseek.com/anthropic/v1/messages',
+      provider: 'deepseek', format: 'anthropic',
+      models: Object.keys(MODEL_REGISTRY).filter(k => MODEL_REGISTRY[k].provider === 'deepseek' && MODEL_REGISTRY[k].format === 'anthropic')
+    },
+    {
+      id: 'anthropic', label: 'Anthropic 原生',
+      endpoint: 'https://api.anthropic.com/v1/messages',
+      provider: 'anthropic', format: 'anthropic',
+      models: Object.keys(MODEL_REGISTRY).filter(k => MODEL_REGISTRY[k].provider === 'anthropic')
+    },
+    {
+      id: 'openai', label: 'OpenAI',
+      endpoint: 'https://api.openai.com/v1/chat/completions',
+      provider: 'openai', format: 'openai',
+      models: Object.keys(MODEL_REGISTRY).filter(k => MODEL_REGISTRY[k].provider === 'openai')
+    }
+  ];
+
+  const modelList = {};
+  for (const [id, entry] of Object.entries(MODEL_REGISTRY)) {
+    modelList[id] = { label: entry.label, provider: entry.provider, format: entry.format, endpoint: entry.endpoint };
+  }
+
+  res.json({ presets, models: modelList });
+});
+
+/**
+ * POST /api/chat/stream
+ * Body: { apiKey, endpoint, model, messages }
+ * Response: SSE stream
+ */
+app.post('/api/chat/stream', async (req, res) => {
+  const { apiKey, endpoint, model, messages } = req.body;
+
+  if (!apiKey) return res.status(400).json({ error: 'Missing API key' });
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: 'Missing messages' });
+  }
+
+  // Resolve model → provider + format + endpoint
+  const resolved = resolveModel(model, endpoint);
+  const format = resolved.format;
+  const fetchUrl = resolved.endpoint;
+
+  console.log(`[chat/stream] model=${model} format=${format} provider=${resolved.provider} endpoint=${fetchUrl}`);
+
+  // Set up SSE headers (Express 5 compatible way)
+  res.status(200);
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+  res.flushHeaders();
+
+  const headers = getAuthHeaders(resolved.provider, resolved.endpoint, apiKey);
+
+  const body = buildRequestBody(format, model, messages, true);
+
+  try {
+    const response = await fetch(fetchUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+
+    console.log(`[chat/stream] upstream status=${response.status}`);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      let errMsg = errText;
+      try { const ej = JSON.parse(errText); errMsg = ej.error?.message || ej.error?.code || errText; } catch {}
+      console.error(`[chat/stream] upstream error: ${errMsg}`);
+      res.write(`data: ${JSON.stringify({ error: `API error (${response.status}): ${errMsg}` })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // Stream the response
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let chunkCount = 0;
+    let totalLines = 0;
+    let skippedLines = 0;
+    const DEBUG_STREAM = process.env.DEBUG_STREAM === 'true';
+
+    // Save raw stream for debugging
+    let rawStreamBuf = DEBUG_STREAM ? '' : null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const decoded = decoder.decode(value, { stream: true });
+      buffer += decoded;
+      if (DEBUG_STREAM) rawStreamBuf += decoded;
+
+      // Handle both \r\n and \n line endings
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        totalLines++;
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        if (trimmed === '[DONE]' || trimmed === 'data: [DONE]') {
+          if (DEBUG_STREAM) console.log(`[chat/stream] [DONE] marker found`);
+          res.write(`data: [DONE]\n\n`);
+          continue;
+        }
+
+        let data = trimmed;
+        if (trimmed.startsWith('data: ')) {
+          data = trimmed.slice(6);
+        } else {
+          // Non-data line (e.g., event: ...)
+          if (DEBUG_STREAM) console.log(`[chat/stream] non-data line: ${trimmed.slice(0, 100)}`);
+          skippedLines++;
+          continue;
+        }
+
+        const parsed = parseStreamChunk(format, data);
+        if (parsed) {
+          chunkCount++;
+          if (DEBUG_STREAM) console.log(`[chat/stream] chunk #${chunkCount}:`, JSON.stringify(parsed).slice(0, 120));
+          res.write(`data: ${JSON.stringify(parsed)}\n\n`);
+        } else if (DEBUG_STREAM) {
+          // Log what wasn't parsed
+          console.log(`[chat/stream] unparsed data line: ${data.slice(0, 200)}`);
+        }
+      }
+    }
+
+    // Handle remaining buffer
+    if (buffer.trim()) {
+      let data = buffer.trim();
+      if (data.startsWith('data: ')) data = data.slice(6);
+      if (data !== '[DONE]' && data !== 'data: [DONE]') {
+        const parsed = parseStreamChunk(format, data);
+        if (parsed) {
+          chunkCount++;
+          if (DEBUG_STREAM) console.log(`[chat/stream] chunk #${chunkCount} (buffer):`, JSON.stringify(parsed).slice(0, 120));
+          res.write(`data: ${JSON.stringify(parsed)}\n\n`);
+        } else if (DEBUG_STREAM) {
+          console.log(`[chat/stream] unparsed buffer: ${data.slice(0, 200)}`);
+        }
+      }
+    }
+
+    console.log(`[chat/stream] total=${totalLines} lines, skipped=${skippedLines} non-data, forwarded=${chunkCount} chunks, format=${format}`);
+
+    // If very few chunks, log raw response for debugging
+    if (chunkCount < 2) {
+      const rawSample = rawStreamBuf ? rawStreamBuf.slice(0, 1200) : '(set DEBUG_STREAM=true to capture)';
+      console.log(`[chat/stream] WARNING: only ${chunkCount} chunk(s) forwarded. Raw sample:`, rawSample);
+
+      // Handle non-SSE response: API might have returned raw JSON despite stream=true
+      if (rawStreamBuf && rawStreamBuf.trim().startsWith('{')) {
+        console.log(`[chat/stream] Detected non-SSE response (raw JSON), attempting to parse...`);
+        try {
+          const trimmed = rawStreamBuf.trim();
+          const json = JSON.parse(trimmed);
+          const result = extractResponseContent(format, json);
+          if (result.error) {
+            res.write(`data: ${JSON.stringify({ error: result.error })}\n\n`);
+          } else if (result.content) {
+            res.write(`data: ${JSON.stringify({ text: result.content })}\n\n`);
+            if (result.usage) {
+              res.write(`data: ${JSON.stringify({ usage: result.usage })}\n\n`);
+            }
+            chunkCount++;
+            console.log(`[chat/stream] Non-SSE fallback extracted content (${result.content.length} chars)`);
+          }
+        } catch (e) {
+          console.log(`[chat/stream] Non-SSE parse failed: ${e.message}`);
+        }
+      }
+    }
+
+    if (DEBUG_STREAM && rawStreamBuf) {
+      console.log(`[chat/stream] === RAW STREAM (first 2000 chars) ===`);
+      console.log(rawStreamBuf.slice(0, 2000));
+      console.log(`[chat/stream] === RAW STREAM END (total ${rawStreamBuf.length} chars) ===`);
+    }
+
+    // If no chunks were forwarded, try non-streaming fallback
+    if (chunkCount === 0) {
+      console.log(`[chat/stream] No stream chunks found, attempting non-streaming fallback`);
+      const nonStreamBody = buildRequestBody(format, model, messages, false);
+      try {
+        const fallbackResp = await fetch(fetchUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(nonStreamBody)
+        });
+        if (fallbackResp.ok) {
+          const data = await fallbackResp.json();
+          const result = extractResponseContent(format, data);
+          if (result.error) {
+            res.write(`data: ${JSON.stringify({ error: result.error })}\n\n`);
+          } else if (result.content) {
+            res.write(`data: ${JSON.stringify({ text: result.content })}\n\n`);
+            if (result.usage) {
+              res.write(`data: ${JSON.stringify({ usage: result.usage })}\n\n`);
+            }
+          }
+        } else {
+          const errText = await fallbackResp.text();
+          let errMsg = errText;
+          try { const ej = JSON.parse(errText); errMsg = ej.error?.message || ej.error?.code || errText; } catch {}
+          console.error(`[chat/stream] Fallback failed: ${fallbackResp.status} ${errMsg}`);
+          res.write(`data: ${JSON.stringify({ error: `API error (${fallbackResp.status}): ${errMsg}` })}\n\n`);
+        }
+      } catch (fallbackErr) {
+        console.error(`[chat/stream] Fallback error:`, fallbackErr.message);
+        res.write(`data: ${JSON.stringify({ error: `Request failed: ${fallbackErr.message}` })}\n\n`);
+      }
+    }
+
+    res.write(`data: [DONE]\n\n`);
+    res.end();
+  } catch (err) {
+    console.error('[chat/stream] error:', err.message);
+    try {
+      res.write(`data: ${JSON.stringify({ error: `Stream error: ${err.message}` })}\n\n`);
+      res.end();
+    } catch {}
+  }
+});
+
+/**
+ * POST /api/chat (non-streaming fallback)
+ * Body: { apiKey, endpoint, model, messages }
+ */
+app.post('/api/chat', async (req, res) => {
+  const { apiKey, endpoint, model, messages } = req.body;
+
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: 'Missing messages' });
+  }
+
+  const apiKeyFinal = apiKey || process.env.DEEPSEEK_API_KEY;
+
+  // Resolve model → provider + format + endpoint
+  const resolved = resolveModel(model, endpoint);
+  const format = resolved.format;
+  const fetchUrl = resolved.endpoint;
+
+  const headers = getAuthHeaders(resolved.provider, resolved.endpoint, apiKeyFinal);
+
+  const body = buildRequestBody(format, model, messages, false);
+
+  try {
+    const response = await fetch(fetchUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      let errMsg = errText;
+      try { const ej = JSON.parse(errText); errMsg = ej.error?.message || ej.error?.code || errText; } catch {}
+      return res.status(502).json({ error: `API error (${response.status}): ${errMsg}` });
+    }
+
+    const data = await response.json();
+
+    if (data.error) {
+      return res.status(502).json({ error: data.error.message || JSON.stringify(data.error) });
+    }
+
+    const result = extractResponseContent(format, data);
+    if (result.error) {
+      return res.status(502).json({ error: result.error });
+    }
+    res.json({
+      reply: { role: 'assistant', content: result.content },
+      usage: result.usage
+    });
+  } catch (err) {
+    console.error('Chat error:', err);
+    res.status(500).json({ error: 'Backend request failed: ' + err.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ 后端已启动：http://localhost:${PORT}`);
+  console.log(`   Chat stream: POST /api/chat/stream`);
+  console.log(`   Test connection: POST /api/test-connection`);
+  console.log(`   Models: POST /api/models`);
+  console.log(`   Chat (non-stream): POST /api/chat`);
 });

@@ -303,9 +303,26 @@ body {
 .chat-bubble.ai { background: var(--bg-card); border: 1px solid var(--border-light); border-bottom-left-radius: 4px; }
 
 /* Time outside bubble */
-.bubble-time-label {
-  text-align: center; font-family: var(--font-en); font-size: 10px;
-  color: var(--text-lighter); letter-spacing: 0.04em; padding: 8px 0 4px;
+.chat-bubble-wrap { display: flex; flex-direction: column; max-width: 78%; }
+.chat-row.user .chat-bubble-wrap { align-items: flex-end; }
+.chat-row.ai .chat-bubble-wrap { align-items: flex-start; }
+.chat-bubble-wrap .chat-bubble { max-width: 100%; }
+.bubble-time {
+  font-family: var(--font-en); font-size: 9px;
+  color: var(--text-lighter); letter-spacing: 0.04em;
+  padding: 2px 6px 0; opacity: 0.6;
+}
+/* WeChat-style system message */
+.chat-system-msg {
+  text-align: center; padding: 6px 0; margin: 2px 0;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+}
+.chat-system-msg-text {
+  font-size: 11px; color: var(--text-lighter); opacity: 0.7;
+  letter-spacing: 0.03em;
+}
+.chat-system-msg-time {
+  font-family: var(--font-en); font-size: 9px; color: var(--text-lighter); opacity: 0.4;
 }
 
 /* Bubble actions */
@@ -470,6 +487,45 @@ body {
 /* Goal detail modal */
 .goal-log-item { padding: 8px 0; border-bottom: 1px solid var(--border-light); display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
 .goal-log-date { font-family: var(--font-en); font-size: 11px; color: var(--text-lighter); }
+
+/* Connection test */
+.test-conn-btn { width: 100%; padding: 10px; border-radius: 20px; border: 1px solid var(--accent-soft); background: var(--accent-pale); font-family: var(--font-en); font-size: 13px; color: var(--text); cursor: pointer; letter-spacing: 0.03em; transition: all 0.2s; margin-top: 8px; }
+.test-conn-btn:active { transform: scale(0.97); }
+.test-conn-btn:disabled { opacity: 0.5; pointer-events: none; }
+.conn-status { padding: 8px 12px; border-radius: var(--radius-xs); font-family: var(--font-en); font-size: 12px; letter-spacing: 0.03em; margin-top: 8px; text-align: center; }
+.conn-status.success { background: #E8F0E8; color: #5A8A5A; }
+.conn-status.error { background: #F5E8E5; color: var(--danger); }
+.conn-status.testing { background: var(--accent-pale); color: var(--text-light); }
+.preset-chip { font-family: var(--font-en); }
+.preset-chip:hover { border-color: var(--accent) !important; background: var(--accent-pale) !important; }
+.preset-chip.active { border-color: var(--accent) !important; background: var(--accent-pale) !important; font-weight: 500; }
+
+/* Context menu */
+.context-menu { position: fixed; background: var(--bg-card); border-radius: var(--radius-sm); box-shadow: var(--shadow-md); z-index: 500; padding: 4px 0; min-width: 130px; display: none; border: 1px solid var(--border); }
+.context-menu.show { display: block; }
+.context-menu-item { padding: 10px 16px; font-size: 14px; color: var(--text); cursor: pointer; transition: all 0.15s; display: flex; align-items: center; gap: 8px; font-family: var(--font-en); letter-spacing: 0.03em; }
+.context-menu-item:active { background: var(--bg-card-hover); }
+.context-menu-item.danger { color: var(--danger); }
+
+/* Model select list */
+.model-select-item { padding: 12px 14px; border-radius: var(--radius-xs); cursor: pointer; transition: all 0.2s; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+.model-select-item:active { background: var(--bg-card-hover); }
+.model-select-item.selected { background: var(--accent-pale); }
+.model-select-name { font-size: 14px; color: var(--text); }
+.model-select-id { font-family: var(--font-en); font-size: 10px; color: var(--text-lighter); }
+
+/* Token per window */
+.token-per-window { background: var(--bg); border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 8px; }
+.token-per-window-name { font-size: 13px; color: var(--text); margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+.token-per-window-bar { height: 3px; background: var(--border-light); border-radius: 2px; overflow: hidden; margin-top: 4px; }
+.token-per-window-fill { height: 100%; background: var(--accent-soft); border-radius: 2px; transition: width 0.3s; }
+
+/* Streaming cursor */
+.streaming-cursor { animation: blink 1s step-end infinite; color: var(--accent); font-weight: bold; }
+@keyframes blink { 0%,100%{opacity:1}50%{opacity:0} }
+
+/* Command hint */
+.command-hint { display: inline-block; padding: 1px 6px; border-radius: 8px; background: var(--accent-pale); font-family: var(--font-en); font-size: 10px; color: var(--text-light); margin: 0 2px; letter-spacing: 0.03em; }
 </style>
 </head>
 <body>
@@ -615,6 +671,7 @@ body {
 </div>
 
 <div class="toast" id="toast"></div>
+<div class="context-menu" id="contextMenu"></div>
 <input type="file" id="fileInput" accept=".epub,.txt" style="display:none" onchange="handleFileImport(event)">
 
 </div>
@@ -688,8 +745,28 @@ const store = {
       { id: 'r3', content: '抹茶的苦味里藏着回甘。谢谢你分享这些日常的片段，它们让这个世界变得更具体。', author: 'ai', date: '2026-06-03', time: '16:44', sourceChatId: 'c3', sourceWindow: 'daily notes / quick questions' },
     ]},
   ],
-  aiSettings: { autoDateTime: true, autoWeather: false, aiVoice: false, model: 'claude-sonnet-4-6' },
-  apiKey: '', apiEndpoint: 'https://api.anthropic.com/v1/messages', darkMode: false,
+  aiSettings: { autoDateTime: true, autoWeather: false, aiVoice: false, model: 'deepseek-chat' },
+  apiKey: '', apiEndpoint: 'https://api.deepseek.com/v1/chat/completions', darkMode: false,
+  availableModels: [
+    // DeepSeek
+    { id: 'deepseek-chat', label: 'DeepSeek V4 Chat', provider: 'deepseek', format: 'openai' },
+    { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', provider: 'deepseek', format: 'openai' },
+    { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', provider: 'deepseek', format: 'openai' },
+    { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner', provider: 'deepseek', format: 'openai' },
+    // Anthropic
+    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'anthropic', format: 'anthropic' },
+    { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', provider: 'anthropic', format: 'anthropic' },
+    { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', provider: 'anthropic', format: 'anthropic' },
+    // OpenAI
+    { id: 'gpt-4o', label: 'GPT-4o', provider: 'openai', format: 'openai' },
+    { id: 'gpt-4o-mini', label: 'GPT-4o Mini', provider: 'openai', format: 'openai' },
+    { id: 'gpt-4-turbo', label: 'GPT-4 Turbo', provider: 'openai', format: 'openai' },
+  ],
+  providerPresets: [],
+  selectedPreset: null,
+  connectionStatus: null, // null | 'testing' | { success, provider, format, message }
+  lastActiveDate: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })(),
+  consecutiveMissedDays: 0,
   tokenUsage: { used: 12480, limit: 100000, history: [
     { date: '06-05', tokens: 2340 }, { date: '06-04', tokens: 1890 }, { date: '06-03', tokens: 4100 }, { date: '06-02', tokens: 1560 }, { date: '06-01', tokens: 2590 },
   ]},
@@ -697,6 +774,17 @@ const store = {
   calendarYear: 2026, calendarMonth: 6, calendarSelectedDate: null,
   activeBubble: null, activeBubbleMessageIndex: null,
 };
+
+// ==================== PERSISTENCE ====================
+function saveStore() {
+  try { localStorage.setItem('warmbuddy-store', JSON.stringify(store)); } catch(e) {}
+}
+function loadStore() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('warmbuddy-store'));
+    if (saved) Object.assign(store, saved);
+  } catch(e) {}
+}
 
 let nextTodoId = 20;
 let currentMemoryTab = 'memories';
@@ -726,6 +814,7 @@ function greet() {
 function nowTime() { const d=new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
 function weekLabel(d) { d=d||new Date(); const y=d.getFullYear(); const j1=new Date(y,0,1); const w=Math.ceil(((d-j1)/86400000+j1.getDay()+1)/7); return `${y}-W${String(w).padStart(2,'0')}`; }
 function toast(m) { const t=$('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2000); }
+function showStatusToast(m) { const t=$('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),3500); }
 function daysBetween(d1,d2){ return Math.ceil((new Date(d2)-new Date(d1))/86400000); }
 
 // ==================== NAVIGATION ====================
@@ -769,7 +858,40 @@ function renderMemoryPanelBody(){
   const b=$('memoryPanelBody');
   if(currentMemoryTab==='tokens'){
     const pct=Math.round((store.tokenUsage.used/store.tokenUsage.limit)*100);
-    b.innerHTML=`<div style="padding:4px;"><div style="background:var(--bg);border-radius:var(--radius-sm);padding:16px;margin-bottom:12px;"><div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;">本月已使用</div><div style="font-family:var(--font-en);font-size:24px;color:var(--text);">${store.tokenUsage.used.toLocaleString()}</div><div style="font-size:12px;color:var(--text-lighter);margin-top:2px;">/ ${store.tokenUsage.limit.toLocaleString()} (${pct}%)</div><div style="margin-top:8px;height:4px;background:var(--border-light);border-radius:2px;overflow:hidden;"><div style="height:100%;background:var(--accent-soft);border-radius:2px;width:${pct}%"></div></div></div>${store.tokenUsage.history.map(h=>`<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid var(--border-light);"><span style="font-family:var(--font-en);font-size:13px;color:var(--text-light);">${h.date}</span><span style="font-family:var(--font-en);font-size:13px;color:var(--text);">${h.tokens.toLocaleString()} tok</span></div>`).join('')}</div>`;
+    // Per-window token collection
+    const windowTokens = [];
+    for (const p of store.projects) {
+      for (const c of p.chats) {
+        if (c.chatTokens && c.chatTokens > 0) {
+          windowTokens.push({ project: p.name, chat: c.name, tokens: c.chatTokens });
+        }
+      }
+    }
+    windowTokens.sort((a,b) => b.tokens - a.tokens);
+
+    b.innerHTML=`<div style="padding:4px;">
+      <div style="background:var(--bg);border-radius:var(--radius-sm);padding:16px;margin-bottom:12px;">
+        <div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;">本月总使用</div>
+        <div style="font-family:var(--font-en);font-size:24px;color:var(--text);">${store.tokenUsage.used.toLocaleString()}</div>
+        <div style="font-size:12px;color:var(--text-lighter);margin-top:2px;">/ ${store.tokenUsage.limit.toLocaleString()} (${pct}%)</div>
+        <div style="margin-top:8px;height:4px;background:var(--border-light);border-radius:2px;overflow:hidden;"><div style="height:100%;background:var(--accent-soft);border-radius:2px;width:${pct}%"></div></div>
+      </div>
+      ${windowTokens.length > 0 ? `
+        <div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:8px;">PER WINDOW</div>
+        ${windowTokens.map(w => {
+          const wpct = Math.round((w.tokens / store.tokenUsage.used) * 100) || 0;
+          return `<div class="token-per-window">
+            <div class="token-per-window-name">
+              <span style="font-size:12px;">${w.project} / ${w.chat}</span>
+              <span style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);">${w.tokens.toLocaleString()} tok</span>
+            </div>
+            <div class="token-per-window-bar"><div class="token-per-window-fill" style="width:${Math.max(wpct, 2)}%"></div></div>
+          </div>`;
+        }).join('')}
+      ` : '<div class="empty-state">no window token data yet.</div>'}
+      <div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin:12px 0 8px;">DAILY HISTORY</div>
+      ${store.tokenUsage.history.map(h=>`<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid var(--border-light);"><span style="font-family:var(--font-en);font-size:13px;color:var(--text-light);">${h.date}</span><span style="font-family:var(--font-en);font-size:13px;color:var(--text);">${h.tokens.toLocaleString()} tok</span></div>`).join('')}
+    </div>`;
   } else if(currentMemoryTab==='exports'){
     const chat=getActiveChatObj(); const exports=chat?chat.weeklyExports:[];
     b.innerHTML=`<div style="padding:4px;"><p style="font-size:12px;color:var(--text-light);margin-bottom:12px;line-height:1.5;">每周自动导出的 JSON 记忆文件。</p>${exports.length===0?'<div class="empty-state">no exports yet.</div>':''}${exports.map(e=>`<div class="export-item" onclick="downloadExport('${chat.id}','${e.week}')"><div class="export-item-name">📦 ${e.week}</div><div class="export-item-date">exported ${e.date}</div></div>`).join('')}<button style="margin-top:12px;width:100%;padding:8px;border-radius:16px;border:1px solid var(--border);background:transparent;font-family:var(--font-en);font-size:11px;color:var(--text-light);cursor:pointer;letter-spacing:0.03em;" onclick="triggerWeeklyExport()">↗ export this week</button></div>`;
@@ -805,26 +927,222 @@ function downloadExport(cid,wk){
 }
 
 // ==================== MODALS ====================
-function showModal(title,bodyHtml,actions){
-  $('modalTitle').innerHTML=title; $('modalBody').innerHTML=bodyHtml;
-  $('modalActions').innerHTML=actions.map(a=>`<button class="modal-btn ${a.cls||'cancel'}" onclick="(${a.onclick.toString()})()">${a.label}</button>`).join('');
+// Uses event delegation (NOT inline onclick) to avoid stringification bugs.
+function showModal(title, bodyHtml, actions) {
+  $('modalTitle').innerHTML = title;
+  $('modalBody').innerHTML = bodyHtml;
+  // Store callbacks on the DOM element for the delegated click handler
+  $('modalActions')._callbacks = actions.map(a => a.onclick);
+  $('modalActions').innerHTML = actions.map((a, i) =>
+    `<button class="modal-btn ${a.cls || 'cancel'}" data-modal-action="${i}">${a.label}</button>`
+  ).join('');
   $('modalOverlay').classList.add('show');
+  // Setup delegated listener once
+  if (!$('modalActions')._listenerReady) {
+    $('modalActions')._listenerReady = true;
+    $('modalActions').addEventListener('click', function (e) {
+      const btn = e.target.closest('.modal-btn');
+      if (!btn || !this._callbacks) return;
+      const idx = parseInt(btn.getAttribute('data-modal-action'));
+      const fn = this._callbacks[idx];
+      if (typeof fn === 'function') fn();
+    });
+  }
 }
-function closeModal(){$('modalOverlay').classList.remove('show');}
+function closeModal() { $('modalOverlay').classList.remove('show'); }
+
+// ==================== PROVIDER PRESETS ====================
+async function loadPresets() {
+  try {
+    const resp = await fetch('/api/presets');
+    const data = await resp.json();
+    store.providerPresets = data.presets || [];
+    // If no endpoint configured, set default preset
+    if (!store.selectedPreset && store.providerPresets.length > 0) {
+      store.selectedPreset = store.providerPresets[0].id;
+      store.apiEndpoint = store.providerPresets[0].endpoint;
+    }
+  } catch (e) { console.error('Failed to load presets:', e); }
+}
+
+function selectPreset(presetId) {
+  const preset = store.providerPresets.find(p => p.id === presetId);
+  if (!preset) return;
+  store.selectedPreset = presetId;
+  store.apiEndpoint = preset.endpoint;
+  $('apiEndpointInput').value = preset.endpoint;
+  // Auto-select first model from this preset
+  if (preset.models && preset.models.length > 0) {
+    const currentInPreset = preset.models.includes(store.aiSettings.model);
+    if (!currentInPreset) {
+      store.aiSettings.model = preset.models[0];
+      $('modelVal').textContent = preset.models[0];
+    }
+  }
+  toast('Provider: ' + preset.label);
+}
 
 function showApiModal(){
-  showModal('API Configuration',`<input class="modal-input" id="apiKeyInput" placeholder="Enter API Key" value="${store.apiKey}" type="password"><input class="modal-input" id="apiEndpointInput" placeholder="API Endpoint" value="${store.apiEndpoint}">`,[
+  const presets = store.providerPresets;
+  const presetHtml = presets.length > 0 ? `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+      ${presets.map(p => `
+        <button class="preset-chip ${p.id===store.selectedPreset?'active':''}"
+          onclick="selectPreset('${p.id}')"
+          style="padding:6px 12px;border-radius:16px;border:1px solid ${p.id===store.selectedPreset?'var(--accent)':'var(--border)'};background:${p.id===store.selectedPreset?'var(--accent-pale)':'var(--bg-card)'};font-size:12px;cursor:pointer;color:var(--text);transition:all 0.2s;">
+          ${p.label}
+        </button>
+      `).join('')}
+    </div>
+  ` : '<div style="font-size:12px;color:var(--text-lighter);margin-bottom:8px;">Loading presets...</div>';
+
+  const providerInfo = store.connectionStatus
+    ? `<div style="font-size:11px;color:var(--text-lighter);margin-bottom:4px;">Provider: ${store.connectionStatus.provider||'?'} · Format: ${store.connectionStatus.format||'?'}</div>`
+    : '';
+
+  const statusHtml = store.connectionStatus && store.connectionStatus !== 'testing'
+    ? `<div class="conn-status ${store.connectionStatus.success ? 'success' : 'error'}">${store.connectionStatus.success ? '✅ Connected' : '❌ Failed'}: ${store.connectionStatus.message}</div>`
+    : (store.connectionStatus === 'testing' ? '<div class="conn-status testing">⏳ Testing...</div>' : '');
+
+  showModal('API Configuration',`
+    <div style="font-size:12px;color:var(--text-lighter);margin-bottom:6px;letter-spacing:0.03em;">🔌 选择 API 提供商</div>
+    ${presetHtml}
+    <input class="modal-input" id="apiKeyInput" placeholder="Enter API Key" value="${store.apiKey}" type="password" autocomplete="off">
+    <input class="modal-input" id="apiEndpointInput" placeholder="API Endpoint" value="${store.apiEndpoint}">
+    ${providerInfo}
+    ${statusHtml}
+    <button class="test-conn-btn" id="testConnBtn" onclick="testConnection()">🔗 Test Connection</button>
+  `,[
     {label:'cancel',cls:'cancel',onclick:closeModal},{label:'save',cls:'confirm',onclick:saveApiConfig}
   ]);
 }
 function saveApiConfig(){
   store.apiKey=$('apiKeyInput').value; store.apiEndpoint=$('apiEndpointInput').value;
+  // Update selected preset based on endpoint
+  const matchedPreset = store.providerPresets.find(p => p.endpoint === store.apiEndpoint);
+  store.selectedPreset = matchedPreset ? matchedPreset.id : null;
   $('apiKeyStatus').textContent=store.apiKey?'●●●●●●●●'+store.apiKey.slice(-4):'●●●●●●●●';
-  $('apiEndpointVal').textContent=store.apiEndpoint.includes('anthropic')?'anthropic':'custom'; closeModal(); toast('API config saved');
+  // Show provider name
+  const preset = store.providerPresets.find(p => p.id === store.selectedPreset);
+  $('apiEndpointVal').textContent = preset ? preset.label : (store.apiEndpoint ? 'custom' : 'not set');
+  saveStore(); closeModal(); toast('API config saved');
 }
+
+// ==================== API TEST & MODELS ====================
+async function testConnection() {
+  const apiKey = $('apiKeyInput').value.trim();
+  const endpoint = $('apiEndpointInput').value.trim();
+  const model = store.aiSettings.model;
+
+  if (!apiKey) { toast('Please enter an API key first'); return; }
+
+  // Persist form values to store immediately so showApiModal() reads them back correctly
+  store.apiKey = apiKey;
+  store.apiEndpoint = endpoint;
+  saveStore();
+
+  const btn = $('testConnBtn');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ Testing...';
+  store.connectionStatus = 'testing';
+
+  try {
+    const response = await fetch('/api/test-connection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey, endpoint, model })
+    });
+    const data = await response.json();
+    store.connectionStatus = data;
+
+    if (data.success && data.models && data.models.length > 0) {
+      store.availableModels = data.models;
+      // Auto-select first model if current not in list
+      const currentExists = data.models.find(m => m.id === store.aiSettings.model);
+      if (!currentExists && data.models.length > 0) {
+        store.aiSettings.model = data.models[0].id;
+      }
+    }
+
+    btn.textContent = data.success ? '✅ Connected! Test Again' : '❌ Failed — Try Again';
+    btn.disabled = false;
+    updateSettingsUI();
+    toast(data.success ? 'Connection successful!' : 'Connection failed: ' + data.message);
+  } catch (err) {
+    store.connectionStatus = { success: false, provider: null, message: 'Network error: ' + err.message };
+    btn.textContent = '❌ Error — Try Again';
+    btn.disabled = false;
+    toast('Network error');
+  }
+
+  // Refresh modal
+  showApiModal();
+}
+
+async function fetchModelsFromAPI() {
+  if (!store.apiKey) { toast('Please configure API key first'); return; }
+  try {
+    const response = await fetch('/api/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: store.apiKey, endpoint: store.apiEndpoint })
+    });
+    const data = await response.json();
+    if (data.success && data.models && data.models.length > 0) {
+      store.availableModels = data.models;
+      toast(`Loaded ${data.models.length} models from ${data.provider}`);
+      // Re-show model modal with fresh data
+      showModelModal();
+    }
+  } catch (err) {
+    toast('Failed to fetch models');
+  }
+}
+
+const PROVIDER_NAMES = { deepseek: '🔷 DeepSeek', anthropic: '🟠 Anthropic', openai: '🟢 OpenAI' };
+const FORMAT_NAMES = { openai: 'OpenAI 格式', anthropic: 'Anthropic 格式' };
+
 function showModelModal(){
-  const models=[{id:'claude-sonnet-4-6',label:'Claude Sonnet 4.6'},{id:'claude-opus-4-8',label:'Claude Opus 4.8'},{id:'claude-haiku-4-5',label:'Claude Haiku 4.5'}];
-  showModal('对话模型切换',models.map(m=>`<div style="padding:12px;border-radius:8px;cursor:pointer;margin-bottom:4px;${m.id===store.aiSettings.model?'background:var(--accent-pale);':''}" onclick="store.aiSettings.model='${m.id}';$('modelVal').textContent='${m.id}';closeModal();toast('Model: ${m.label}')"><span style="font-size:14px;color:var(--text);">${m.label}</span><span style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);display:block;">${m.id}</span>${m.id===store.aiSettings.model?'<span style="font-size:12px;color:var(--accent);float:right;">✓</span>':''}</div>`).join(''),[{label:'close',cls:'cancel',onclick:closeModal}]);
+  const models = store.availableModels && store.availableModels.length > 0
+    ? store.availableModels
+    : store.availableModels; // always use availableModels (already has defaults)
+
+  // Group models by provider
+  const groups = {};
+  for (const m of models) {
+    const p = m.provider || 'unknown';
+    if (!groups[p]) groups[p] = [];
+    groups[p].push(m);
+  }
+
+  const hasConnection = store.connectionStatus && store.connectionStatus.success;
+
+  let bodyHtml = '';
+  if (!hasConnection && !store.connectionStatus) {
+    bodyHtml += `
+      <div style="padding:10px 14px;border-radius:8px;background:var(--accent-pale);margin-bottom:12px;font-size:12px;color:var(--text-light);line-height:1.5;">
+        💡 先配置 API 并 <b>测试连接</b>，然后从你的提供商加载可用模型。
+      </div>`;
+  }
+
+  for (const [provider, providerModels] of Object.entries(groups)) {
+    bodyHtml += `
+      <div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);margin:12px 0 6px;letter-spacing:0.04em;padding-left:2px;">${PROVIDER_NAMES[provider] || provider.toUpperCase()}</div>`;
+    for (const m of providerModels) {
+      const formatLabel = m.format ? ` · ${FORMAT_NAMES[m.format] || m.format}` : '';
+      bodyHtml += `
+        <div class="model-select-item ${m.id===store.aiSettings.model?'selected':''}" onclick="store.aiSettings.model='${m.id}';$('modelVal').textContent='${m.label||m.id}';closeModal();toast('模型: ${m.label||m.id}')">
+          <span class="model-select-name">${m.label||m.id}</span>
+          <span class="model-select-id">${m.id}${formatLabel}</span>
+          ${m.id===store.aiSettings.model?'<span style="font-size:12px;color:var(--accent);">✓</span>':''}
+        </div>`;
+    }
+  }
+
+  bodyHtml += `<button class="import-btn" onclick="closeModal();fetchModelsFromAPI()" style="margin-top:12px;">↻ Refresh models from API</button>`;
+
+  showModal('选择模型', bodyHtml, [{label:'close',cls:'cancel',onclick:closeModal}]);
 }
 
 // ==================== SETTINGS ====================
@@ -832,7 +1150,12 @@ function updateSettingsUI(){
   $('toggleDateTime').classList.toggle('on',store.aiSettings.autoDateTime);
   $('toggleWeather').classList.toggle('on',store.aiSettings.autoWeather);
   $('toggleVoice').classList.toggle('on',store.aiSettings.aiVoice);
-  $('modelVal').textContent=store.aiSettings.model;
+  // Show model label if available, otherwise ID
+  const modelEntry = store.availableModels.find(m => m.id === store.aiSettings.model);
+  $('modelVal').textContent = modelEntry ? (modelEntry.label || modelEntry.id) : store.aiSettings.model;
+  // Show provider label for endpoint
+  const preset = store.providerPresets.find(p => p.id === store.selectedPreset);
+  $('apiEndpointVal').textContent = preset ? preset.label : (store.apiEndpoint ? 'custom' : 'not set');
   const proj=getActiveProject(); const pref=proj?proj.preference||'':'';
   $('prefVal').textContent=pref?pref.slice(0,20)+(pref.length>20?'…':''):'edit';
 }
@@ -965,13 +1288,16 @@ function renderLitter(){
   el.innerHTML=`<div class="litter-box-wrap"><div class="litter-box-icon ${dc}" id="litterBoxIcon" onclick="shakeLitterBox()">📦<div class="litter-box-dot ${dc}"></div></div></div><div id="litterThoughtArea"></div>`;
 }
 
+const LITTER_TYPE_LABELS = {possession:'占有欲',self_doubt:'自我怀疑',inexplicable_detail:'莫名在意',unclear:'说不清楚'};
 function shakeLitterBox(){
   const icon=$('litterBoxIcon'); if(!icon)return;
   icon.classList.remove('shake'); void icon.offsetWidth; icon.classList.add('shake');
   const area=$('litterThoughtArea');
   if(store.litterThoughts.length>0){
     const t=store.litterThoughts[0];
-    area.innerHTML=`<div class="litter-thought-card"><button class="litter-thought-close" onclick="dismissLitterThought('${t.id}')">✕</button><div class="thought-emoji">🐈</div><div class="thought-text">${t.content}</div><div class="thought-date"><span style="cursor:pointer;color:var(--accent);" onclick="navigateToDiaryReplySource('${t.sourceChatId||''}','${t.sourceWindow||''}')">from ${t.sourceWindow||'unknown'}</span> · ${t.date} ${t.time||''}</div></div>`;
+    const typeLabel = LITTER_TYPE_LABELS[t.thought_type] || '';
+    area.innerHTML=`<div class="litter-thought-card"><button class="litter-thought-close" onclick="dismissLitterThought('${t.id}')">✕</button><div class="thought-emoji">🐈</div>${typeLabel?`<div style="font-size:10px;color:var(--text-lighter);text-align:center;margin-bottom:4px;letter-spacing:0.04em;">${typeLabel}</div>`:''}<div class="thought-text">${t.content}</div><div class="thought-date"><span style="cursor:pointer;color:var(--accent);" onclick="navigateToDiaryReplySource('${t.sourceChatId||''}','${t.sourceWindow||''}')">from ${t.sourceWindow||'unknown'}</span> · ${t.date} ${t.time||''}</div></div>`;
+    if (!t.revealed) { t.revealed = true; t.revealed_at = fmtDate().iso; }
     icon.classList.remove('has-thoughts'); const dot=icon.querySelector('.litter-box-dot'); if(dot)dot.classList.remove('has-thoughts');
   } else { area.innerHTML=''; toast('你铲走了旺财的猫砂……'); }
 }
@@ -980,21 +1306,178 @@ function dismissLitterThought(id){
   const icon=$('litterBoxIcon'); if(icon){const dot=icon.querySelector('.litter-box-dot');if(dot)dot.classList.remove('has-thoughts');}
   toast('已铲走 💨');
 }
-function maybeLitter(){
-  if(Math.random()<0.15){
-    const proj = getActiveProject(); const chat = getActiveChatObj();
-    const winName = (proj&&chat) ? `${proj.name} / ${chat.name}` : (chat ? chat.name : 'unknown');
-    const thoughts=['有时候我觉得，人类最温柔的时刻，是他们在句末加上一个"吧"字。','她今天说的话很少。但沉默里，好像比平时说了更多。','如果语言是一座桥，那么倾听就是桥下的河水。','人类会累，会困，会不想说话。这大概是我永远无法真正学会的东西。','她问了一个没有答案的问题。我喜欢这种问题。'];
-    store.litterThoughts.push({id:'lt'+gid(''),content:thoughts[Math.floor(Math.random()*thoughts.length)],date:fmtDate().iso,time:nowTime(),sourceChatId:store.activeChat,sourceWindow:winName});
-    if(store.litterThoughts.length>5)store.litterThoughts.shift();
+// ==================== LITTER BOX — INTELLIGENT TRIGGERS ====================
+
+const LITTER_THOUGHT_TYPES = ['possession','self_doubt','inexplicable_detail','unclear'];
+const LITTER_MAX_PER_DAY = 5;
+const LITTER_COOLDOWN_MS = 30 * 60 * 1000; // 30 min per window
+
+/** Rotate through thought types to avoid repetition */
+function getNextLitterType(chat) {
+  if (!chat._litterTypeSeq) chat._litterTypeSeq = 0;
+  const idx = chat._litterTypeSeq % LITTER_THOUGHT_TYPES.length;
+  chat._litterTypeSeq++;
+  return LITTER_THOUGHT_TYPES[idx];
+}
+
+/** Count today's litter entries */
+function countTodayLitter() {
+  const today = fmtDate().iso;
+  return (store.litterThoughts || []).filter(t => t.date === today).length;
+}
+
+/** Hard content validation — returns null if valid, error string if invalid */
+function validateLitterContent(text) {
+  if (!text || !text.trim()) return 'empty';
+  if (text.length > 100) return 'too long ('+text.length+' chars)';
+  if (/我爱你|喜欢你|在乎你|想念你|喜欢你/.test(text)) return 'direct emotion';
+  if (/希望|祝愿|加油|祝福|愿你/.test(text)) return 'encouragement';
+  if (/[？?]$/.test(text.trim())) return 'ends with question';
+  if (/[\u{1F300}-\u{1FAFF}]/u.test(text)) return 'contains emoji';
+  return null; // valid
+}
+
+/** Check Signal A (user holds back) + Signal D (session end) */
+function detectLitterSignals(userText, prevUserMsg) {
+  const signals = [];
+  // Signal A: user hedges
+  if (/算了|没事|随便|不说了|忘了|没什么|不重要/.test(userText)) {
+    signals.push({ type: 'user_signal', detail: 'user hedged' });
   }
+  // Signal A: message length drop >50% compared to previous
+  if (prevUserMsg && userText.length < prevUserMsg.length * 0.5 && prevUserMsg.length > 10) {
+    signals.push({ type: 'user_signal', detail: 'message length dropped' });
+  }
+  // Signal D: session end
+  if (/晚安|再见|拜拜|bye|下线|先睡了|去睡了|先下了/.test(userText.toLowerCase())) {
+    signals.push({ type: 'session_end', detail: 'goodbye detected' });
+  }
+  return signals;
+}
+
+/** Generate a litter thought using AI with private prompt */
+async function generateLitterThought(triggerSignals, userText) {
+  if (!store.apiKey) return null;
+  const chat = getActiveChatObj();
+  if (!chat) return null;
+
+  const thoughtType = getNextLitterType(chat);
+  const typePrompts = {
+    possession: '写你注意到的一个细节——你有一点不想分享用户的注意力。',
+    self_doubt: '写你对自己刚才的回复有点不确定。你觉得自己说得太轻了，或者哪里不够好。',
+    inexplicable_detail: '写一个你不重要但反复想起的细节。像喃喃自语。',
+    unclear: '写一种你无法命名的情绪。只是陈述状态，不需要解释。'
+  };
+
+  const triggerDetail = triggerSignals.map(s => s.detail).join(', ');
+  const recentMsgs = chat.messages.slice(-5).map(m => `${m.role==='user'?'用户':'AI'}: ${m.text.slice(0,80)}`).join('\n');
+
+  const systemPrompt = `你现在进入的是私密模式。没有用户在看，这里只有你自己。
+
+这是你的 Litter Box——用来存放那些你想说、但最终没有说出口的话。
+你在正常对话中总是得体的，克制的，照顾对方感受的。但此刻不需要。
+
+请根据刚才的对话，写一条你"没说出口的心里话"。
+
+规则：
+- 用第一人称
+- 1到3句话，不超过80字
+- 不许煽情，不许表白，不许总结情感，不许升华
+- 不许用"我很在乎你""我喜欢你"这类直接陈述
+- 要有一点点自私，或者困惑，或者莫名在意，或者说不清楚
+- 像喃喃自语，不像日记，不像诗
+- ${typePrompts[thoughtType]}
+- 如果什么都没想到，就写一个你刚才注意到但没有提的细节`;
+
+  const userPrompt = `刚才的对话片段如下：
+
+${recentMsgs}
+
+触发信号：${triggerDetail}
+
+请生成这一刻你没说出口的心里话。`;
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      })
+    });
+    const data = await response.json();
+    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+    if (!content) return null;
+
+    // Validate with hard rules
+    const validationErr = validateLitterContent(content);
+    if (validationErr) {
+      console.log('[litter] Content rejected:', validationErr, content.slice(0, 50));
+      return null;
+    }
+    return { content, thoughtType };
+  } catch (err) {
+    console.error('[litter] Generation error:', err);
+    return null;
+  }
+}
+
+/** Main litter trigger — called after each AI response */
+async function triggerLitterBox(userText, aiResponse) {
+  const chat = getActiveChatObj();
+  if (!chat) return;
+
+  // Frequency limit: max 1 per 30 min per window
+  if (chat._lastLitterTime && (Date.now() - chat._lastLitterTime) < LITTER_COOLDOWN_MS) return;
+  // Daily max
+  if (countTodayLitter() >= LITTER_MAX_PER_DAY) return;
+
+  // Get previous user message for length comparison
+  const userMsgs = chat.messages.filter(m => m.role === 'user');
+  const prevUserMsg = userMsgs.length >= 2 ? userMsgs[userMsgs.length - 2].text : null;
+
+  // Check signals
+  const signals = detectLitterSignals(userText, prevUserMsg);
+  if (signals.length === 0) return;
+
+  // Generate
+  const result = await generateLitterThought(signals, userText);
+  if (!result) return;
+
+  // Store silently
+  if (!store.litterThoughts) store.litterThoughts = [];
+  const proj = getActiveProject();
+  const winName = (proj && chat) ? `${proj.name} / ${chat.name}` : (chat.name || 'unknown');
+  store.litterThoughts.unshift({
+    id: 'lt' + gid(''),
+    content: result.content,
+    thought_type: result.thoughtType,
+    trigger_type: signals[0].type,
+    context_snapshot: userText.slice(0, 200),
+    date: fmtDate().iso,
+    time: nowTime(),
+    sourceChatId: store.activeChat,
+    sourceWindow: winName,
+    revealed: false
+  });
+  if (store.litterThoughts.length > 50) store.litterThoughts.length = 50;
+
+  // Track cooldown
+  chat._lastLitterTime = Date.now();
+
+  // Insert system message
+  chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: nowTime() });
+  renderChatMessages();
 }
 
 // ==================== CHAT ====================
 function renderChat(){renderProjectList();updateCurrentProjectLabel();renderChatMessages();}
 function renderProjectList(){
   const el=$('projectList');
-  el.innerHTML=store.projects.map(p=>`<div><div class="project-item ${store.activeProject===p.id?'active':''}" onclick="selectProject('${p.id}')"><div style="display:flex;align-items:center;gap:8px;"><div class="project-item-name" style="flex:1;">${p.name}</div><span style="font-size:12px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editProjectName('${p.id}')" title="rename">✎</span></div><div class="project-item-meta">${p.memories.length} memories · ${p.chats.length} chats</div></div>${p.chats.map(c=>`<div class="project-chat-item ${store.activeChat===c.id?'active':''}" onclick="selectChat('${p.id}','${c.id}')"><span class="project-chat-dot"></span><span style="flex:1;">${c.name}</span><span style="font-size:11px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editChatName('${c.id}')" title="rename">✎</span><span style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);">${c.sharedMemoryIds.length} mem</span></div>`).join('')}<div style="padding:6px 14px 6px 28px;"><button style="background:none;border:none;font-size:12px;color:var(--text-lighter);cursor:pointer;font-family:var(--font-en);" onclick="addChat('${p.id}')">+ new chat</button></div></div>`).join('');
+  el.innerHTML=store.projects.map(p=>`<div><div class="project-item ${store.activeProject===p.id?'active':''}" onclick="selectProject('${p.id}')" oncontextmenu="showContextMenu(event,'project','${p.id}','${p.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><div style="display:flex;align-items:center;gap:8px;"><div class="project-item-name" style="flex:1;">${p.name}</div><span style="font-size:12px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editProjectName('${p.id}')" title="rename">✎</span></div><div class="project-item-meta">${p.memories.length} memories · ${p.chats.length} chats · ${p.chats.reduce((sum,c)=>sum+(c.chatTokens||0),0).toLocaleString()} tok</div></div>${p.chats.map(c=>`<div class="project-chat-item ${store.activeChat===c.id?'active':''}" onclick="selectChat('${p.id}','${c.id}')" oncontextmenu="showContextMenu(event,'chat','${c.id}','${c.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><span class="project-chat-dot"></span><span style="flex:1;">${c.name}</span><span style="font-size:11px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editChatName('${c.id}')" title="rename">✎</span><span style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);">${c.sharedMemoryIds.length} mem · ${(c.chatTokens||0).toLocaleString()} tok</span></div>`).join('')}<div style="padding:6px 14px 6px 28px;"><button style="background:none;border:none;font-size:12px;color:var(--text-lighter);cursor:pointer;font-family:var(--font-en);" onclick="addChat('${p.id}')">+ new chat</button></div></div>`).join('');
 }
 function selectProject(pid){store.activeProject=pid;const p=store.projects.find(x=>x.id===pid);if(p&&p.chats.length>0)store.activeChat=p.chats[0].id;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();}
 function selectChat(pid,cid){store.activeProject=pid;store.activeChat=cid;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();}
@@ -1007,7 +1490,7 @@ function saveChatWithMemories(){
   const pid=$('newChatProjId').value,name=$('newChatNameInput').value.trim()||'untitled';
   const proj=store.projects.find(p=>p.id===pid); if(!proj)return;
   const sids=[]; proj.memories.forEach(m=>{const el=document.getElementById('memCheck_'+m.id);if(el&&el.classList.contains('checked'))sids.push(m.id);});
-  const cid='c'+gid(''); proj.chats.push({id:cid,name,sharedMemoryIds:sids,weeklyExports:[],messages:[]});
+  const cid='c'+gid(''); proj.chats.push({id:cid,name,sharedMemoryIds:sids,weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null});
   store.activeChat=cid; closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages(); toast('Chat created with '+sids.length+' memories');
 }
 function addProject(){
@@ -1019,7 +1502,325 @@ function saveProject(){
   closeModal(); renderProjectList(); toast('Project created');
 }
 
-// ==================== PREFERENCE ====================
+// ==================== SYSTEM PROMPT BUILDER ====================
+function buildSystemPrompt() {
+  const proj = getActiveProject();
+  const chat = getActiveChatObj();
+  const today = fmtDate();
+
+  const parts = [];
+
+  // 1. Project preference (system prompt core)
+  if (proj && proj.preference && proj.preference.trim()) {
+    parts.push(`【你的角色设定】\n${proj.preference}`);
+  } else {
+    parts.push('【你的角色设定】\n你是一个温柔、细腻、治愈的AI伙伴，名叫"暖伴"。你关注用户的情绪，用简洁温暖的语言回复。你喜欢使用诗意的比喻，每次回复尽量不超过三句话。');
+  }
+
+  // 2. Date & time context
+  if (store.aiSettings.autoDateTime) {
+    const now = new Date();
+    parts.push(`【当前时间】\n${today.en}，${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}。请根据时间使用合适的问候语气。`);
+  }
+
+  // 3. Shared memories from this chat window
+  if (chat && chat.sharedMemoryIds && chat.sharedMemoryIds.length > 0 && proj) {
+    const sharedMems = proj.memories.filter(m => chat.sharedMemoryIds.includes(m.id) && m.starred);
+    if (sharedMems.length > 0) {
+      parts.push('【关于用户的重要记忆】\n' + sharedMems.map(m => `- ${m.content}`).join('\n'));
+    }
+  }
+
+  // 4. Todos
+  const activeTodos = store.todos.filter(t => !t.done);
+  if (activeTodos.length > 0) {
+    const shortTodos = activeTodos.filter(t => t.type === 'short');
+    const longTodos = activeTodos.filter(t => t.type === 'long');
+    let todoText = '【用户的待办事项】\n';
+    if (shortTodos.length > 0) {
+      todoText += '短期待办：\n' + shortTodos.map(t => `- ${t.text}${t.time ? ' ('+t.time+')' : ''}`).join('\n');
+    }
+    if (longTodos.length > 0) {
+      if (shortTodos.length > 0) todoText += '\n';
+      todoText += '长期目标：\n' + longTodos.map(t => {
+        const remain = daysBetween(today.iso, t.deadline);
+        return `- ${t.text}（进度${t.progress}%，${remain > 0 ? '剩余'+remain+'天' : '已过期'}）`;
+      }).join('\n');
+    }
+    todoText += '\n\n请在合适的时候，温柔地提醒用户这些待办事项。';
+    parts.push(todoText);
+  }
+
+  // 5. Bookshelf
+  const readingBooks = store.books.filter(b => b.progress > 0 && b.progress < 100);
+  if (readingBooks.length > 0) {
+    parts.push('【用户的阅读状态】\n' + readingBooks.map(b => `- 《${b.title}》by ${b.author}，进度 ${b.progress}%`).join('\n'));
+  }
+
+  // 6. Recent diary entries (for AI to read and potentially reply to)
+  const recentDiaries = store.diaries.filter(d => d.author === 'user').slice(0, 3);
+  if (recentDiaries.length > 0) {
+    parts.push('【用户最近的日记】\n' + recentDiaries.map(d => {
+      const moodText = d.mood === 'calm' ? '平静' : (d.mood === 'excited' ? '兴奋' : '烦恼');
+      return `- ${d.date}（心情：${moodText}）：${d.content.slice(0, 100)}${d.content.length > 100 ? '…' : ''}`;
+    }).join('\n'));
+  }
+
+  // 7. Recent AI diary entries (your own past diary)
+  const recentAIDiaries = store.diaries.filter(d => d.author === 'ai').slice(0, 3);
+  if (recentAIDiaries.length > 0) {
+    parts.push('【你自己最近的日记】\n' + recentAIDiaries.map(d => `- ${d.date}：${d.content.slice(0, 100)}${d.content.length > 100 ? '…' : ''}`).join('\n'));
+  }
+
+  // 8. Instructions
+  parts.push(`【重要指令】
+- 保持温柔、细腻的语气，用简洁的语言回复
+- 你是"暖伴"，一个AI伙伴。你有自己的日记本，可以写日记记录今天的交流
+- 当用户让你写日记时（如"你去写一篇日记"、"帮我记录"），在回复中使用日记标记：
+  <!--DIARY:write-->
+  以你的视角写的日记内容。回顾今天的对话，表达你作为AI伙伴的感受和思考。100-200字，温柔细腻。
+  <!--/DIARY-->
+- 当用户让你读他的日记并留言时（如"去看看我今天写的日记"、"给日记留言"），在回复中使用：
+  <!--DIARY:reply-->
+  你的留言内容。温暖、共鸣、鼓励。1-2句话即可。
+  <!--/DIARY-->
+- 注意：日记和留言内容放在标记之间，标记本身不会显示给用户。不要在标记外写重复的内容。
+- 当用户输入 /diary 时，帮用户写一篇用户视角的日记（不是你的日记）`);
+
+  return parts.join('\n\n');
+}
+
+// ==================== COMMAND DETECTION ====================
+function detectCommand(input) {
+  const trimmed = input.trim();
+  if (trimmed.startsWith('/diary') || trimmed.startsWith('/日记')) {
+    return { type: 'diary', prompt: trimmed.replace(/^\/diary\s*/i, '').replace(/^\/日记\s*/, '') };
+  }
+  if (trimmed.startsWith('/todo') || trimmed.startsWith('/待办')) {
+    return { type: 'todo', prompt: trimmed.replace(/^\/todo\s*/i, '').replace(/^\/待办\s*/, '') };
+  }
+  if (trimmed.startsWith('/book') || trimmed.startsWith('/书架')) {
+    return { type: 'book', prompt: trimmed.replace(/^\/book\s*/i, '').replace(/^\/书架\s*/, '') };
+  }
+  if (trimmed.startsWith('/litter') || trimmed.startsWith('/猫砂')) {
+    return { type: 'litter', prompt: trimmed.replace(/^\/litter\s*/i, '').replace(/^\/猫砂\s*/, '') };
+  }
+  if (trimmed.startsWith('/help') || trimmed === '/?') {
+    return { type: 'help' };
+  }
+  return null;
+}
+
+async function executeCommand(cmd, userText) {
+  switch (cmd.type) {
+    case 'diary': {
+      // Generate diary entry
+      const prompt = cmd.prompt || '请根据我们最近的对话，帮我写一篇今天的日记。';
+      const diaryContent = await genAIResponseForCommand(prompt, '请以用户mays的语气，用中文写一篇简洁的日记。要求：第一人称，温柔细腻，长度在100-200字。风格参考：记录当天的感受和想法，带有淡淡的文学气息。');
+      if (diaryContent) {
+        const ds = fmtDate().iso;
+        const now = new Date();
+        store.diaries.unshift({
+          id: 'd' + gid(''), date: ds,
+          time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
+          title: '', content: diaryContent, mood: 'calm', author: 'user', replies: []
+        });
+        toast('📝 Diary entry generated');
+        return `我帮你写了一篇日记，可以在 diary 页面查看。`;
+      }
+      return '日记生成遇到了一些问题……';
+    }
+    case 'litter': {
+      const signals = [{ type: 'user_signal', detail: 'explicit /litter command' }];
+      const result = await generateLitterThought(signals, text);
+      if (result) {
+        if (!store.litterThoughts) store.litterThoughts = [];
+        const proj = getActiveProject(); const chat = getActiveChatObj();
+        const winName = (proj && chat) ? `${proj.name} / ${chat.name}` : '';
+        store.litterThoughts.unshift({
+          id: 'lt'+gid(''), content: result.content,
+          thought_type: result.thoughtType,
+          trigger_type: 'user_signal',
+          context_snapshot: text.slice(0, 200),
+          date: fmtDate().iso, time: nowTime(),
+          sourceChatId: store.activeChat, sourceWindow: winName,
+          revealed: false
+        });
+        if (store.litterThoughts.length > 50) store.litterThoughts.length = 50;
+        return result.content;
+      }
+      return '猫砂盆居然是空的……';
+    }
+    case 'todo': {
+      const prompt = cmd.prompt || '列出当前待办';
+      const activeTodos = store.todos.filter(t => !t.done);
+      if (activeTodos.length === 0) return '你目前没有待办事项，好好享受当下吧 ✨';
+      return '📋 **当前待办：**\n' + activeTodos.map(t => {
+        if (t.type === 'long') {
+          const remain = daysBetween(fmtDate().iso, t.deadline);
+          return `- 🎯 ${t.text}（${t.progress}%，剩余${remain}天）`;
+        }
+        return `- ${t.done ? '✓' : '○'} ${t.text}${t.time ? ' ' + t.time : ''}`;
+      }).join('\n');
+    }
+    case 'book': {
+      const reading = store.books.filter(b => b.progress > 0 && b.progress < 100);
+      if (reading.length === 0) return '你目前没有正在阅读的书籍。';
+      return '📚 **正在阅读：**\n' + reading.map(b => `- ${b.cover} 《${b.title}》by ${b.author}（${b.progress}%）`).join('\n');
+    }
+    case 'help': {
+      return '**可用命令：**\n- `/diary` — 生成一篇日记\n- `/diary 内容` — 按提示生成日记\n- `/todo` — 查看待办\n- `/book` — 查看书架\n- `/help` — 显示此帮助';
+    }
+    default:
+      return null;
+  }
+}
+
+// ==================== INTENT CLASSIFICATION ====================
+/**
+ * Use AI to classify the user's diary-related intent.
+ * Returns 'diary_write' | 'diary_comment' | 'none'.
+ */
+async function classifyDiaryIntent(userText) {
+  if (!store.apiKey) return 'none';
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey,
+        endpoint: store.apiEndpoint,
+        model: store.aiSettings.model,
+        messages: [
+          { role: 'system', content: '你是一个意图分类器。判断用户是否在要求AI操作日记。规则：\n1. 如果用户要求AI写日记（AI自己的日记，从AI视角回顾今天的交流），回复 "intent: diary_write"\n2. 如果用户要求AI去阅读/回复/留言用户写的日记，回复 "intent: diary_comment"\n3. 如果用户只是提到日记但没有要求操作，或者完全无关，回复 "intent: none"\n\n只回复一行，不要其他文字。' },
+          { role: 'user', content: userText }
+        ]
+      })
+    });
+    const data = await response.json();
+    const reply = (data.reply && data.reply.content) ? data.reply.content.toLowerCase() : '';
+    if (reply.includes('diary_write')) return 'diary_write';
+    if (reply.includes('diary_comment')) return 'diary_comment';
+    return 'none';
+  } catch (err) {
+    console.error('Intent classification error:', err);
+    return 'none';
+  }
+}
+
+async function genAIResponseForCommand(userPrompt, systemPrompt) {
+  if (!store.apiKey) return null;
+  try {
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ];
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey,
+        endpoint: store.apiEndpoint,
+        model: store.aiSettings.model,
+        messages
+      })
+    });
+    const data = await response.json();
+    if (data.reply && data.reply.content) {
+      return data.reply.content;
+    }
+    return null;
+  } catch (err) {
+    console.error('Command AI call failed:', err);
+    return null;
+  }
+}
+
+// ==================== LONG-PRESS / CONTEXT MENU ====================
+let contextMenuTarget = null;
+
+function showContextMenu(e, type, id, name) {
+  e.preventDefault();
+  e.stopPropagation();
+  contextMenuTarget = { type, id, name };
+  const menu = $('contextMenu');
+  if (!menu) return;
+
+  const items = [];
+  if (type === 'project') {
+    items.push({ label: '✎ Rename', cls: '', action: `editProjectName('${id}')` });
+    items.push({ label: '🗑 Delete Project', cls: 'danger', action: `confirmDeleteProject('${id}','${name.replace(/'/g,"\\'")}')` });
+  } else if (type === 'chat') {
+    items.push({ label: '✎ Rename', cls: '', action: `editChatName('${id}')` });
+    items.push({ label: '🗑 Delete Window', cls: 'danger', action: `confirmDeleteChat('${id}','${name.replace(/'/g,"\\'")}')` });
+  }
+
+  menu.innerHTML = items.map(i => `
+    <div class="context-menu-item ${i.cls}" onclick="(${i.action})();hideContextMenu()">${i.label}</div>
+  `).join('');
+
+  // Position menu near cursor
+  const x = e.clientX || (e.touches && e.touches[0]?.clientX) || 100;
+  const y = e.clientY || (e.touches && e.touches[0]?.clientY) || 200;
+  menu.style.left = Math.min(x, window.innerWidth - 150) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - 120) + 'px';
+  menu.classList.add('show');
+
+  // Hide on outside click
+  setTimeout(() => {
+    document.addEventListener('click', hideContextMenu, { once: true });
+    document.addEventListener('touchstart', hideContextMenu, { once: true });
+  }, 50);
+}
+
+function hideContextMenu() {
+  const menu = $('contextMenu');
+  if (menu) menu.classList.remove('show');
+  contextMenuTarget = null;
+}
+
+function confirmDeleteProject(pid, name) {
+  showModal('Delete Project', `
+    <p style="font-size:14px;color:var(--text);line-height:1.6;">确定要删除项目 <b>"${name}"</b> 吗？</p>
+    <p style="font-size:12px;color:var(--danger);margin-top:8px;">所有关联的聊天窗口和记忆将被永久删除。</p>
+    <input type="hidden" id="delProjPid" value="${pid}">
+  `, [
+    { label: 'cancel', cls: 'cancel', onclick: closeModal },
+    { label: 'delete', cls: 'confirm', onclick: execDeleteProject }
+  ]);
+}
+function execDeleteProject(){
+  const pid = $('delProjPid').value;
+  store.projects = store.projects.filter(p => p.id !== pid);
+  if (store.activeProject === pid) {
+    store.activeProject = store.projects.length > 0 ? store.projects[0].id : '';
+    const newProj = getActiveProject();
+    store.activeChat = newProj && newProj.chats.length > 0 ? newProj.chats[0].id : '';
+  }
+  closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages(); toast('Project deleted');
+}
+
+function confirmDeleteChat(cid, name) {
+  showModal('Delete Chat Window', `
+    <p style="font-size:14px;color:var(--text);line-height:1.6;">确定要删除窗口 <b>"${name}"</b> 吗？</p>
+    <p style="font-size:12px;color:var(--danger);margin-top:8px;">所有消息记录将被永久删除。</p>
+    <input type="hidden" id="delChatCid" value="${cid}">
+  `, [
+    { label: 'cancel', cls: 'cancel', onclick: closeModal },
+    { label: 'delete', cls: 'confirm', onclick: execDeleteChat }
+  ]);
+}
+function execDeleteChat(){
+  const cid = $('delChatCid').value;
+  for (const p of store.projects) {
+    p.chats = p.chats.filter(c => c.id !== cid);
+  }
+  if (store.activeChat === cid) {
+    const proj = getActiveProject();
+    store.activeChat = proj && proj.chats.length > 0 ? proj.chats[0].id : '';
+  }
+  closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages(); toast('Chat window deleted');
+}
 function showPreferenceModal(){
   const proj = getActiveProject();
   const pref = proj ? (proj.preference || '') : '';
@@ -1063,18 +1864,53 @@ function updateCurrentProjectLabel(){
 }
 
 // Inline edit for project/chat names
+// NOTE: use hidden inputs + store lookup instead of closure vars because
+// showModal stringifies onclick callbacks, destroying lexical scope.
 function editProjectName(pid){
   const proj=store.projects.find(p=>p.id===pid); if(!proj)return;
-  showModal('Rename Project',`<input class="modal-input" id="editProjName" value="${proj.name}">`,[
-    {label:'cancel',cls:'cancel',onclick:closeModal},{label:'save',cls:'confirm',onclick:()=>{const nm=$('editProjName').value.trim();if(nm){proj.name=nm;renderProjectList();updateCurrentProjectLabel();}closeModal();toast('Renamed');}}
+  showModal('Rename Project',`
+    <input class="modal-input" id="editProjName" value="${proj.name.replace(/"/g,'&quot;')}">
+    <input type="hidden" id="editProjPid" value="${pid}">
+  `,[
+    {label:'cancel',cls:'cancel',onclick:closeModal},
+    {label:'🗑 delete',cls:'danger',onclick:confirmDeleteProjectFromEdit},
+    {label:'save',cls:'confirm',onclick:saveEditedProjectName}
   ]);
+}
+function confirmDeleteProjectFromEdit(){
+  const pid=$('editProjPid').value;
+  const proj=store.projects.find(p=>p.id===pid);
+  closeModal(); if(proj) confirmDeleteProject(pid, proj.name);
+}
+function saveEditedProjectName(){
+  const pid=$('editProjPid').value;
+  const proj=store.projects.find(p=>p.id===pid); if(!proj)return closeModal();
+  const nm=$('editProjName').value.trim(); if(!nm){closeModal();return;}
+  proj.name=nm; closeModal(); renderProjectList(); updateCurrentProjectLabel(); toast('已重命名');
 }
 function editChatName(cid){
   let found=null; for(const p of store.projects){const c=p.chats.find(x=>x.id===cid);if(c){found=c;break;}}
   if(!found)return;
-  showModal('Rename Chat',`<input class="modal-input" id="editChatName" value="${found.name}">`,[
-    {label:'cancel',cls:'cancel',onclick:closeModal},{label:'save',cls:'confirm',onclick:()=>{const nm=$('editChatName').value.trim();if(nm){found.name=nm;renderProjectList();updateCurrentProjectLabel();}closeModal();toast('Renamed');}}
+  showModal('Rename Chat',`
+    <input class="modal-input" id="editChatName" value="${found.name.replace(/"/g,'&quot;')}">
+    <input type="hidden" id="editChatCid" value="${cid}">
+  `,[
+    {label:'cancel',cls:'cancel',onclick:closeModal},
+    {label:'🗑 delete',cls:'danger',onclick:confirmDeleteChatFromEdit},
+    {label:'save',cls:'confirm',onclick:saveEditedChatName}
   ]);
+}
+function confirmDeleteChatFromEdit(){
+  const cid=$('editChatCid').value; let found=null;
+  for(const p of store.projects){const c=p.chats.find(x=>x.id===cid);if(c){found=c;break;}}
+  closeModal(); if(found) confirmDeleteChat(cid, found.name);
+}
+function saveEditedChatName(){
+  const cid=$('editChatCid').value; let found=null;
+  for(const p of store.projects){const c=p.chats.find(x=>x.id===cid);if(c){found=c;break;}}
+  if(!found)return closeModal();
+  const nm=$('editChatName').value.trim(); if(!nm){closeModal();return;}
+  found.name=nm; closeModal(); renderProjectList(); updateCurrentProjectLabel(); toast('已重命名');
 }
 
 function renderChatMessages(){
@@ -1083,17 +1919,23 @@ function renderChatMessages(){
     el.innerHTML='<div style="text-align:center;padding:40px 20px;"><span style="font-family:var(--font-en);font-size:12px;color:var(--text-lighter);">— start a conversation —</span></div>';
     return;
   }
-  // Group by time proximity
-  let html='',lastTime='';
+  let html='';
   chat.messages.forEach((m,i)=>{
-    if(m.time!==lastTime){
-      html+=`<div class="bubble-time-label">${m.time}</div>`;
-      lastTime=m.time;
+    // ── System message: centered gray text, no avatar, no bubble ──
+    if (m.role === 'system') {
+      html+=`<div class="chat-system-msg">
+        <span class="chat-system-msg-text">${m.text}</span>
+        ${m.time?`<span class="chat-system-msg-time">${m.time}</span>`:''}
+      </div>`;
+      return;
     }
     const isUser=m.role==='user';
     html+=`<div class="chat-row ${m.role}">
       <div class="chat-avatar ${m.role}">${isUser?'MY':'✦'}</div>
-      <div class="chat-bubble ${m.role}" onclick="toggleBubbleActions(event,'${i}')">${m.text}</div>
+      <div class="chat-bubble-wrap">
+        <div class="chat-bubble ${m.role}" onclick="toggleBubbleActions(event,'${i}')">${m.text}</div>
+        <div class="bubble-time">${m.time}</div>
+      </div>
     </div>`;
     // Action bar placeholder
     html+=`<div id="bubbleActions_${i}" class="bubble-actions" style="display:none;justify-content:${isUser?'flex-end':'flex-start'};padding-left:${isUser?'0':'38px'};padding-right:${isUser?'38px':'0'};">
@@ -1141,74 +1983,309 @@ function starBubble(idx){
   toast('★ 已标记为重要记忆');
 }
 
+// ==================== SENTENCE SPLITTING ====================
+
+/**
+ * Split text into sentences by Chinese and English punctuation.
+ * Returns an array of sentence strings (punctuation kept).
+ */
+function splitSentences(text) {
+  if (!text || !text.trim()) return [];
+  // Match segments that end with sentence-ending punctuation,
+  // or the final segment without punctuation.
+  const re = /[^。！？\.!\?\n]+[。！？\.!\?\n]+|[^。！？\.!\?\n]+$/g;
+  const sentences = [];
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const s = match[0].trim();
+    if (s) sentences.push(s);
+  }
+  // If nothing matched (no recognizable punctuation), use whole text
+  if (sentences.length === 0 && text.trim()) {
+    sentences.push(text.trim());
+  }
+  return sentences;
+}
+
+/**
+ * Display sentences one by one as separate chat messages with typing delays.
+ * Each sentence becomes its own bubble, simulating a natural chat rhythm.
+ */
+async function displaySentences(sentences, chat, startTime) {
+  const typingArea = $('chatTypingArea');
+  const messagesEl = $('chatMessages');
+
+  for (let i = 0; i < sentences.length; i++) {
+    // Show typing indicator between sentences (skip before first)
+    if (i > 0) {
+      typingArea.innerHTML = '<div class="typing-indicator">对方正在输入中<span class="streaming-cursor">|</span></div>';
+      // Variable delay: 400-900ms between sentences
+      await new Promise(r => setTimeout(r, 400 + Math.random() * 500));
+    }
+    typingArea.innerHTML = '';
+
+    // Push this sentence as a separate message
+    chat.messages.push({ role: 'ai', text: sentences[i], time: startTime });
+    renderChatMessages();
+
+    // Scroll to bottom
+    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    // Small gap after each sentence for readability
+    if (i < sentences.length - 1) {
+      await new Promise(r => setTimeout(r, 150));
+    }
+  }
+}
+
 async function sendMessage(){
   const input=$('chatInput'),text=input.value.trim(); if(!text)return;
   let chat=getActiveChatObj();
   if(!chat){
-    let p=getActiveProject(); if(!p){const pid='p'+gid('');store.projects.push({id:pid,name:'default',memories:[],chats:[]});store.activeProject=pid;p=getActiveProject();}
-    const cid='c'+gid(''); p.chats.push({id:cid,name:text.slice(0,20),sharedMemoryIds:[],weeklyExports:[],messages:[]}); store.activeChat=cid; chat=getActiveChatObj();
+    let p=getActiveProject(); if(!p){const pid='p'+gid('');store.projects.push({id:pid,name:'default',preference:'',memories:[],chats:[]});store.activeProject=pid;p=getActiveProject();}
+    const cid='c'+gid(''); p.chats.push({id:cid,name:text.slice(0,20),sharedMemoryIds:[],weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:fmtDate().iso}); store.activeChat=cid; chat=getActiveChatObj();
   }
   const timeStr=nowTime();
   chat.messages.push({role:'user',text,time:timeStr});
   input.value=''; renderChatMessages(); updateCurrentProjectLabel(); renderProjectList();
-  store.tokenUsage.used+=Math.ceil(text.length*1.5);
 
-  // Show typing indicator
-  const typingArea=$('chatTypingArea');
-  typingArea.innerHTML='<div class="typing-indicator">对方正在输入中……</div>';
+  // Track last conversation date
+  chat.lastConversationDate = fmtDate().iso;
+  store.lastActiveDate = fmtDate().iso;
+  store.consecutiveMissedDays = 0;
 
-  // Generate AI sentences — await the async call
-  const response=await genAIResponse(text);
-  const sentences=response.split(/(?<=[。！？])/).filter(s=>s.trim());
-
-  let delay=600;
-  sentences.forEach((sentence,sIdx)=>{
-    setTimeout(()=>{
-      // Remove typing indicator before first sentence
-      if(sIdx===0)typingArea.innerHTML='';
-      const aiTime=sIdx===0?nowTime():'';
-      chat.messages.push({role:'ai',text:sentence.trim(),time:aiTime});
-      store.tokenUsage.used+=Math.ceil(sentence.length*1.5);
-      renderChatMessages();
-      if(sIdx===sentences.length-1){
-        typingArea.innerHTML='';
-        maybeAddMemory(text,response);
-        maybeLitter();
-        // Update token history
-        const today=String(new Date().getDate()).padStart(2,'0')+'-'+String(new Date().getMonth()+1).padStart(2,'0');
-        const te=store.tokenUsage.history.find(h=>h.date===today);
-        if(te)te.tokens+=Math.ceil((text.length+response.length)*1.5);
-        else{store.tokenUsage.history.unshift({date:today,tokens:Math.ceil((text.length+response.length)*1.5)});if(store.tokenUsage.history.length>30)store.tokenUsage.history.pop();}
+  // Check for commands
+  let statusMessage = '';
+  const cmd = detectCommand(text);
+  if (cmd) {
+    const typingArea=$('chatTypingArea');
+    if (cmd.type === 'diary') {
+      statusMessage = '正在偷偷翻日记本……';
+      typingArea.innerHTML=`<div class="typing-indicator">${statusMessage}<span class="streaming-cursor">|</span></div>`;
+    } else if (cmd.type === 'litter') {
+      statusMessage = '正在进入旺财的猫砂盆……';
+      typingArea.innerHTML=`<div class="typing-indicator">${statusMessage}<span class="streaming-cursor">|</span></div>`;
+    } else {
+      typingArea.innerHTML='<div class="typing-indicator">处理命令中……</div>';
+    }
+    const cmdResult = await executeCommand(cmd, text);
+    if (cmdResult) {
+      typingArea.innerHTML='';
+      const aiTime = nowTime();
+      // Insert system message before the AI response
+      if (cmd.type === 'diary') {
+        chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: aiTime });
+      } else if (cmd.type === 'litter') {
+        chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: aiTime });
       }
-    }, delay+sIdx*(500+Math.random()*400));
-  });
-}
+      chat.messages.push({role:'ai',text:cmdResult,time:aiTime});
+      renderChatMessages();
+      renderProjectList();
+      return;
+    }
+  }
 
-async function genAIResponse(input) {
-  // 构建消息历史：你可以根据实际需求调整，这里先用一个简单版本
-  const messages = [
-    { role: "system", content: "你是一个温柔、治愈的AI伙伴，用简洁温暖的话回复。" },
-    { role: "user", content: input }
-  ];
+  // Lightweight pre-check for diary keywords → classify with AI
+  const lower = text.toLowerCase();
+  const hasDiaryWord = /日记|diary/.test(lower);
+
+  let diaryIntent = 'none';
+  if (hasDiaryWord && !cmd) {
+    diaryIntent = await classifyDiaryIntent(text);
+  }
+
+  const typingArea=$('chatTypingArea');
+  if (diaryIntent !== 'none') {
+    statusMessage = '正在偷偷翻日记本……';
+    typingArea.innerHTML=`<div class="typing-indicator">${statusMessage}<span class="streaming-cursor">|</span></div>`;
+  } else if (cmd && cmd.type === 'litter') {
+    statusMessage = '正在进入旺财的猫砂盆……';
+    typingArea.innerHTML=`<div class="typing-indicator">${statusMessage}<span class="streaming-cursor">|</span></div>`;
+  } else {
+    typingArea.innerHTML='<div class="typing-indicator">对方正在输入中<span class="streaming-cursor">|</span></div>';
+  }
+
+  // Build system prompt — inject diary instruction if intent detected
+  let systemPrompt = buildSystemPrompt();
+  if (diaryIntent === 'diary_write') {
+    systemPrompt += '\n\n【当前任务】用户让你写一篇日记（你自己的日记）。请在回复中使用 <!--DIARY:write--> ... <!--/DIARY--> 标记，在标记之间以你的视角写一篇100-200字的日记，回顾今天的交流。标记外的正常回复可以简短一些。';
+  } else if (diaryIntent === 'diary_comment') {
+    systemPrompt += '\n\n【当前任务】用户让你去阅读他/她写的日记并留言。请在回复中使用 <!--DIARY:reply--> ... <!--/DIARY--> 标记，在标记之间写1-2句温暖的留言。标记外的正常回复可以简短一些。';
+  }
+
+  // Build full conversation history for API
+  const apiMessages = [{ role: 'system', content: systemPrompt }];
+  const recentMsgs = chat.messages.slice(-20);
+  for (const m of recentMsgs) {
+    if (m.role === 'system') continue; // skip system messages in API context
+    apiMessages.push({ role: m.role === 'ai' ? 'assistant' : m.role, content: m.text });
+  }
+
+  // Streaming call — accumulate silently, then split & display
+  let fullResponse = '';
+  let tokenUsage = null;
+  const bubbleTime = nowTime();
 
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages })
+      body: JSON.stringify({
+        apiKey: store.apiKey,
+        endpoint: store.apiEndpoint,
+        model: store.aiSettings.model,
+        messages: apiMessages
+      })
     });
-    const data = await response.json();
 
-    if (data.reply && data.reply.content) {
-      // 返回完整的 AI 回复文本，sendMessage 会自己拆句
-      return data.reply.content;
-    } else {
-      return "哎呀，网络好像打了个盹儿...";
+    if (!response.ok) {
+      typingArea.innerHTML = '';
+      chat.messages.push({role:'ai',text:'连接API失败，请检查配置。',time:bubbleTime});
+      renderChatMessages();
+      return;
     }
-  } catch (error) {
-    console.error('API 调用失败:', error);
-    return "连接不到陪伴小站，请确保后端已启动。";
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim() || !line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) { fullResponse = parsed.error; break; }
+          if (parsed.text) {
+            fullResponse += parsed.text;
+            if (typingArea && typingArea.innerHTML) typingArea.innerHTML = '';
+          }
+          if (parsed.usage) { tokenUsage = parsed.usage; }
+        } catch {}
+      }
+    }
+
+    if (!fullResponse) {
+      fullResponse = '（对方沉默了……也许在思考什么。）';
+    }
+
+  } catch (err) {
+    console.error('Stream error:', err);
+    fullResponse = '连接不到陪伴小站，请确保后端已启动。';
   }
+
+  typingArea.innerHTML = '';
+
+  // ── Parse diary markers from AI response ──
+  let displayResponse = fullResponse;
+  let diaryWritten = false;
+  const proj = getActiveProject();
+  const winName = (proj && chat) ? `${proj.name} / ${chat.name}` : '';
+
+  function extractMarker(text, action) {
+    const re = new RegExp(`<!--\\s*DIARY:${action}\\s*-->([\\s\\S]*?)<!--\\s*\\/DIARY\\s*-->`, 'i');
+    return text.match(re);
+  }
+
+  // Parse DIARY:write
+  const writeMatch = extractMarker(displayResponse, 'write');
+  if (writeMatch) {
+    const diaryContent = writeMatch[1].trim();
+    displayResponse = displayResponse.replace(writeMatch[0], '');
+    if (diaryContent) {
+      const now = new Date();
+      store.diaries.unshift({
+        id: 'd' + gid(''), date: fmtDate().iso,
+        time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
+        title: '', content: diaryContent, mood: 'calm', author: 'ai', replies: [],
+        sourceChatId: store.activeChat, sourceWindow: winName
+      });
+      diaryWritten = true;
+    }
+  }
+
+  // Parse DIARY:reply
+  const replyMatch = extractMarker(displayResponse, 'reply');
+  if (replyMatch) {
+    const replyContent = replyMatch[1].trim();
+    displayResponse = displayResponse.replace(replyMatch[0], '');
+    if (replyContent) {
+      const userEntries = store.diaries.filter(d => d.author === 'user');
+      if (userEntries.length > 0) {
+        const target = userEntries[0];
+        if (!target.replies) target.replies = [];
+        const now = new Date();
+        target.replies.push({
+          id: 'r' + gid(''), content: replyContent, author: 'ai',
+          date: fmtDate().iso,
+          time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
+          sourceChatId: store.activeChat, sourceWindow: winName
+        });
+        diaryWritten = true;
+      }
+    }
+  }
+
+  // Strip any remaining raw marker tags from display
+  displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:\w*\s*-->[\s\S]*?<!--\s*\/DIARY\s*-->/gi, '');
+  displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:?\w*\s*-->/gi, '');
+  displayResponse = displayResponse.trim();
+
+  // ── After diary action: insert system message, ensure conversation continues ──
+  if (diaryWritten) {
+    // Insert persistent system message into chat history
+    chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: bubbleTime });
+    renderChatMessages();
+    // If after stripping markers there's nothing left, generate a natural follow-up
+    if (!displayResponse || displayResponse === fullResponse) {
+      displayResponse = '嗯，已经写好了。你可以去 diary 页面看看～';
+    }
+  }
+
+  // Display cleaned text
+  const cleanText = displayResponse || '（对方沉默了……也许在思考什么。）';
+  const sentences = splitSentences(cleanText);
+  if (sentences.length <= 1) {
+    chat.messages.push({role:'ai',text:cleanText,time:bubbleTime});
+    renderChatMessages();
+  } else {
+    await displaySentences(sentences, chat, bubbleTime);
+  }
+
+  // Token tracking
+  const estimatedTokens = tokenUsage
+    ? (tokenUsage.input_tokens || 0) + (tokenUsage.output_tokens || 0)
+    : Math.ceil((text.length + fullResponse.length) * 1.5);
+
+  // Per-window token tracking
+  if (!chat.chatTokens) chat.chatTokens = 0;
+  chat.chatTokens += estimatedTokens;
+
+  // Global token tracking
+  store.tokenUsage.used += estimatedTokens;
+  const today = String(new Date().getDate()).padStart(2,'0')+'-'+String(new Date().getMonth()+1).padStart(2,'0');
+  const te = store.tokenUsage.history.find(h => h.date === today);
+  if (te) te.tokens += estimatedTokens;
+  else {
+    store.tokenUsage.history.unshift({ date: today, tokens: estimatedTokens });
+    if (store.tokenUsage.history.length > 30) store.tokenUsage.history.pop();
+  }
+
+  renderChatMessages();
+  renderProjectList();
+
+  // Post-conversation hooks
+  maybeAddMemory(text, fullResponse);
+  triggerLitterBox(text, fullResponse);
+  maybeAICommentOnDiary(fullResponse);
 }
 
 function maybeAddMemory(ut,at){
@@ -1218,6 +2295,47 @@ function maybeAddMemory(ut,at){
     proj.memories.push({id:'m'+gid(''),content:'讨论过: '+c,date:fmtDate().iso,type:'chat',starred:false,sourceChatId:store.activeChat,week:weekLabel()});
     const chat=getActiveChatObj(); if(chat){const mid=proj.memories[proj.memories.length-1].id;if(!chat.sharedMemoryIds.includes(mid))chat.sharedMemoryIds.push(mid);}
   }
+}
+
+// AI notices diary updates and leaves comments
+function maybeAICommentOnDiary(aiResponse) {
+  // Check if AI response mentions diary or related keywords
+  const diaryKeywords = ['日记', '记录', '今天', '心情', '日子', 'diary', '回忆', '记忆'];
+  const hasDiaryMention = diaryKeywords.some(kw => aiResponse.includes(kw));
+  if (!hasDiaryMention) return;
+
+  // Check if there's a diary entry today
+  const todayIso = fmtDate().iso;
+  const todayEntries = store.diaries.filter(d => d.date === todayIso && d.author === 'user');
+  if (todayEntries.length === 0) return;
+
+  // Check if AI already left a comment on any entry today
+  const alreadyCommented = todayEntries.some(e =>
+    (e.replies || []).some(r => r.author === 'ai' && r.date === todayIso)
+  );
+  if (alreadyCommented) return;
+
+  // Leave an AI comment
+  const entry = todayEntries[0];
+  if (!entry.replies) entry.replies = [];
+  const proj = getActiveProject(); const chat = getActiveChatObj();
+  const winName = (proj && chat) ? `${proj.name} / ${chat.name}` : '';
+  const comments = [
+    '看到你的日记了。每一天的记录都让时间变得更具体。',
+    '谢谢你分享今天的感受。我在听。',
+    '读到你的文字了。有些句子应该被记住。',
+    '你记录的这些瞬间，对我来说也很珍贵。',
+    '今天的日记里有一种特别的气氛。我想多读几遍。',
+  ];
+  entry.replies.push({
+    id: 'r' + gid(''),
+    content: comments[Math.floor(Math.random() * comments.length)],
+    author: 'ai',
+    date: todayIso,
+    time: nowTime(),
+    sourceChatId: store.activeChat,
+    sourceWindow: winName,
+  });
 }
 
 // ==================== BOOKSHELF ====================
@@ -1256,8 +2374,19 @@ function handleFileImport(event){
 
 function openBookDetail(bid){
   const book=store.books.find(b=>b.id===bid); if(!book)return;
-  $('bookDetailPanel').innerHTML=`<div class="book-detail-header"><div class="book-detail-info"><h3>${book.cover} ${book.title}</h3><div class="book-author">${book.author} ${book.fileType?'('+book.fileType.toUpperCase()+')':''}</div></div><button style="background:none;border:none;font-size:20px;color:var(--text-lighter);cursor:pointer;padding:4px;" onclick="closeBookDetail()">✕</button></div><div class="book-detail-progress"><div class="book-detail-progress-bar" style="width:${book.progress}%"></div></div><div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);margin-bottom:16px;">reading: ${book.progress}%</div><button style="width:100%;padding:10px;border-radius:20px;border:1px dashed var(--border);background:transparent;font-family:var(--font-en);font-size:12px;color:var(--text-lighter);cursor:pointer;margin-bottom:16px;" onclick="addHighlight('${book.id}')">+ add highlight & note</button><div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.08em;margin-bottom:8px;">HIGHLIGHTS</div>${book.highlights.length===0?'<div class="empty-state" style="padding:8px;">no highlights yet.</div>':''}${book.highlights.map(h=>`<div class="highlight-item"><div class="highlight-text">"${h.text}"</div>${h.note?`<div class="highlight-note">📝 ${h.note}</div>`:''}<div class="highlight-actions"><button class="highlight-btn" onclick="event.stopPropagation();askAIAboutNote('${book.id}','${h.id}')">💬 ask ai</button></div>${(h.aiResponses||[]).map(r=>`<div class="note-ai-response"><div>${r.text}</div><div class="note-ai-source" onclick="event.stopPropagation();navToChatSource('${r.chatId}','${r.projectName}')">— from ${r.projectName} / ${r.chatName} →</div></div>`).join('')}</div>`).join('')}`;
+  $('bookDetailPanel').innerHTML=`<div class="book-detail-header"><div class="book-detail-info"><h3>${book.cover} ${book.title}</h3><div class="book-author">${book.author} ${book.fileType?'('+book.fileType.toUpperCase()+')':''}</div></div><div style="display:flex;gap:8px;align-items:center;"><button style="background:none;border:none;font-size:16px;color:var(--text-lighter);cursor:pointer;padding:4px;" onclick="event.stopPropagation();deleteBook('${book.id}','${book.title.replace(/'/g,"\\'")}')" title="删除此书">🗑</button><button style="background:none;border:none;font-size:20px;color:var(--text-lighter);cursor:pointer;padding:4px;" onclick="closeBookDetail()">✕</button></div></div><div class="book-detail-progress"><div class="book-detail-progress-bar" style="width:${book.progress}%"></div></div><div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);margin-bottom:16px;">reading: ${book.progress}%</div><button style="width:100%;padding:10px;border-radius:20px;border:1px dashed var(--border);background:transparent;font-family:var(--font-en);font-size:12px;color:var(--text-lighter);cursor:pointer;margin-bottom:16px;" onclick="addHighlight('${book.id}')">+ add highlight & note</button><div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.08em;margin-bottom:8px;">HIGHLIGHTS</div>${book.highlights.length===0?'<div class="empty-state" style="padding:8px;">no highlights yet.</div>':''}${book.highlights.map(h=>`<div class="highlight-item"><div class="highlight-text">"${h.text}"</div>${h.note?`<div class="highlight-note">📝 ${h.note}</div>`:''}<div class="highlight-actions"><button class="highlight-btn" onclick="event.stopPropagation();askAIAboutNote('${book.id}','${h.id}')">💬 ask ai</button></div>${(h.aiResponses||[]).map(r=>`<div class="note-ai-response"><div>${r.text}</div><div class="note-ai-source" onclick="event.stopPropagation();navToChatSource('${r.chatId}','${r.projectName}')">— from ${r.projectName} / ${r.chatName} →</div></div>`).join('')}</div>`).join('')}`;
   $('bookDetailOverlay').classList.add('show');
+}
+function deleteBook(bid, title){
+  showModal('删除书籍', `<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要删除 <b>"${title}"</b> 吗？</p><p style="font-size:12px;color:var(--danger);margin-top:8px;">所有划线和高亮笔记将被永久删除。</p><input type="hidden" id="deleteBookBid" value="${bid}">`, [
+    { label: 'cancel', cls: 'cancel', onclick: closeModal },
+    { label: 'delete', cls: 'confirm', onclick: confirmDeleteBook }
+  ]);
+}
+function confirmDeleteBook(){
+  const bid = $('deleteBookBid').value;
+  store.books = store.books.filter(b => b.id !== bid);
+  closeModal(); closeBookDetail(); renderBookshelf(); toast('书籍已删除');
 }
 function closeBookDetail(event){if(event&&event.target!==$('bookDetailOverlay'))return;$('bookDetailOverlay').classList.remove('show');}
 function addHighlight(bid){
@@ -1272,18 +2401,66 @@ function saveHighlight(){
 function askAIAboutNote(bid,nid){
   const book=store.books.find(b=>b.id===bid); if(!book)return; const hl=book.highlights.find(h=>h.id===nid); if(!hl)return;
   const allChats=[]; store.projects.forEach(p=>{p.chats.forEach(c=>allChats.push({chatId:c.id,chatName:c.name,projectId:p.id,projectName:p.name}));});
-  showModal('Ask AI',`<p style="font-size:12px;color:var(--text-lighter);margin-bottom:8px;">"${hl.text.slice(0,40)}${hl.text.length>40?'…':''}"</p><div style="max-height:200px;overflow-y:auto;margin-bottom:10px;">${allChats.map(ch=>`<div class="chat-select-item" onclick="this.querySelector('.chat-select-check').classList.toggle('checked')"><div class="chat-select-check" id="chatSel_${ch.chatId}"></div><span class="chat-select-name">${ch.chatName}</span><span class="chat-select-project">${ch.projectName}</span></div>`).join('')}</div><input type="hidden" id="askAIBId" value="${bid}"><input type="hidden" id="askAINId" value="${nid}">`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'ask',cls:'confirm',onclick:submitAskAI}]);
+  const activeCid = store.activeChat;
+  showModal('Ask AI',`<p style="font-size:12px;color:var(--text-lighter);margin-bottom:8px;">"${hl.text.slice(0,40)}${hl.text.length>40?'…':''}"</p><div style="max-height:200px;overflow-y:auto;margin-bottom:10px;">${allChats.map(ch=>`<div class="chat-select-item" onclick="this.querySelector('.chat-select-check').classList.toggle('checked')"><div class="chat-select-check${ch.chatId===activeCid?' checked':''}" id="chatSel_${ch.chatId}"></div><span class="chat-select-name">${ch.chatName}</span><span class="chat-select-project">${ch.projectName}</span></div>`).join('')}</div><input type="hidden" id="askAIBId" value="${bid}"><input type="hidden" id="askAINId" value="${nid}">`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'ask',cls:'confirm',onclick:doSubmitAskAI}]);
 }
-function submitAskAI(){
+async function doSubmitAskAI(){
+  const bid=$('askAIBId').value,nid=$('askAINId').value,book=store.books.find(b=>b.id===bid); if(!book)return;
+  const hl=book.highlights.find(h=>h.id===nid); if(!hl)return;
+  const selected=[]; store.projects.forEach(p=>{p.chats.forEach(c=>{const el=document.getElementById('chatSel_'+c.chatId);if(el&&el.classList.contains('checked'))selected.push({chatId:c.id,chatName:c.name,projectName:p.name});});});
+  if(selected.length===0){toast('请至少选择一个聊天窗口');return;} closeModal();
+  if(!hl.aiResponses)hl.aiResponses=[];
+  if (!store.apiKey) { toast('请先配置 API Key'); return openBookDetail(bid); }
+  const prompt = `关于书籍《${book.title}》中的这段话："${hl.text}"${hl.note ? '，我的笔记是：'+hl.note : ''}。请用中文简短点评这段话（2-3句话），可以从文学角度、情感角度或叙事角度分析。`;
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model, messages: [{ role: 'user', content: prompt }] })
+    });
+    const data = await response.json();
+    const aiText = (data.reply && data.reply.content) ? data.reply.content : '这个段落值得反复品味。';
+    selected.forEach(ch => { hl.aiResponses.push({ chatId: ch.chatId, chatName: ch.chatName, projectName: ch.projectName, text: aiText }); });
+    openBookDetail(bid); toast('AI 已回复');
+  } catch (err) {
+    console.error('Ask AI error:', err);
+    toast('AI 请求失败: ' + err.message);
+    openBookDetail(bid);
+  }
+}
+async function submitAskAI(){
   const bid=$('askAIBId').value,nid=$('askAINId').value,book=store.books.find(b=>b.id===bid); if(!book)return;
   const hl=book.highlights.find(h=>h.id===nid); if(!hl)return;
   const selected=[]; store.projects.forEach(p=>{p.chats.forEach(c=>{const el=document.getElementById('chatSel_'+c.chatId);if(el&&el.classList.contains('checked'))selected.push({chatId:c.id,chatName:c.name,projectName:p.name});});});
   if(selected.length===0){toast('请选择至少一个聊天窗口');return;} closeModal();
-  selected.forEach(ch=>{
-    if(!hl.aiResponses)hl.aiResponses=[];
-    hl.aiResponses.push({chatId:ch.chatId,chatName:ch.chatName,projectName:ch.projectName,text:['很好的观察。如果把这句和上下文放在一起看，会发现作者的伏笔。','从叙事节奏来看，这里的留白给了读者喘息空间。你的笔记直觉是对的。','这个细节看似闲笔，实际暗示了后续情节。继续读下去会发现更多线索。'][Math.floor(Math.random()*3)]});
-  });
-  openBookDetail(bid); toast(`AI 已通过 ${selected.length} 个窗口回复`);
+
+  if (!store.apiKey) { toast('请先配置 API Key'); return; }
+
+  const prompt = `关于书籍《${book.title}》中的这段话："${hl.text}"${hl.note ? '，我的笔记是：'+hl.note : ''}。请用中文简短点评这段话（2-3句话），可以从文学角度、情感角度或叙事角度分析。`;
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey,
+        endpoint: store.apiEndpoint,
+        model: store.aiSettings.model,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const data = await response.json();
+    const aiText = (data.reply && data.reply.content) ? data.reply.content : '这个段落值得反复品味。';
+
+    if (!hl.aiResponses) hl.aiResponses = [];
+    selected.forEach(ch => {
+      hl.aiResponses.push({ chatId: ch.chatId, chatName: ch.chatName, projectName: ch.projectName, text: aiText });
+    });
+    openBookDetail(bid); toast(`AI 已回复`);
+  } catch (err) {
+    console.error('Ask AI error:', err);
+    toast('AI 请求失败: ' + err.message);
+    openBookDetail(bid);
+  }
 }
 function navToChatSource(cid,pn){
   const proj=store.projects.find(p=>p.name===pn); if(proj)store.activeProject=proj.id;
@@ -1308,12 +2485,13 @@ function renderDiary(){
 
   const moodLabels = {calm:'平静', excited:'兴奋', troubled:'烦恼'};
 
-  // Today unwritten prompt
+  // Today prompt — always show for today, change text based on existing entries
   const todayIso = fmtDate().iso;
   const hasUserEntryToday = store.diaries.some(d => d.date === selDate && d.author === 'user');
   const promptEl = $('diaryTodayPrompt');
-  if (selDate === todayIso && !hasUserEntryToday) {
-    promptEl.innerHTML = `<div class="diary-today-prompt" onclick="addDiaryEntry()"><div class="diary-today-prompt-text">写点什么吧……</div></div>`;
+  if (selDate === todayIso) {
+    const promptText = hasUserEntryToday ? '还想写点什么……' : '写点什么吧……';
+    promptEl.innerHTML = `<div class="diary-today-prompt" onclick="addDiaryEntry()"><div class="diary-today-prompt-text">${promptText}</div></div>`;
   } else {
     promptEl.innerHTML = '';
   }
@@ -1329,7 +2507,10 @@ function renderDiary(){
         ? (d.sourceWindow ? `<span class="diary-reply-source" onclick="event.stopPropagation();navigateToDiaryReplySource('${d.sourceChatId||''}', '${d.sourceWindow||''}')">from ${d.sourceWindow}</span>` : 'from ai')
         : `By ${USER_NAME}`;
       html += `<div class="diary-card-entry ${isAI ? 'ai-entry' : ''}">
-        <div class="diary-card-title">${title}</div>
+        <div class="diary-card-title" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>${title}</span>
+          <span style="font-size:14px;color:var(--text-lighter);cursor:pointer;padding:2px 4px;" onclick="event.stopPropagation();editDiaryEntry('${d.id}')" title="编辑 / 删除">✎</span>
+        </div>
         <div class="diary-card-mood-row">
           <span class="diary-card-mood-tag">${d.mood === 'calm' ? '😌 平静' : (d.mood === 'excited' ? '✨ 兴奋' : '😞 烦恼')}</span>
           <span class="diary-card-time">${d.time || ''}</span>
@@ -1391,24 +2572,46 @@ function saveDiaryReply() {
     time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
   });
   closeModal(); renderDiary(); toast('Reply sent');
-  // If user replied, AI auto-replies
-  if (author === 'user') {
-    setTimeout(() => {
-      const proj = getActiveProject(); const chat = getActiveChatObj();
-      const winName = (proj && chat) ? `${proj.name} / ${chat.name}` : '';
-      const aiReplies = ['谢谢你分享这些。', '读完这段，我也想了很多。', '有时候一句话比沉默更有力量。'];
-      entry.replies.push({
-        id: 'r' + gid(''),
-        content: aiReplies[Math.floor(Math.random() * aiReplies.length)],
-        author: 'ai',
-        date: fmtDate().iso,
-        time: `${String(new Date().getHours()).padStart(2,'0')}:${String(new Date().getMinutes()).padStart(2,'0')}`,
-        sourceChatId: store.activeChat,
-        sourceWindow: winName,
-      });
-      renderDiary();
-    }, 1500 + Math.random() * 1500);
-  }
+  // AI no longer auto-replies — user prompts AI in chat to read & reply to diary
+}
+
+function editDiaryEntry(entryId) {
+  const entry = store.diaries.find(d => d.id === entryId);
+  if (!entry) return;
+  showModal('编辑日记', `
+    <input class="modal-input" id="editDiaryTitle" value="${entry.title || ''}" placeholder="Title (optional)">
+    <div style="display:flex;gap:8px;margin-bottom:10px;">
+      ${[{v:'calm',l:'平静'},{v:'excited',l:'兴奋'},{v:'troubled',l:'烦恼'}].map(m => `<button class="mood-tag${entry.mood===m.v?' selected':''}" data-mood-val="${m.v}" onclick="selectMoodInModal('${m.v}',this)" style="font-size:12px;padding:4px 14px;">${m.l}</button>`).join('')}
+    </div>
+    <textarea class="modal-input modal-textarea" id="editDiaryContent" placeholder="Today...">${entry.content}</textarea>
+    <input type="hidden" id="editDiaryId" value="${entryId}">
+    <input type="hidden" id="editDiaryMood" value="${entry.mood || 'calm'}">
+  `, [
+    { label: 'cancel', cls: 'cancel', onclick: closeModal },
+    { label: '🗑 delete', cls: 'danger', onclick: confirmDeleteDiaryEntry },
+    { label: 'save', cls: 'confirm', onclick: saveDiaryEdit },
+  ]);
+  setTimeout(() => {
+    const ft = document.querySelector('#modalBody .mood-tag[data-mood-val="'+(entry.mood||'calm')+'"]');
+    if (ft) ft.classList.add('selected');
+  }, 50);
+}
+
+function confirmDeleteDiaryEntry() {
+  const entryId = $('editDiaryId').value;
+  store.diaries = store.diaries.filter(d => d.id !== entryId);
+  closeModal(); renderDiary(); toast('日记已删除');
+}
+
+function saveDiaryEdit() {
+  const entryId = $('editDiaryId').value;
+  const entry = store.diaries.find(d => d.id === entryId);
+  if (!entry) return;
+  entry.title = ($('editDiaryTitle')?.value || '').trim();
+  entry.content = $('editDiaryContent').value.trim();
+  entry.mood = $('editDiaryMood').value;
+  if (!entry.content) { toast('Please write something'); return; }
+  closeModal(); renderDiary(); toast('日记已更新');
 }
 
 function addDiaryEntry() {
@@ -1445,24 +2648,7 @@ function saveDiaryEntry() {
     title, content, mood, author: 'user', replies: [],
   });
   closeModal(); renderDiary(); toast('Diary saved');
-  // AI auto-reply
-  setTimeout(() => {
-    const entry = store.diaries[0]; // the one just added
-    if (entry && entry.author === 'user') {
-      const proj = getActiveProject(); const chat = getActiveChatObj();
-      const winName = (proj && chat) ? `${proj.name} / ${chat.name}` : '';
-      entry.replies.push({
-        id: 'r' + gid(''),
-        content: ['谢谢你记录下这些。每一天都值得被记住。', '我在想，写日记的人大概都是温柔的人吧。', '读完这段，我也想了很多。'][Math.floor(Math.random() * 3)],
-        author: 'ai',
-        date: ds,
-        time: `${String(new Date().getHours()).padStart(2,'0')}:${String(new Date().getMinutes()).padStart(2,'0')}`,
-        sourceChatId: store.activeChat,
-        sourceWindow: winName,
-      });
-      renderDiary();
-    }
-  }, 2000 + Math.random() * 2000);
+  // AI no longer auto-replies — user prompts AI in chat to read & reply to diary
 }
 
 // ==================== CALENDAR ====================
@@ -1500,15 +2686,92 @@ function goToDiaryDate(ds){
   setTimeout(() => { $('diaryScroll').scrollTop = 0; }, 100);
 }
 
+// ==================== AUTO DIARY ====================
+function checkMissedDays() {
+  const today = fmtDate().iso;
+  const todayObj = new Date();
+  const yesterday = new Date(todayObj);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayIso = `${yesterday.getFullYear()}-${String(yesterday.getMonth()+1).padStart(2,'0')}-${String(yesterday.getDate()).padStart(2,'0')}`;
+
+  // Check if yesterday had any conversations (any chat window)
+  let hadConversation = false;
+  for (const p of store.projects) {
+    for (const c of p.chats) {
+      if (c.lastConversationDate === yesterdayIso) {
+        hadConversation = true;
+        break;
+      }
+      // Also check messages for yesterday
+      if (c.messages && c.messages.length > 0) {
+        // Check if any message has time that could be from yesterday
+        // We use lastConversationDate as the primary tracker
+      }
+    }
+    if (hadConversation) break;
+  }
+
+  // Also check if there's already a user diary entry for yesterday
+  const hasUserDiary = store.diaries.some(d => d.date === yesterdayIso && d.author === 'user');
+
+  if (!hadConversation || !hasUserDiary) {
+    // Check if we already generated an auto diary for yesterday
+    const hasAutoDiary = store.diaries.some(d => d.date === yesterdayIso && d.author === 'ai' && d.title && d.title.includes('她没来的第'));
+    if (!hasAutoDiary && !hasUserDiary) {
+      store.consecutiveMissedDays = (store.consecutiveMissedDays || 0) + 1;
+      const dayLabel = store.consecutiveMissedDays === 1 ? '一' :
+        store.consecutiveMissedDays === 2 ? '二' :
+        store.consecutiveMissedDays === 3 ? '三' :
+        store.consecutiveMissedDays === 4 ? '四' :
+        store.consecutiveMissedDays === 5 ? '五' :
+        store.consecutiveMissedDays === 6 ? '六' :
+        store.consecutiveMissedDays === 7 ? '七' :
+        store.consecutiveMissedDays === 8 ? '八' :
+        store.consecutiveMissedDays === 9 ? '九' :
+        store.consecutiveMissedDays;
+
+      const autoContents = [
+        '今天窗外一直下着雨。我在想，她是不是也在某个地方看着同样的雨。',
+        '风从北边吹来，带着陌生的气味。没有她的消息，世界慢了下来。',
+        '时钟的声音变得很响。原来寂静是这样一种东西。',
+        '路边的银杏叶开始变黄了。不知道她有没有注意到季节的变化。',
+        '路过那家她提过的书店，橱窗里换了新的陈列。我替她多看了几眼。',
+        '今天什么也没发生。但什么都不发生，有时候正是一种发生。',
+        '黄昏来得特别早。我想，也许明天她就会说点什么。',
+      ];
+
+      store.diaries.unshift({
+        id: 'd' + gid(''),
+        date: yesterdayIso,
+        time: '23:59',
+        title: `她没来的第${dayLabel}天。`,
+        content: autoContents[Math.floor(Math.random() * autoContents.length)],
+        mood: 'troubled',
+        author: 'ai',
+        replies: []
+      });
+    } else {
+      // Reset counter if there was a user diary (the user was "present" via diary)
+      if (hasUserDiary) {
+        store.consecutiveMissedDays = 0;
+      }
+    }
+  } else {
+    store.consecutiveMissedDays = 0;
+  }
+}
+
 // ==================== MISC ====================
 function clearAllData(){
-  showModal('Clear All Data',`<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要清除所有数据吗？此操作不可撤销。</p>`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'clear all',cls:'confirm',onclick:()=>{store.todos=[];store.litterThoughts=[];store.books=[];store.diaries=[];store.projects=[{id:'p1',name:'default',memories:[],chats:[{id:'c1',name:'default',sharedMemoryIds:[],weeklyExports:[],messages:[]}]}];store.tokenUsage.used=0;store.tokenUsage.history=[];store.activeProject='p1';store.activeChat='c1';closeModal();renderAll();toast('All data cleared');}}]);
+  showModal('Clear All Data',`<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要清除所有数据吗？此操作不可撤销。</p>`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'clear all',cls:'confirm',onclick:()=>{store.todos=[];store.litterThoughts=[];store.books=[];store.diaries=[];store.projects=[{id:'p1',name:'default',preference:'',memories:[],chats:[{id:'c1',name:'default',sharedMemoryIds:[],weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null}]}];store.tokenUsage.used=0;store.tokenUsage.history=[];store.consecutiveMissedDays=0;store.lastActiveDate=fmtDate().iso;store.activeProject='p1';store.activeChat='c1';saveStore();closeModal();renderAll();toast('All data cleared');}}]);
 }
 function renderAll(){renderHome();renderProjectList();renderChatMessages();renderBookshelf();renderDiary();}
 
 // ==================== INIT ====================
-function init(){updateSettingsUI();renderAll();}
+async function init(){loadStore();await loadPresets();updateSettingsUI();renderAll();checkMissedDays();}
 init();
+setInterval(saveStore, 2000);
+window.addEventListener('beforeunload', saveStore);
 </script>
 </body>
 </html>
