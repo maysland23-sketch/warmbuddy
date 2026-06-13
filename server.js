@@ -11,13 +11,27 @@ const cookieParser = require('cookie-parser');
 app.use(cookieParser());
 
 // ==================== WEB PUSH SETUP ====================
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+let VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+let VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:warmbuddy@example.com';
 
-if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+// Auto-generate VAPID keys if not configured (e.g. first run or Vercel deploy)
+if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+  const generated = webpush.generateVAPIDKeys();
+  VAPID_PUBLIC_KEY = generated.publicKey;
+  VAPID_PRIVATE_KEY = generated.privateKey;
+  console.log('⚠️  VAPID keys not found in env — auto-generated new keys');
+  console.log('   Add these to your .env / Vercel env vars to keep subscriptions stable:');
+  console.log('   VAPID_PUBLIC_KEY=' + VAPID_PUBLIC_KEY);
+  console.log('   VAPID_PRIVATE_KEY=' + VAPID_PRIVATE_KEY);
+}
+
+// Validate key format before setting
+try {
   webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
   console.log('🔔 Web Push initialized');
+} catch (err) {
+  console.error('❌ Web Push setup failed (invalid VAPID keys):', err.message);
 }
 
 // In-memory push subscription store (single-user app)
@@ -804,7 +818,9 @@ app.post('/api/chat', async (req, res) => {
  * Returns the VAPID public key so the frontend can subscribe
  */
 app.get('/api/push/vapid-public-key', (req, res) => {
-  if (!VAPID_PUBLIC_KEY) return res.status(500).json({ error: 'VAPID not configured' });
+  if (!VAPID_PUBLIC_KEY) {
+    return res.status(500).json({ error: 'VAPID not configured — set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in .env or generate new keys with: npx web-push generate-vapid-keys' });
+  }
   res.json({ publicKey: VAPID_PUBLIC_KEY });
 });
 
@@ -866,10 +882,17 @@ app.post('/api/push/send', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ 后端已启动：http://localhost:${PORT}`);
-  console.log(`   Chat stream: POST /api/chat/stream`);
-  console.log(`   Test connection: POST /api/test-connection`);
-  console.log(`   Models: POST /api/models`);
-  console.log(`   Chat (non-stream): POST /api/chat`);
-});
+
+// Vercel: export the Express app as a serverless function
+if (process.env.VERCEL) {
+  module.exports = app;
+} else {
+  // Local: start the HTTP server
+  app.listen(PORT, () => {
+    console.log(`✅ 后端已启动：http://localhost:${PORT}`);
+    console.log(`   Chat stream: POST /api/chat/stream`);
+    console.log(`   Test connection: POST /api/test-connection`);
+    console.log(`   Models: POST /api/models`);
+    console.log(`   Chat (non-stream): POST /api/chat`);
+  });
+}
