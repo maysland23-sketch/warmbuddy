@@ -704,6 +704,11 @@ body {
 
 <script>
 // ==================== DATA ====================
+// Backend API base URL (Render). Vercel only hosts static files.
+const BACKEND_URL = 'https://warmbuddy.onrender.com';
+// VAPID public key — hardcoded (it's public, no need to fetch each time)
+const VAPID_PUBLIC_KEY = 'BMxMi0X5umwzfA8ZZHJPuiGCKpH-nY53Eo3IaljnnML1F1oUXdB7kftY_e5oCIIMxMWKujGTdBp5VhS6BQjyKR4';
+
 const USER_NAME = 'mays';
 function gid(p) { return p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
@@ -4483,14 +4488,10 @@ async function requestPushPermission() {
   try {
     const registration = await navigator.serviceWorker.ready;
 
-    // Get VAPID public key from backend
-    const vapidResp = await fetch('/api/push/vapid-public-key');
-    if (!vapidResp.ok) throw new Error('Failed to get VAPID key');
-    const { publicKey } = await vapidResp.json();
-
+    // VAPID public key is hardcoded (it's public, no fetch needed)
     const subscription = await registration.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: urlBase64ToUint8Array(publicKey)
+      applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
     });
 
     await sendSubscriptionToServer(subscription);
@@ -4506,7 +4507,7 @@ async function requestPushPermission() {
 
 async function sendSubscriptionToServer(subscription) {
   try {
-    await fetch('/api/push/subscribe', {
+    await fetch(BACKEND_URL + '/api/push/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ subscription: subscription.toJSON() })
@@ -4533,7 +4534,7 @@ function urlBase64ToUint8Array(base64String) {
 async function sendPushNotification(title, body, opts = {}) {
   if (!pushSubscribed) return;
   try {
-    await fetch('/api/push/send', {
+    await fetch(BACKEND_URL + '/api/push/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
