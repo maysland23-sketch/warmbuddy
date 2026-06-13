@@ -1,5 +1,4 @@
 {
   "version": 2,
-  "buildCommand": "mkdir -p out && cp -r public/* out/",
-  "outputDirectory": "out"
+  "outputDirectory": "public"
 }
