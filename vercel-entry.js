@@ -1,10 +1,10 @@
 // Vercel serverless entry point — wraps the Express app for @vercel/node
+// Located at root level (not api/) so that ../server.js resolution is cleaner.
 let app;
 try {
-  app = require('../server.js');
+  app = require('./server.js');
 } catch (err) {
-  // If server.js fails to load, export a fallback that reports the error
-  console.error('[api/index] Failed to load server.js:', err);
+  console.error('[vercel-entry] Failed to load server.js:', err);
   module.exports = (req, res) => {
     res.statusCode = 500;
     res.setHeader('Content-Type', 'application/json');
