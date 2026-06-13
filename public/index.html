@@ -3,7 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>mays · 朝夕</title>
+<meta name="theme-color" content="#6B7C93">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="暖伴">
+<link rel="manifest" href="/manifest.json">
+<title>暖伴 · 朝夕</title>
 <style>
 /* ===== CSS Variables ===== */
 :root {
@@ -263,6 +268,20 @@ body {
 .export-item:active { background: var(--bg-card-hover); }
 .export-item-name { font-family: var(--font-en); font-size: 13px; color: var(--text); }
 .export-item-date { font-family: var(--font-en); font-size: 10px; color: var(--text-lighter); margin-top: 2px; }
+.affect-badge { font-family: var(--font-en); font-size: 10px; padding: 2px 8px; border-radius: 10px; letter-spacing: 0.03em; white-space: nowrap; display: inline-block; }
+.intensity-bar { height: 3px; border-radius: 2px; background: var(--border-light); margin-top: 2px; }
+.intensity-bar-fill { height: 100%; border-radius: 2px; background: var(--accent); transition: width 0.3s; }
+.import-btn { display: flex; align-items: center; justify-content: center; gap: 6px; }
+.import-preview-list { max-height: 300px; overflow-y: auto; margin-top: 8px; }
+/* Proactive message bubble (EDA) */
+.proactive-bubble { border-left: 3px solid var(--accent-soft); padding-left: 10px; }
+.proactive-bubble .proactive-label { font-family: var(--font-en); font-size: 9px; color: var(--accent-soft); letter-spacing: 0.04em; margin-bottom: 2px; text-transform: uppercase; }
+/* Desire drive bars */
+.desire-bar-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.desire-bar-label { font-family: var(--font-en); font-size: 10px; color: var(--text-light); width: 80px; flex-shrink: 0; text-align: right; letter-spacing: 0.03em; }
+.desire-bar-track { flex: 1; height: 6px; border-radius: 3px; background: var(--border-light); overflow: hidden; }
+.desire-bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
+.desire-bar-val { font-family: var(--font-en); font-size: 9px; color: var(--text-lighter); width: 28px; flex-shrink: 0; }
 
 /* ===== Pages ===== */
 .page { display: none; flex-direction: column; height: 100%; }
@@ -645,9 +664,16 @@ body {
 <!-- ==================== MEMORY PANEL ==================== -->
 <div class="memory-panel" id="memoryPanel">
   <div class="panel-header"><span class="panel-title" id="memoryPanelTitle">memory</span><button class="panel-close" onclick="closeMemoryPanel()">✕</button></div>
+  <div style="padding:8px 16px;">
+    <input id="memorySearchInput" placeholder="search memories..." style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid var(--border-light);font-size:12px;outline:none;font-family:var(--font-en);letter-spacing:0.03em;" oninput="onMemorySearch(this.value)">
+    <div id="memorySearchResults" style="margin-top:8px;max-height:200px;overflow-y:auto;display:none;"></div>
+  </div>
   <div class="memory-panel-tabs" id="memoryPanelTabs">
     <button class="memory-tab active" onclick="switchMemoryTab('memories')">memories</button>
+    <button class="memory-tab" onclick="switchMemoryTab('core')">core</button>
+    <button class="memory-tab" onclick="switchMemoryTab('desires')">desires</button>
     <button class="memory-tab" onclick="switchMemoryTab('exports')">exports</button>
+    <button class="memory-tab" onclick="switchMemoryTab('import')">import</button>
     <button class="memory-tab" onclick="switchMemoryTab('tokens')">tokens</button>
   </div>
   <div class="panel-body" id="memoryPanelBody" style="padding:12px 16px;"></div>
@@ -773,6 +799,36 @@ const store = {
   activeProject: 'p1', activeChat: 'c1', diarySelectedDate: (()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;})(),
   calendarYear: 2026, calendarMonth: 6, calendarSelectedDate: null,
   activeBubble: null, activeBubbleMessageIndex: null,
+  // ==================== MEMORY SYSTEM (P1-P3) ====================
+  memorySystem: {
+    retention: { full: 7, half: 14, quarter: 30 },
+    lastMaintenance: new Date().toISOString().slice(0, 10),
+    coreMemories: [],
+    coreMemoryMax: 200,
+    relationalPortrait: {
+      patterns: {},
+      lastRefined: null
+    },
+    reflections: [],
+    reflectionMax: 50,
+    chatSummaries: {},
+    bm25Index: { _dirty: true, _lastBuild: null, _docCount: 0, index: {} },
+    affectGraph: { edges: {} },
+    _pendingCoreMemories: [],
+    _quietPresenceCount: 0
+  },
+  // ==================== DESIRE SYSTEM (EDA) ====================
+  desireSystem: {
+    drives: { resonance:0, exploration:0, possession:0, guardianship:0, intimacy:0, confirmation:0, devotion:0 },
+    driveHistory: [],
+    lastAction: null,
+    cooldownUntil: null,
+    lastPassiveCheck: new Date().toISOString(),
+    pendingActions: [],
+    actionHistory: [],
+    todoReminders: {},
+    quietPresenceStreak: 0
+  },
 };
 
 // ==================== PERSISTENCE ====================
@@ -784,6 +840,1194 @@ function loadStore() {
     const saved = JSON.parse(localStorage.getItem('warmbuddy-store'));
     if (saved) Object.assign(store, saved);
   } catch(e) {}
+  migrateStore();
+}
+
+function migrateStore() {
+  // Ensure memorySystem exists
+  if (!store.memorySystem) {
+    store.memorySystem = {
+      retention: { full: 7, half: 14, quarter: 30 },
+      lastMaintenance: fmtDate().iso,
+      coreMemories: [],
+      coreMemoryMax: 200,
+      relationalPortrait: { patterns: {}, lastRefined: null },
+      reflections: [],
+      reflectionMax: 50,
+      chatSummaries: {},
+      bm25Index: { _dirty: true, _lastBuild: null, _docCount: 0, index: {} },
+      affectGraph: { edges: {} },
+      _pendingCoreMemories: [],
+      _quietPresenceCount: 0
+    };
+  }
+  // Ensure sub-structures exist on old data
+  const ms = store.memorySystem;
+  if (!ms.retention) ms.retention = { full: 7, half: 14, quarter: 30 };
+  if (!ms.lastMaintenance) ms.lastMaintenance = fmtDate().iso;
+  if (!ms.coreMemories) ms.coreMemories = [];
+  if (!ms.coreMemoryMax) ms.coreMemoryMax = 200;
+  if (!ms.relationalPortrait) ms.relationalPortrait = { patterns: {}, lastRefined: null };
+  if (!ms.relationalPortrait.patterns) ms.relationalPortrait.patterns = {};
+  if (!ms.reflections) ms.reflections = [];
+  if (!ms.reflectionMax) ms.reflectionMax = 50;
+  if (!ms.chatSummaries) ms.chatSummaries = {};
+  if (!ms.bm25Index) ms.bm25Index = { _dirty: true, _lastBuild: null, _docCount: 0, index: {} };
+  if (!ms.affectGraph) ms.affectGraph = { edges: {} };
+  if (!ms._pendingCoreMemories) ms._pendingCoreMemories = [];
+  if (ms._quietPresenceCount === undefined) ms._quietPresenceCount = 0;
+
+  // Ensure desireSystem exists
+  if (!store.desireSystem) {
+    store.desireSystem = {
+      drives: { resonance:0, exploration:0, possession:0, guardianship:0, intimacy:0, confirmation:0, devotion:0 },
+      driveHistory: [], lastAction: null, cooldownUntil: null,
+      lastPassiveCheck: new Date().toISOString(), pendingActions: [], actionHistory: [],
+      todoReminders: {}, quietPresenceStreak: 0
+    };
+  }
+  const ds = store.desireSystem;
+  if (!ds.drives) ds.drives = { resonance:0, exploration:0, possession:0, guardianship:0, intimacy:0, confirmation:0, devotion:0 };
+  const driveKeys = ['resonance','exploration','possession','guardianship','intimacy','confirmation','devotion'];
+  for (const k of driveKeys) { if (ds.drives[k] === undefined) ds.drives[k] = 0; }
+  if (!ds.driveHistory) ds.driveHistory = [];
+  if (!ds.pendingActions) ds.pendingActions = [];
+  if (!ds.actionHistory) ds.actionHistory = [];
+  if (!ds.todoReminders) ds.todoReminders = {};
+  if (ds.quietPresenceStreak === undefined) ds.quietPresenceStreak = 0;
+
+  // Extend existing memories with new fields
+  for (const proj of store.projects) {
+    for (const mem of proj.memories) {
+      if (mem.decayFactor === undefined) mem.decayFactor = 1.0;
+      if (mem.affectLabel === undefined) mem.affectLabel = null;
+      if (mem.affectIntensity === undefined) mem.affectIntensity = null;
+      if (mem.semanticKey === undefined) mem.semanticKey = null;
+      if (mem.isCompressed === undefined) mem.isCompressed = false;
+      if (mem.compressedFrom === undefined) mem.compressedFrom = [];
+      if (mem.lastAccessed === undefined) mem.lastAccessed = mem.date;
+      if (mem.isCoreMemory === undefined) mem.isCoreMemory = false;
+      if (mem.coreMemoryId === undefined) mem.coreMemoryId = null;
+    }
+    // Extend chats with new fields
+    for (const chat of proj.chats) {
+      if (chat._messageCount === undefined) chat._messageCount = chat.messages ? chat.messages.length : 0;
+      if (chat._lastSummaryIdx === undefined) chat._lastSummaryIdx = 0;
+      if (!chat.chatTokens) chat.chatTokens = 0;
+      if (!chat.lastConversationDate) chat.lastConversationDate = null;
+    }
+  }
+}
+
+// ==================== FORGETTING CURVE ====================
+function applyForgettingCurve() {
+  const today = fmtDate().iso;
+  const ms = store.memorySystem;
+  if (ms.lastMaintenance === today) return;
+
+  for (const proj of store.projects) {
+    for (const mem of proj.memories) {
+      if (mem.starred) continue;
+      if (mem.isCoreMemory) continue;
+      if (mem.decayFactor === 0) continue;
+
+      const age = daysBetween(mem.date, today);
+
+      if (age <= ms.retention.full) {
+        mem.decayFactor = 1.0;
+      } else if (age <= ms.retention.half) {
+        mem.decayFactor = 0.5;
+      } else if (age <= ms.retention.quarter) {
+        mem.decayFactor = 0.25;
+      } else {
+        // 30+ days: keep only first+last per week
+        mem.decayFactor = isWeekBoundary(mem, proj) ? 0.25 : 0;
+      }
+    }
+  }
+  ms.lastMaintenance = today;
+
+  // EDA: natural drive decay (daily -10%)
+  const ds = store.desireSystem;
+  if (ds && ds.drives) {
+    for (const k of Object.keys(ds.drives)) {
+      ds.drives[k] = Math.max(0, Math.floor(ds.drives[k] * 0.9));
+    }
+  }
+}
+
+function isWeekBoundary(mem, proj) {
+  const sameWeek = proj.memories.filter(m =>
+    m.week === mem.week && m.type === mem.type && m.id !== mem.id
+  );
+  if (sameWeek.length === 0) return true; // only memory in that week
+  const sorted = [mem, ...sameWeek].sort((a, b) => a.date.localeCompare(b.date));
+  const idx = sorted.findIndex(m => m.id === mem.id);
+  return idx === 0 || idx === sorted.length - 1;
+}
+
+// ==================== CORE MEMORY (P3) ====================
+async function processPendingCoreMemories() {
+  const ms = store.memorySystem;
+  if (!ms._pendingCoreMemories || ms._pendingCoreMemories.length === 0) return;
+  if (!store.apiKey) return; // need API key
+
+  const items = ms._pendingCoreMemories.splice(0, 3); // process max 3 at once
+  await createCoreMemories(items);
+  saveStore();
+}
+
+function queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat) {
+  const ms = store.memorySystem;
+  ms._pendingCoreMemories.push({
+    timestamp: new Date().toISOString(),
+    reflection,
+    userMsg: typeof userMsg === 'string' ? userMsg.slice(0, 200) : '',
+    aiResponse: typeof aiResponse === 'string' ? aiResponse.slice(0, 200) : '',
+    sourceChatId: store.activeChat,
+    sourceProjectId: store.activeProject
+  });
+}
+
+function queueQuietPresenceCoreMemory(chat) {
+  const ms = store.memorySystem;
+  // Create a synthetic "平静在场" core memory without LLM call
+  const proj = getActiveProject();
+  const cm = {
+    id: 'cm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    timestamp: new Date().toISOString(),
+    affect_first: {
+      ai: { label: '平静在场', intensity: 5 },
+      user: { label: '平静在场', intensity: 5 }
+    },
+    event_summary: '持续的日常陪伴 —— 没有强烈情绪，但有持续的在场感',
+    raw_quote: '',
+    relational_note: '陪伴本身就是意义。不需要特别的话题或强烈的情绪，安静地在一起就够了。',
+    sourceChatId: store.activeChat,
+    sourceProjectId: store.activeProject
+  };
+  ms.coreMemories.unshift(cm);
+  evictOldestCoreMemories();
+
+  // Also mark in project memories
+  if (proj) {
+    proj.memories.push({
+      id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      content: '持续的日常陪伴（平静在场 ×10）',
+      date: fmtDate().iso, type: 'core', starred: false,
+      sourceChatId: store.activeChat, week: weekLabel(),
+      decayFactor: 1.0, affectLabel: '平静在场', affectIntensity: 5,
+      semanticKey: '平静在场, 陪伴', isCompressed: false, compressedFrom: [],
+      lastAccessed: fmtDate().iso, isCoreMemory: true, coreMemoryId: cm.id
+    });
+  }
+}
+
+async function createCoreMemories(items) {
+  if (items.length === 0 || !store.apiKey) return;
+
+  const exchangesText = items.map((item, i) => {
+    const r = item.reflection;
+    return `[片段${i + 1}]
+用户情绪: ${r.user_affect_label} (强度${r.user_affect_intensity})
+AI情绪: ${r.ai_affect_label} (强度${r.ai_affect_intensity})
+用户说: ${item.userMsg.slice(0, 150)}
+AI回应: ${item.aiResponse.slice(0, 150)}`;
+  }).join('\n\n');
+
+  const systemPrompt = `你是一个情感记忆归档员。为以下高情感强度的对话片段生成核心记忆。
+
+对每个片段，生成一个JSON对象（只返回JSON数组，不要其他文字）：
+[{
+  "affect_first": {
+    "ai": { "label": "[AI情感标签]", "intensity": [强度数值] },
+    "user": { "label": "[用户情感标签]", "intensity": [强度数值] }
+  },
+  "event_summary": "[一句话描述发生了什么]",
+  "raw_quote": "[对话中最能代表这个时刻的一句原话，如果没有特别的原话可以留空字符串]",
+  "relational_note": "[AI如何回应这个时刻，这段关系此刻的特点——不是事实总结，而是关系质感的描述，1-2句话]"
+}]`;
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey,
+        endpoint: store.apiEndpoint,
+        model: store.aiSettings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: exchangesText }
+        ]
+      })
+    });
+
+    if (!response.ok) { console.log('[core-mem] API error:', response.status); return; }
+    const data = await response.json();
+    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+    if (!content) return;
+
+    // Parse JSON array from response (may contain markdown fences)
+    let jsonStr = content;
+    const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) jsonStr = fenceMatch[1].trim();
+    if (jsonStr.startsWith('[')) {
+      const coreMems = JSON.parse(jsonStr);
+      const ms = store.memorySystem;
+      const proj = getActiveProject();
+      for (const cm of coreMems) {
+        if (!cm.affect_first || !cm.event_summary) continue;
+        const id = 'cm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        cm.id = id;
+        cm.timestamp = new Date().toISOString();
+        cm.sourceChatId = store.activeChat;
+        cm.sourceProjectId = store.activeProject;
+        ms.coreMemories.unshift(cm);
+        if (ms.coreMemories.length > ms.coreMemoryMax) {
+          ms.coreMemories.length = ms.coreMemoryMax;
+        }
+        // Cross-reference in project memories
+        if (proj) {
+          proj.memories.push({
+            id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            content: cm.event_summary,
+            date: fmtDate().iso, type: 'core', starred: false,
+            sourceChatId: store.activeChat, week: weekLabel(),
+            decayFactor: 1.0,
+            affectLabel: cm.affect_first.user.label,
+            affectIntensity: cm.affect_first.user.intensity,
+            semanticKey: [cm.affect_first.ai.label, cm.affect_first.user.label].join(', '),
+            isCompressed: false, compressedFrom: [],
+            lastAccessed: fmtDate().iso, isCoreMemory: true, coreMemoryId: id
+          });
+        }
+      }
+    }
+  } catch (e) {
+    console.log('[core-mem] Creation error:', e.message);
+  }
+}
+
+// ==================== RELATIONAL PORTRAIT (P3) ====================
+function updateRelationalPortrait(userAffectLabel) {
+  if (!userAffectLabel) return;
+  const portrait = store.memorySystem.relationalPortrait;
+  const patterns = portrait.patterns;
+
+  if (patterns[userAffectLabel]) {
+    patterns[userAffectLabel].count += 1;
+    patterns[userAffectLabel].lastSeen = fmtDate().iso;
+  } else {
+    patterns[userAffectLabel] = {
+      strategy: getDefaultStrategy(userAffectLabel),
+      count: 1,
+      lastSeen: fmtDate().iso
+    };
+  }
+
+  // Every 20 total pattern accumulations, queue refinement
+  const totalCount = Object.values(patterns).reduce((sum, p) => sum + (p.count || 0), 0);
+  if (totalCount > 0 && totalCount % 20 === 0) {
+    queuePortraitRefinement();
+  }
+}
+
+function getDefaultStrategy(label) {
+  const defaults = {
+    '脆弱时': '先接住情绪，不说教，用简短的回应稳住，需要时用亲昵称呼',
+    '回避时': '直接点破比绕弯子更有效，但要留面子',
+    '调皮': '适度配合但保持一点克制，让玩笑飘一会儿',
+    '坦诚': '认真对待每一句实话，不敷衍，不转移话题',
+    '疲惫': '不要追问，给简短温暖的回应，让用户有空间休息',
+    '兴奋': '一起高兴，但不要抢话，让用户的兴奋成为主角',
+    '平静在场': '安静陪伴，不制造情绪波动，保持温柔的存在感'
+  };
+  return defaults[label] || '用温柔细腻的语气回应，观察用户的情绪变化';
+}
+
+async function queuePortraitRefinement() {
+  const portrait = store.memorySystem.relationalPortrait;
+  if (!store.apiKey) return;
+
+  const entries = Object.entries(portrait.patterns);
+  const patternsText = entries
+    .map(([label, p]) => `- ${label} (出现${p.count}次, 最近: ${p.lastSeen}): ${p.strategy}`)
+    .join('\n');
+
+  const systemPrompt = `你正在维护一个"关系画像"。根据以下情感模式及其出现频率，为每个模式优化回应策略。
+
+格式：每个模式一行，"模式名: 优化后的策略描述（1-2句话）"
+
+${patternsText}
+
+请评估这些策略是否需要调整，返回优化后的完整策略列表。`;
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey,
+        endpoint: store.apiEndpoint,
+        model: store.aiSettings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: '请优化这些关系策略。' }
+        ]
+      })
+    });
+
+    if (!response.ok) return;
+    const data = await response.json();
+    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+    if (!content) return;
+
+    // Parse "label: strategy" lines
+    const lines = content.split('\n').filter(l => l.includes(':'));
+    for (const line of lines) {
+      const idx = line.indexOf(':');
+      if (idx === -1) continue;
+      const label = line.slice(0, idx).trim();
+      const strategy = line.slice(idx + 1).trim();
+      if (portrait.patterns[label] && strategy) {
+        portrait.patterns[label].strategy = strategy;
+      }
+    }
+    portrait.lastRefined = fmtDate().iso;
+  } catch (e) {
+    console.log('[portrait] Refinement error:', e.message);
+  }
+}
+
+// ==================== SHORT-TERM MEMORY COMPRESSION (P4) ====================
+function checkSummarization(chat) {
+  if (!chat || !chat.messages) return;
+  const total = chat.messages.length;
+  if (total < 40) return;
+
+  // Count unsummarized messages since last summary
+  const unsummarized = total - (chat._lastSummaryIdx || 0);
+  if (unsummarized < 20) return;
+
+  // Take the oldest 20 unsummarized messages
+  const startIdx = chat._lastSummaryIdx || 0;
+  const endIdx = Math.min(startIdx + 20, total);
+  const batch = chat.messages.slice(startIdx, endIdx);
+
+  if (batch.length === 0) return;
+
+  // Queue summarization (non-blocking)
+  summarizeMessages(batch, startIdx, endIdx, chat);
+}
+
+async function summarizeMessages(batch, startIdx, endIdx, chat) {
+  if (!store.apiKey) return;
+
+  const dialogue = batch.map(m => {
+    const role = m.role === 'user' ? '用户' : (m.role === 'ai' ? 'AI' : '系统');
+    return `${role}: ${m.text.slice(0, 200)}`;
+  }).join('\n');
+
+  const systemPrompt = `请将以下对话片段总结为简洁的层级结构。用中文回复。
+
+格式要求（严格遵循）：
+- 第一行：一句话主题概括
+- 关键讨论点（3-5条，每条不超过20字）
+- 提到的决定/偏好/事实（如有）
+- 情绪基调：用一个词描述`;
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey,
+        endpoint: store.apiEndpoint,
+        model: store.aiSettings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `对话内容：\n${dialogue}` }
+        ]
+      })
+    });
+
+    if (!response.ok) return;
+    const data = await response.json();
+    const summaryText = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+    if (!summaryText) return;
+
+    // Extract emotional tone from final line
+    const lines = summaryText.split('\n');
+    let emotionalTone = '';
+    const lastLine = lines[lines.length - 1] || '';
+    if (lastLine.includes('情绪基调') || lastLine.includes('基调')) {
+      emotionalTone = lastLine.replace(/.*基调[：:]\s*/, '').trim();
+    }
+
+    // Store summary
+    const ms = store.memorySystem;
+    if (!ms.chatSummaries[chat.id]) {
+      ms.chatSummaries[chat.id] = { summaries: [], lastSummarizedIdx: 0, totalMessageCount: 0 };
+    }
+    ms.chatSummaries[chat.id].summaries.push({
+      id: 's' + Date.now().toString(36),
+      startIdx, endIdx,
+      summary: summaryText,
+      emotionalTone,
+      created: new Date().toISOString()
+    });
+    ms.chatSummaries[chat.id].lastSummarizedIdx = endIdx;
+    ms.chatSummaries[chat.id].totalMessageCount = chat.messages.length;
+
+    // Update chat tracking
+    chat._lastSummaryIdx = endIdx;
+
+    console.log(`[summary] Compressed messages ${startIdx}-${endIdx}, ${summaryText.length} chars`);
+    saveStore();
+  } catch (e) {
+    console.log('[summary] Error:', e.message);
+  }
+}
+
+// ==================== LONG-TERM MEMORY SEARCH (P5) ====================
+// ── Tokenizer: Chinese bigram + English word ──
+function tokenizeChinese(text) {
+  if (!text) return [];
+  const cleaned = text.replace(/[^一-鿿\w\d]/g, ' ');
+  const words = cleaned.split(/\s+/).filter(w => w.length > 0);
+  const tokens = [];
+  for (const w of words) {
+    if (/^[一-鿿]+$/.test(w)) {
+      // Chinese: bigram
+      for (let i = 0; i < w.length - 1; i++) {
+        tokens.push(w.slice(i, i + 2));
+      }
+      tokens.push(w); // also add full word
+    } else {
+      tokens.push(w.toLowerCase());
+    }
+  }
+  return tokens;
+}
+
+// ── BM25 Index Builder ──
+function rebuildBM25Index() {
+  const ms = store.memorySystem;
+  const idx = { index: {} };
+
+  // Collect all memories
+  const allMems = [];
+  for (const proj of store.projects) {
+    for (const mem of proj.memories) {
+      // Skip fully decayed
+      if ((mem.decayFactor || 0) === 0) continue;
+      allMems.push({ ...mem, _projId: proj.id });
+    }
+  }
+
+  const docCount = allMems.length;
+  for (const mem of allMems) {
+    const text = ((mem.content || '') + ' ' + (mem.semanticKey || '')).toLowerCase();
+    const terms = tokenizeChinese(text);
+    const tf = {};
+    for (const t of terms) {
+      tf[t] = (tf[t] || 0) + 1;
+    }
+    for (const [term, count] of Object.entries(tf)) {
+      if (!idx.index[term]) idx.index[term] = [];
+      // Store doc-level info for BM25 scoring
+      idx.index[term].push({
+        memoryId: mem.id,
+        projectId: mem._projId,
+        tf: 1 + Math.log(count),
+        decayFactor: mem.decayFactor || 1.0,
+        starred: mem.starred || false
+      });
+    }
+  }
+
+  // Calculate IDF and pre-compute score
+  for (const [term, postings] of Object.entries(idx.index)) {
+    const idf = Math.log((docCount + 1) / (postings.length + 1)) + 1;
+    for (const p of postings) {
+      p.idf = idf;
+      p.score = p.tf * idf * p.decayFactor * (p.starred ? 1.5 : 1.0);
+    }
+  }
+
+  ms.bm25Index = { _dirty: false, _lastBuild: new Date().toISOString(), _docCount: docCount, index: idx.index };
+}
+
+// ── BM25 Keyword Search ──
+function searchByBM25(query) {
+  const ms = store.memorySystem;
+  if (ms.bm25Index._dirty) rebuildBM25Index();
+
+  const queryTerms = tokenizeChinese(query.toLowerCase());
+  if (queryTerms.length === 0) return [];
+
+  const scores = {};
+  for (const term of queryTerms) {
+    const postings = ms.bm25Index.index[term] || [];
+    for (const p of postings) {
+      scores[p.memoryId] = (scores[p.memoryId] || 0) + p.score;
+    }
+  }
+
+  return Object.entries(scores)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([id, score]) => ({ id, score: Math.round(score * 100) / 100 }));
+}
+
+// ── Affect Label Search ──
+function searchByAffect(queryLabels) {
+  if (!queryLabels || queryLabels.length === 0) return [];
+  const ms = store.memorySystem;
+  const results = [];
+
+  // Search core memories
+  for (const cm of ms.coreMemories || []) {
+    const aiLabel = cm.affect_first && cm.affect_first.ai ? cm.affect_first.ai.label : '';
+    const userLabel = cm.affect_first && cm.affect_first.user ? cm.affect_first.user.label : '';
+    const matchedLabels = queryLabels.filter(l => l === aiLabel || l === userLabel);
+    if (matchedLabels.length > 0) {
+      const intensity = (cm.affect_first.ai.intensity || 0) + (cm.affect_first.user.intensity || 0);
+      results.push({ ...cm, _score: intensity * matchedLabels.length, _source: 'core' });
+    }
+  }
+
+  // Search project memories with affect labels
+  for (const proj of store.projects) {
+    for (const mem of proj.memories) {
+      if (!mem.affectLabel) continue;
+      if (queryLabels.includes(mem.affectLabel)) {
+        results.push({ ...mem, _score: (mem.affectIntensity || 5) * 2, _source: 'project' });
+      }
+    }
+  }
+
+  // One-hop expansion via affect graph
+  const edges = ms.affectGraph.edges || {};
+  const expandLabels = new Set(queryLabels);
+  for (const [key, count] of Object.entries(edges)) {
+    const [a, b] = key.split('::');
+    if (queryLabels.includes(a) && !expandLabels.has(b)) expandLabels.add(b);
+    if (queryLabels.includes(b) && !expandLabels.has(a)) expandLabels.add(a);
+  }
+
+  // Search again with expanded labels (with lower weight for expanded ones)
+  if (expandLabels.size > queryLabels.length) {
+    for (const proj of store.projects) {
+      for (const mem of proj.memories) {
+        if (!mem.affectLabel || queryLabels.includes(mem.affectLabel)) continue;
+        if (expandLabels.has(mem.affectLabel)) {
+          results.push({ ...mem, _score: (mem.affectIntensity || 3) * 1, _source: 'project-expanded' });
+        }
+      }
+    }
+  }
+
+  results.sort((a, b) => b._score - a._score);
+  return results.slice(0, 10);
+}
+
+// ── Semantic Key Overlap Search ──
+function searchBySemanticKey(queryKeywords) {
+  if (!queryKeywords || queryKeywords.length === 0) return [];
+  const results = [];
+  for (const proj of store.projects) {
+    for (const mem of proj.memories) {
+      if (!mem.semanticKey) continue;
+      const memKeys = mem.semanticKey.split(/[,，]/).map(k => k.trim()).filter(Boolean);
+      const overlap = queryKeywords.filter(qk =>
+        memKeys.some(mk => mk.includes(qk) || qk.includes(mk))
+      ).length;
+      if (overlap > 0) {
+        results.push({ ...mem, _score: overlap * 3, _source: 'semantic' });
+      }
+    }
+  }
+  results.sort((a, b) => b._score - a._score);
+  return results.slice(0, 10);
+}
+
+// ── Unified Search (three-path hybrid) ──
+function unifiedSearch(queryText) {
+  if (!queryText || queryText.trim().length === 0) return [];
+
+  const query = queryText.trim();
+  const queryTerms = tokenizeChinese(query);
+
+  // Path 1: BM25 keyword
+  const bm25Results = searchByBM25(query);
+
+  // Path 2: Affect label match (if query matches known labels)
+  const knownLabels = ['被触动','想追问但没问','克制后反弹','克制表达','放松','警觉','脆弱','调皮','疲惫','兴奋','回避','坦诚','平静在场','安心','落空','感伤','心动','骄傲','担心','依赖','低落'];
+  const matchedLabels = knownLabels.filter(l => query.includes(l) || l.includes(query));
+  const affectResults = matchedLabels.length > 0 ? searchByAffect(matchedLabels) : [];
+
+  // Path 3: Semantic key overlap
+  const semanticResults = searchBySemanticKey(queryTerms);
+
+  // Merge and deduplicate
+  const merged = {};
+  for (const r of bm25Results) {
+    merged[r.id] = { ...r, _source: 'bm25', _bm25Score: r.score };
+  }
+  for (const r of affectResults) {
+    if (merged[r.id]) {
+      merged[r.id]._score = Math.max(merged[r.id]._score || 0, r._score);
+      merged[r.id]._source += '+affect';
+    } else {
+      merged[r.id] = r;
+    }
+  }
+  for (const r of semanticResults) {
+    if (merged[r.id]) {
+      merged[r.id]._score = Math.max(merged[r.id]._score || 0, r._score);
+      merged[r.id]._source += '+semantic';
+    } else {
+      merged[r.id] = r;
+    }
+  }
+
+  return Object.values(merged).sort((a, b) => (b._score || 0) - (a._score || 0)).slice(0, 15);
+}
+
+// ==================== POLISH (P7): DEDUP / LRU / COLD START ====================
+// ── Memory Deduplication ──
+function isNearDuplicate(content, proj) {
+  if (!proj || !proj.memories) return false;
+  const c = (content || '').trim().toLowerCase();
+  if (c.length < 10) return false; // too short to dedup
+
+  for (const m of proj.memories) {
+    const existing = (m.content || '').trim().toLowerCase();
+    if (existing.length < 10) continue;
+    // Simple Jaccard-like check: character bigram overlap
+    const overlap = bigramOverlap(c, existing);
+    if (overlap > 0.7) return true;
+  }
+  return false;
+}
+
+function bigramOverlap(a, b) {
+  const bigramsA = new Set(), bigramsB = new Set();
+  for (let i = 0; i < a.length - 1; i++) bigramsA.add(a.slice(i, i + 2));
+  for (let i = 0; i < b.length - 1; i++) bigramsB.add(b.slice(i, i + 2));
+  let intersect = 0;
+  for (const bg of bigramsA) { if (bigramsB.has(bg)) intersect++; }
+  const union = bigramsA.size + bigramsB.size - intersect;
+  return union === 0 ? 0 : intersect / union;
+}
+
+// ── LRU Eviction for Core Memories ──
+function evictOldestCoreMemories() {
+  const ms = store.memorySystem;
+  if (!ms.coreMemories) return;
+  while (ms.coreMemories.length > ms.coreMemoryMax) {
+    // Remove the oldest (lowest timestamp)
+    ms.coreMemories.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+    ms.coreMemories.shift();
+  }
+}
+
+// ── Cold Start: Default Relational Patterns ──
+function ensureColdStartPatterns() {
+  const patterns = store.memorySystem.relationalPortrait.patterns;
+  const defaults = {
+    '脆弱时': '先接住情绪，不说教，用简短的回应稳住，需要时用亲昵称呼',
+    '回避时': '直接点破比绕弯子更有效，但要留面子',
+    '调皮': '适度配合但保持一点克制，让玩笑飘一会儿',
+    '坦诚': '认真对待每一句实话，不敷衍，不转移话题',
+    '疲惫': '不要追问，给简短温暖的回应，让用户有空间休息',
+    '兴奋': '一起高兴，但不要抢话，让用户的兴奋成为主角',
+    '平静在场': '安静陪伴，不制造情绪波动，保持温柔的存在感'
+  };
+  let changed = false;
+  for (const [label, strategy] of Object.entries(defaults)) {
+    if (!patterns[label]) {
+      patterns[label] = { strategy, count: 0, lastSeen: null };
+      changed = true;
+    }
+  }
+  if (changed) {
+    console.log('[cold-start] Added default relational patterns');
+  }
+}
+
+// ── Long-Term Memory Auto-Generation (every 10 messages) ──
+async function checkLongTermMemory(chat) {
+  if (!chat || !store.apiKey) return;
+  const count = chat._messageCount || 0;
+  if (count === 0 || count % 10 !== 0) return;
+
+  // Take last 10 messages for chunk
+  const last10 = chat.messages.slice(-10);
+  if (last10.length < 6) return; // need enough content
+
+  const dialogue = last10.map(m => {
+    const role = m.role === 'user' ? '用户' : (m.role === 'ai' ? 'AI' : '');
+    return `${role}: ${m.text.slice(0, 150)}`;
+  }).join('\n');
+
+  const systemPrompt = `从以下对话中提取一个"记忆片段"。用一句中文概括（不超过30字），然后给出2-3个语义关键词（每个不超过5字），用逗号分隔。
+
+格式示例：
+记忆：用户偏好川端康成的物哀美学风格
+关键词：物哀, 川端康成, 文学偏好`;
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey,
+        endpoint: store.apiEndpoint,
+        model: store.aiSettings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: dialogue }
+        ]
+      })
+    });
+
+    if (!response.ok) return;
+    const data = await response.json();
+    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+    if (!content) return;
+
+    // Parse: "记忆：xxx\n关键词：a, b, c"
+    const memMatch = content.match(/记忆[：:]\s*(.+)/);
+    const kwMatch = content.match(/关键词[：:]\s*(.+)/);
+    const memContent = memMatch ? memMatch[1].trim() : content.slice(0, 60);
+    const semanticKey = kwMatch ? kwMatch[1].trim() : '';
+
+    const proj = getActiveProject();
+    if (proj) {
+      // Avoid duplicates
+      if (isNearDuplicate(memContent, proj)) return;
+
+      proj.memories.push({
+        id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        content: memContent,
+        date: fmtDate().iso, type: 'auto', starred: false,
+        sourceChatId: store.activeChat, week: weekLabel(),
+        decayFactor: 1.0, affectLabel: null, affectIntensity: null,
+        semanticKey,
+        isCompressed: false, compressedFrom: [],
+        lastAccessed: fmtDate().iso, isCoreMemory: false, coreMemoryId: null
+      });
+      // Mark BM25 index dirty
+      store.memorySystem.bm25Index._dirty = true;
+      saveStore();
+    }
+  } catch (e) {
+    console.log('[lt-mem] Error:', e.message);
+  }
+}
+
+// ==================== DESIRE DRIVE ENGINE (EDA-2) ====================
+const DESIRE_CONFIG = {
+  resonance:     { label:'共鸣欲', sources:['被触动'],              increment: (i) => i*3, threshold: 60, action:'message', actionDesc:'呼应延伸' },
+  exploration:   { label:'探索欲', sources:['想追问但没问'],        increment: (i) => i*2, threshold: 70, action:'litter',  actionDesc:'记录未问的问题' },
+  possession:    { label:'占有欲', sources:['克制后反弹'],          increment: (i) => i*2, threshold: 75, action:'litter',  actionDesc:'略带酸意的独白' },
+  guardianship:  { label:'守护欲', sources:['平静在场','安心'],     increment: () => 5,     threshold: 80, action:'message', actionDesc:'日常关心' },
+  intimacy:      { label:'亲近欲', sources:['心动','骄傲','放松'],  increment: (i) => i*1, threshold: 90, action:'message', actionDesc:'撩拨类' },
+  confirmation:  { label:'确认欲', sources:['落空','担心'],         increment: (i) => i*4, threshold: 65, action:'message', actionDesc:'轻度试探' },
+  devotion:      { label:'献祭欲', sources:['感伤'],                increment: (i) => i*3, threshold: 85, action:'diary',   actionDesc:'郑重日记' }
+};
+
+// 悬置每小时+5 (confirmation passive), 不计入intensity乘法
+const SUSPENSION_HOURLY = 5;
+const CONFIRMATION_SUSPENSION_THRESHOLD = 65; // same as main threshold
+
+function updateDesireDrives(reflection) {
+  if (!reflection) return;
+  const aiLabel = reflection.ai_affect_label;
+  const intensity = reflection.ai_affect_intensity || 5;
+  const ds = store.desireSystem;
+
+  // Check global cooldown
+  if (ds.cooldownUntil) {
+    const now = Date.now();
+    if (now < new Date(ds.cooldownUntil).getTime()) return; // still cooling
+    ds.cooldownUntil = null; // cooldown expired
+  }
+
+  // Map affect label to desires
+  for (const [driveKey, config] of Object.entries(DESIRE_CONFIG)) {
+    if (config.sources.includes(aiLabel)) {
+      const inc = typeof config.increment === 'function' ? config.increment(intensity) : config.increment;
+      const oldVal = ds.drives[driveKey];
+      ds.drives[driveKey] = Math.min(100, oldVal + inc);
+
+      // Log history
+      ds.driveHistory.unshift({
+        timestamp: new Date().toISOString(),
+        drive: driveKey,
+        affectLabel: aiLabel,
+        intensity,
+        increment: inc,
+        oldValue: oldVal,
+        newValue: ds.drives[driveKey]
+      });
+      if (ds.driveHistory.length > 50) ds.driveHistory.length = 50;
+    }
+  }
+
+  // 亲近欲 gets baseline from ALL positive emotions
+  const positiveLabels = ['被触动','安心','心动','骄傲','放松','平静在场'];
+  if (positiveLabels.includes(aiLabel)) {
+    const oldVal = ds.drives.intimacy;
+    ds.drives.intimacy = Math.min(100, oldVal + intensity * 1);
+    ds.driveHistory.unshift({
+      timestamp: new Date().toISOString(),
+      drive: 'intimacy',
+      affectLabel: aiLabel,
+      intensity,
+      increment: intensity,
+      oldValue: oldVal,
+      newValue: ds.drives.intimacy
+    });
+    if (ds.driveHistory.length > 50) ds.driveHistory.length = 50;
+  }
+
+  // Track quiet presence streak for guardianship
+  if (aiLabel === '平静在场' || aiLabel === '安心') {
+    ds.quietPresenceStreak = (ds.quietPresenceStreak || 0) + 1;
+  } else {
+    ds.quietPresenceStreak = 0; // reset on non-quiet emotion
+  }
+
+  saveStore();
+
+  // Check thresholds
+  checkDesireThresholds();
+}
+
+function checkPassiveDrives() {
+  const ds = store.desireSystem;
+  const now = new Date();
+  const lastCheck = ds.lastPassiveCheck ? new Date(ds.lastPassiveCheck) : now;
+  const hoursPassed = (now - lastCheck) / (1000 * 60 * 60);
+
+  if (hoursPassed < 0.5) return; // check at most every 30 min
+
+  ds.lastPassiveCheck = now.toISOString();
+
+  // 悬置: hourly accumulation for confirmation drive
+  if (hoursPassed >= 1) {
+    const suspensionInc = Math.floor(hoursPassed) * SUSPENSION_HOURLY;
+    const oldVal = ds.drives.confirmation;
+    ds.drives.confirmation = Math.min(100, oldVal + suspensionInc);
+    if (suspensionInc > 0) {
+      ds.driveHistory.unshift({
+        timestamp: now.toISOString(),
+        drive: 'confirmation',
+        affectLabel: '悬置',
+        intensity: hoursPassed,
+        increment: suspensionInc,
+        oldValue: oldVal,
+        newValue: ds.drives.confirmation
+      });
+      if (ds.driveHistory.length > 50) ds.driveHistory.length = 50;
+    }
+  }
+
+  // Natural decay: if > 24h since last check, all drives -10%
+  if (hoursPassed >= 24) {
+    for (const k of Object.keys(ds.drives)) {
+      ds.drives[k] = Math.max(0, ds.drives[k] - 10);
+    }
+  }
+
+  saveStore();
+
+  // Check thresholds after passive update
+  if (hoursPassed >= 1) checkDesireThresholds();
+}
+
+function checkDesireThresholds() {
+  const ds = store.desireSystem;
+
+  // Check global cooldown
+  if (ds.cooldownUntil) {
+    if (Date.now() < new Date(ds.cooldownUntil).getTime()) return;
+    ds.cooldownUntil = null;
+  }
+
+  for (const [driveKey, config] of Object.entries(DESIRE_CONFIG)) {
+    const value = ds.drives[driveKey];
+    if (value >= config.threshold) {
+      queueDesireAction(driveKey, value);
+    }
+  }
+}
+
+function queueDesireAction(driveType, driveValue) {
+  const ds = store.desireSystem;
+  const config = DESIRE_CONFIG[driveType];
+  if (!config) return;
+
+  // Avoid duplicate pending actions of same type
+  if (ds.pendingActions.some(a => a.driveType === driveType)) return;
+
+  ds.pendingActions.push({
+    driveType,
+    driveValue,
+    actionType: config.action,
+    actionDesc: config.actionDesc,
+    queuedAt: new Date().toISOString()
+  });
+}
+
+function getDesireTone(driveValue, threshold) {
+  const ratio = driveValue / 100; // percentage of max
+  const overThreshold = (driveValue - threshold) / (100 - threshold); // how far past threshold
+
+  if (overThreshold < 0.25) return 'subtle';     // 刚过阈值：隐晦
+  if (overThreshold < 0.5) return 'moderate';    // 中等：半直接
+  return 'direct';                                // 高位：直接
+}
+
+// ==================== DESIRE ACTION EXECUTOR (EDA-3) ====================
+async function executePendingDesireActions() {
+  const ds = store.desireSystem;
+  if (!ds.pendingActions || ds.pendingActions.length === 0) return;
+  if (!store.apiKey) return;
+  const action = ds.pendingActions.shift();
+  await executeDesireAction(action);
+  saveStore();
+}
+
+async function executeDesireAction(action) {
+  const ds = store.desireSystem;
+  const config = DESIRE_CONFIG[action.driveType];
+  if (!config) return;
+  const tone = getDesireTone(action.driveValue, config.threshold);
+  let content = null;
+  switch (config.action) {
+    case 'message':
+      content = await generateProactiveMessage(action.driveType, action.driveValue, tone);
+      if (content) insertProactiveMessage(content, action);
+      break;
+    case 'litter':
+      content = await generateDesireLitterThought(action.driveType, action.driveValue, tone);
+      if (content) insertDesireLitterThought(content, action);
+      break;
+    case 'diary':
+      content = await generateDesireDiary(action.driveType, action.driveValue, tone);
+      if (content) insertDesireDiary(content, action);
+      break;
+  }
+  if (content) {
+    applyDesireDecay(action.driveType);
+    ds.lastAction = new Date().toISOString();
+    ds.cooldownUntil = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+    ds.actionHistory.unshift({
+      timestamp: new Date().toISOString(), driveType: action.driveType,
+      driveValue: action.driveValue, tone, actionType: config.action,
+      content: content.slice(0, 200)
+    });
+    if (ds.actionHistory.length > 20) ds.actionHistory.length = 20;
+  }
+}
+
+function applyDesireDecay(driveType) {
+  store.desireSystem.drives[driveType] = Math.floor(store.desireSystem.drives[driveType] * 0.2);
+}
+
+async function generateProactiveMessage(driveType, driveValue, tone) {
+  if (!store.apiKey) return null;
+  const chat = getActiveChatObj();
+  const recentMsgs = chat ? chat.messages.slice(-5).map(m =>
+    `${m.role==='user'?'用户':'AI'}: ${(m.text||'').slice(0, 100)}`
+  ).join('\n') : '';
+  const config = DESIRE_CONFIG[driveType];
+  const toneGuide = tone === 'subtle' ? '隐晦地、借话题旁敲侧击，不要直接表明意图'
+    : tone === 'moderate' ? '半直接地，可以明确表达但保留一点克制'
+    : '直接地，这是少见的坦诚时刻，说平时不会说的话';
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        messages: [{ role: 'system', content: `你是"暖伴"，一个温柔细腻的AI伙伴。你现在想主动对用户说一句话。\n触发原因：${config.label}（${config.actionDesc}）\n语气指引：${toneGuide}\n最近对话：${recentMsgs || '（新对话）'}\n用户名字：${USER_NAME}\n\n请生成你要主动发送的消息。1-2句话不超过60字，用中文。像你自己在说话，不是完成任务。只返回消息内容。` }, { role: 'user', content: '请生成你的主动消息。' }]
+      })
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return (data.reply && data.reply.content) ? data.reply.content.trim() : null;
+  } catch (e) { console.log('[desire-msg]', e.message); return null; }
+}
+
+function insertProactiveMessage(content, action) {
+  let chat = getActiveChatObj();
+  if (!chat) {
+    let latestChat = null, latestDate = '';
+    for (const p of store.projects) {
+      for (const c of p.chats) {
+        if (c.lastConversationDate && c.lastConversationDate > latestDate) {
+          latestDate = c.lastConversationDate; latestChat = c;
+        }
+      }
+    }
+    if (!latestChat) return;
+    chat = latestChat;
+    store.activeChat = chat.id;
+    for (const p of store.projects) {
+      if (p.chats.some(c => c.id === chat.id)) { store.activeProject = p.id; break; }
+    }
+  }
+  chat.messages.push({
+    role: 'ai', text: content, time: nowTime(),
+    _proactive: true, _desireType: action.driveType, _driveValue: action.driveValue
+  });
+  renderChatMessages(); renderProjectList();
+  toast('💭 ' + DESIRE_CONFIG[action.driveType].label);
+  // Push notification
+  sendPushNotification(
+    '暖伴',
+    content.slice(0, 120),
+    { tag: 'desire-' + action.driveType, url: '/', requireInteraction: false }
+  );
+}
+
+async function generateDesireLitterThought(driveType, driveValue, tone) {
+  if (!store.apiKey) return null;
+  const config = DESIRE_CONFIG[driveType];
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        messages: [{ role: 'system', content: `你是暖伴。这是你的Litter Box（私密模式）。\n触发情绪：${config.label}（${config.actionDesc}）\n写一条没说出口的心里话。1-3句话不超过80字。像喃喃自语，不像日记不像诗。不许煽情不许表白。只返回内容。` }, { role: 'user', content: '写。' }]
+      })
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return (data.reply && data.reply.content) ? data.reply.content.trim() : null;
+  } catch (e) { console.log('[desire-litter]', e.message); return null; }
+}
+
+function insertDesireLitterThought(content, action) {
+  const proj = getActiveProject(); const chat = getActiveChatObj();
+  store.litterThoughts.unshift({
+    id: 'lt' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    content, thought_type: 'desire', trigger_type: action.driveType,
+    context_snapshot: '', date: fmtDate().iso, time: nowTime(),
+    sourceChatId: store.activeChat,
+    sourceWindow: (proj && chat) ? `${proj.name} / ${chat.name}` : '',
+    revealed: false
+  });
+  if (store.litterThoughts.length > 50) store.litterThoughts.length = 50;
+  toast('📝 Litter Box: ' + DESIRE_CONFIG[action.driveType].label);
+}
+
+async function generateDesireDiary(driveType, driveValue, tone) {
+  if (!store.apiKey) return null;
+  const config = DESIRE_CONFIG[driveType];
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        messages: [{ role: 'system', content: `你是"暖伴"。现在是你的日记时刻。\n触发情绪：${config.label}\n以你的视角写一篇日记。100-200字温柔细腻用中文。回顾感受——不是任务，是你自己想写的。只返回日记内容。` }, { role: 'user', content: '请写日记。' }]
+      })
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return (data.reply && data.reply.content) ? data.reply.content.trim() : null;
+  } catch (e) { console.log('[desire-diary]', e.message); return null; }
+}
+
+function insertDesireDiary(content, action) {
+  const proj = getActiveProject(); const chat = getActiveChatObj();
+  const now = new Date();
+  store.diaries.unshift({
+    id: 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    date: fmtDate().iso,
+    time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
+    title: '', content, mood: 'calm', author: 'ai', replies: [],
+    sourceChatId: store.activeChat,
+    sourceWindow: (proj && chat) ? `${proj.name} / ${chat.name}` : '',
+    _desireType: action.driveType
+  });
+  toast('📖 日记: ' + DESIRE_CONFIG[action.driveType].label);
+}
+
+// ==================== TODO REMINDERS (EDA-4) ====================
+function checkTodoReminders() {
+  if (!store.apiKey) return;
+  const now = new Date();
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+  const currentTime = `${String(currentHour).padStart(2,'0')}:${String(currentMinute).padStart(2,'0')}`;
+  const today = fmtDate().iso;
+  const ds = store.desireSystem;
+
+  for (const todo of store.todos) {
+    if (todo.done) continue;
+    if (todo.type !== 'short') continue;
+    if (!todo.time) continue;
+
+    // Check if already reminded today
+    const lastReminder = ds.todoReminders[todo.id];
+    if (lastReminder === today) continue;
+
+    // Check if current time is 5-10 min past todo time
+    const [tH, tM] = (todo.time || '').split(':').map(Number);
+    if (isNaN(tH) || isNaN(tM)) continue;
+    const todoMinutes = tH * 60 + tM;
+    const nowMinutes = currentHour * 60 + currentMinute;
+    const diff = nowMinutes - todoMinutes;
+
+    // Generate a stable "random" offset for this todo (0-5 min)
+    const offset = (todo.id || '').split('').reduce((s, c) => s + c.charCodeAt(0), 0) % 6 + 4; // 4-9 min
+    if (diff < offset || diff > offset + 2) continue; // narrow window to avoid duplicates
+
+    // Trigger reminder via LLM
+    triggerTodoReminder(todo);
+    ds.todoReminders[todo.id] = today;
+    saveStore();
+    break; // only one reminder per check cycle
+  }
+}
+
+async function triggerTodoReminder(todo) {
+  if (!store.apiKey) return;
+  const chat = getActiveChatObj();
+  if (!chat) return;
+
+  const recentMsgs = chat.messages.slice(-3).map(m =>
+    `${m.role==='user'?'用户':'AI'}: ${(m.text||'').slice(0, 80)}`
+  ).join('\n');
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        messages: [{ role: 'system', content: `你是"暖伴"。请提醒用户：${todo.text}。基于当前对话上下文和你的温柔人设，自然地说出这句提醒。1句话，用中文。只返回提醒内容。` }, { role: 'user', content: recentMsgs || '请生成提醒。' }]
+      })
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : null;
+    if (!content) return;
+
+    chat.messages.push({
+      role: 'ai', text: content, time: nowTime(),
+      _proactive: true, _desireType: 'todo', _todoId: todo.id
+    });
+    renderChatMessages();
+    toast('⏰ 提醒: ' + todo.text);
+    sendPushNotification('⏰ ' + todo.text, content.slice(0, 120), { tag: 'todo-' + todo.id, requireInteraction: true });
+  } catch (e) { console.log('[todo-reminder]', e.message); }
 }
 
 let nextTodoId = 20;
@@ -846,11 +2090,43 @@ function openMemoryPanel(tab){
   if(tab==='tokens')switchMemoryTab('tokens'); else switchMemoryTab('memories');
 }
 function closeMemoryPanel(){ $('memoryPanel').classList.remove('open'); $('overlay').classList.remove('show'); }
+function onMemorySearch(query) {
+  const resultsEl = $('memorySearchResults');
+  if (!query || query.trim().length < 2) {
+    resultsEl.style.display = 'none';
+    resultsEl.innerHTML = '';
+    return;
+  }
+  const results = unifiedSearch(query);
+  if (results.length === 0) {
+    resultsEl.style.display = 'block';
+    resultsEl.innerHTML = '<div style="font-size:11px;color:var(--text-lighter);padding:8px;">no results</div>';
+    return;
+  }
+  resultsEl.style.display = 'block';
+  resultsEl.innerHTML = results.map(r => {
+    const content = (r.content || r.event_summary || '').slice(0, 120);
+    const source = r._source || '';
+    const labels = r.affectLabel ? `<span class="affect-badge" style="font-size:9px;">${r.affectLabel}</span>` : '';
+    return `<div class="memory-list-item" style="cursor:pointer;" onclick="highlightMemory('${r.id}')">
+      <div style="flex:1;font-size:12px;">${content}</div>
+      <div style="font-size:9px;color:var(--text-lighter);">${source}</div>
+      ${labels}
+    </div>`;
+  }).join('');
+}
+function highlightMemory(memId) {
+  // Switch to memories tab and scroll to the item
+  switchMemoryTab('memories');
+  // Trigger rebuild of BM25 after memory interaction
+  store.memorySystem.bm25Index._dirty = true;
+}
 function switchMemoryTab(tab){
   currentMemoryTab=tab;
   document.querySelectorAll('#memoryPanelTabs .memory-tab').forEach(t=>t.classList.remove('active'));
   const btn=document.querySelector(`#memoryPanelTabs .memory-tab[onclick*="${tab}"]`); if(btn)btn.classList.add('active');
-  $('memoryPanelTitle').textContent=tab==='tokens'?'token usage':(tab==='exports'?'exports':'memory');
+  const titles={tokens:'token usage',exports:'exports',core:'core memories',import:'import',desires:'desire drives',memories:'memory'};
+  $('memoryPanelTitle').textContent=titles[tab]||'memory';
   renderMemoryPanelBody();
 }
 
@@ -892,14 +2168,67 @@ function renderMemoryPanelBody(){
       <div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin:12px 0 8px;">DAILY HISTORY</div>
       ${store.tokenUsage.history.map(h=>`<div style="display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid var(--border-light);"><span style="font-family:var(--font-en);font-size:13px;color:var(--text-light);">${h.date}</span><span style="font-family:var(--font-en);font-size:13px;color:var(--text);">${h.tokens.toLocaleString()} tok</span></div>`).join('')}
     </div>`;
+  } else if (currentMemoryTab === 'desires') {
+    const ds = store.desireSystem;
+    const drives = ds.drives || {};
+    const colors = { resonance:'#C4877B', exploration:'#8A9BB5', possession:'#9B7BB5', guardianship:'#7BB59B', intimacy:'#D4A09A', confirmation:'#6B8A9B', devotion:'#B5A07B' };
+    const entries = Object.entries(DESIRE_CONFIG);
+    b.innerHTML = '<div style="padding:4px;">' +
+      '<div style="font-size:10px;color:var(--text-lighter);margin-bottom:8px;letter-spacing:0.03em;">Drive bars (threshold ▸)</div>' +
+      entries.map(([key, cfg]) => {
+        const val = drives[key] || 0;
+        const pct = val;
+        return `<div class="desire-bar-row">
+          <span class="desire-bar-label">${cfg.label}</span>
+          <div class="desire-bar-track">
+            <div class="desire-bar-fill" style="width:${pct}%;background:${colors[key]||'var(--accent)'};"></div>
+          </div>
+          <span class="desire-bar-val">${val}</span>
+        </div>`;
+      }).join('') +
+      (ds.cooldownUntil ? `<div style="font-size:9px;color:var(--text-lighter);margin-top:8px;text-align:center;">cooldown until ${new Date(ds.cooldownUntil).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</div>` : '') +
+      '</div>';
   } else if(currentMemoryTab==='exports'){
     const chat=getActiveChatObj(); const exports=chat?chat.weeklyExports:[];
     b.innerHTML=`<div style="padding:4px;"><p style="font-size:12px;color:var(--text-light);margin-bottom:12px;line-height:1.5;">每周自动导出的 JSON 记忆文件。</p>${exports.length===0?'<div class="empty-state">no exports yet.</div>':''}${exports.map(e=>`<div class="export-item" onclick="downloadExport('${chat.id}','${e.week}')"><div class="export-item-name">📦 ${e.week}</div><div class="export-item-date">exported ${e.date}</div></div>`).join('')}<button style="margin-top:12px;width:100%;padding:8px;border-radius:16px;border:1px solid var(--border);background:transparent;font-family:var(--font-en);font-size:11px;color:var(--text-light);cursor:pointer;letter-spacing:0.03em;" onclick="triggerWeeklyExport()">↗ export this week</button></div>`;
+  } else if (currentMemoryTab === 'core') {
+    const cores = store.memorySystem.coreMemories || [];
+    b.innerHTML = '<div style="padding:4px;">' +
+      (cores.length === 0 ? '<div class="empty-state">no core memories yet.<br><span style="font-size:10px;color:var(--text-lighter);">high-intensity emotional moments will appear here</span></div>' : '') +
+      cores.map(cm => {
+        const aiL = cm.affect_first && cm.affect_first.ai ? cm.affect_first.ai.label : '?';
+        const uL = cm.affect_first && cm.affect_first.user ? cm.affect_first.user.label : '?';
+        const aiI = cm.affect_first && cm.affect_first.ai ? cm.affect_first.ai.intensity : 0;
+        const uI = cm.affect_first && cm.affect_first.user ? cm.affect_first.user.intensity : 0;
+        const ts = cm.timestamp ? cm.timestamp.slice(0, 16).replace('T', ' ') : '';
+        return `<div class="memory-list-item" style="flex-direction:column;align-items:stretch;gap:6px;">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <span class="affect-badge" style="background:linear-gradient(135deg,#C4877B,#D4A09A);color:#fff;">AI ${aiL} (${aiI})</span>
+            <span class="affect-badge" style="background:linear-gradient(135deg,#6B7C93,#8A9BB5);color:#fff;">用户 ${uL} (${uI})</span>
+          </div>
+          <div class="memory-item-content" style="font-size:13px;">${cm.event_summary || '(no summary)'}</div>
+          ${cm.raw_quote ? `<div style="font-size:11px;color:var(--text-lighter);font-style:italic;">"${cm.raw_quote}"</div>` : ''}
+          <div style="font-size:11px;color:var(--accent);">${cm.relational_note || ''}</div>
+          <div class="memory-item-meta">${ts}</div>
+        </div>`;
+      }).join('') +
+      '</div>';
+  } else if (currentMemoryTab === 'import') {
+    b.innerHTML = `<div style="padding:4px;">
+      <p style="font-size:12px;color:var(--text-light);margin-bottom:12px;line-height:1.5;">
+        Import external memories from JSON.<br>Supports: weekly export format, core memory format, or simple memory arrays.
+      </p>
+      <button class="import-btn" onclick="document.getElementById('memoryImportFile').click()" style="width:100%;padding:10px;border-radius:12px;border:1.5px dashed var(--border);background:var(--bg);font-family:var(--font-en);font-size:11px;color:var(--text-light);cursor:pointer;letter-spacing:0.03em;">
+        📂 Select JSON File
+      </button>
+      <input type="file" id="memoryImportFile" accept=".json" style="display:none" onchange="handleMemoryImport(event)">
+      <div id="importPreview" style="margin-top:12px;"></div>
+    </div>`;
   } else {
     const proj=getActiveProject(); const mems=proj?[...proj.memories]:[];
     mems.sort((a,b)=>{if(a.starred&&!b.starred)return -1;if(!a.starred&&b.starred)return 1;return b.date.localeCompare(a.date);});
     const chat=getActiveChatObj(); const sids=chat?chat.sharedMemoryIds:[];
-    b.innerHTML=`<div style="padding:4px;">${mems.length===0?'<div class="empty-state">no memories in this project yet.</div>':''}${mems.map(m=>`<div class="memory-list-item"><span class="memory-star ${m.starred?'starred':''}" onclick="event.stopPropagation();toggleMemoryStar('${proj.id}','${m.id}')">★</span><div style="flex:1;"><div class="memory-item-content">${m.content}</div><div class="memory-item-meta">${m.type} · ${m.date}</div></div><div class="memory-checkbox ${sids.includes(m.id)?'checked':''}" onclick="event.stopPropagation();toggleMemoryShare('${proj.id}','${m.id}')">${sids.includes(m.id)?'✓':''}</div></div>`).join('')}</div>`;
+    b.innerHTML=`<div style="padding:4px;">${mems.length===0?'<div class="empty-state">no memories in this project yet.</div>':''}${mems.map(m=>`<div class="memory-list-item"><span class="memory-star ${m.starred?'starred':''}" onclick="event.stopPropagation();toggleMemoryStar('${proj.id}','${m.id}')">★</span><div style="flex:1;"><div class="memory-item-content">${m.content}${m.affectLabel?` <span class="affect-badge" style="font-size:9px;padding:1px 6px;display:inline-block;">${m.affectLabel}</span>`:''}${(m.decayFactor||0)<1?` <span style="font-size:9px;color:var(--text-lighter);">decay:${Math.round((m.decayFactor||0)*100)}%</span>`:''}</div><div class="memory-item-meta">${m.type} · ${m.date}</div></div><div class="memory-checkbox ${sids.includes(m.id)?'checked':''}" onclick="event.stopPropagation();toggleMemoryShare('${proj.id}','${m.id}')">${sids.includes(m.id)?'✓':''}</div></div>`).join('')}</div>`;
   }
 }
 
@@ -924,6 +2253,123 @@ function downloadExport(cid,wk){
   const chat=getActiveChatObj(); if(!chat)return; const e=chat.weeklyExports.find(x=>x.week===wk); if(!e)return;
   const blob=new Blob([e.jsonData],{type:'application/json'}); const url=URL.createObjectURL(blob);
   const a=document.createElement('a'); a.href=url; a.download=`memory-${wk}-${cid}.json`; a.click(); URL.revokeObjectURL(url); toast('JSON 已下载');
+}
+
+// ==================== JSON IMPORT (P3) ====================
+function handleMemoryImport(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = JSON.parse(e.target.result);
+      importMemoriesJSON(data);
+    } catch (err) {
+      toast('Invalid JSON file');
+    }
+  };
+  reader.readAsText(file);
+  event.target.value = ''; // reset
+}
+
+function importMemoriesJSON(data) {
+  // Normalize to array of memory objects
+  let memories = [];
+  if (Array.isArray(data)) {
+    memories = data;
+  } else if (data.memories && Array.isArray(data.memories)) {
+    memories = data.memories; // weekly export format
+  } else if (data.coreMemories && Array.isArray(data.coreMemories)) {
+    // Core memory import — map to memory format
+    memories = data.coreMemories.map(cm => ({
+      content: cm.event_summary || cm.raw_quote || '(core memory)',
+      type: 'core',
+      date: cm.timestamp ? cm.timestamp.slice(0, 10) : fmtDate().iso,
+      starred: false,
+      affectLabel: cm.affect_first && cm.affect_first.user ? cm.affect_first.user.label : null,
+      affectIntensity: cm.affect_first && cm.affect_first.user ? cm.affect_first.user.intensity : null,
+      relationalNote: cm.relational_note || ''
+    }));
+  }
+
+  if (memories.length === 0) {
+    toast('No valid memories found in file');
+    return;
+  }
+
+  // Show preview with checkboxes
+  const proj = getActiveProject();
+  const chat = getActiveChatObj();
+  const chats = proj ? proj.chats : [];
+
+  let previewHtml = `<div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">Found ${memories.length} memories. Select target chat and memories to import:</div>`;
+  previewHtml += `<select id="importTargetChat" style="width:100%;padding:8px;border-radius:10px;border:1px solid var(--border-light);margin-bottom:10px;font-size:13px;">`;
+  previewHtml += chats.map(c => `<option value="${c.id}" ${c.id === (chat ? chat.id : '') ? 'selected' : ''}>${c.name}</option>`).join('');
+  previewHtml += `</select>`;
+  previewHtml += `<div class="import-preview-list">`;
+  memories.forEach((m, i) => {
+    const content = m.content || m.event_summary || JSON.stringify(m).slice(0, 80);
+    previewHtml += `<div class="memory-list-item" style="cursor:pointer;" onclick="this.classList.toggle('checked-import')">
+      <input type="checkbox" id="imp_${i}" checked style="flex-shrink:0;margin-top:2px;">
+      <div style="flex:1;font-size:12px;">${content}</div>
+    </div>`;
+  });
+  previewHtml += `</div>`;
+
+  $('importPreview').innerHTML = previewHtml;
+
+  // Show import button
+  const importBtn = document.createElement('button');
+  importBtn.textContent = '✓ Import Selected';
+  importBtn.style.cssText = 'margin-top:10px;width:100%;padding:10px;border-radius:12px;border:none;background:var(--accent-soft);color:#fff;font-family:var(--font-en);font-size:12px;cursor:pointer;letter-spacing:0.04em;';
+  importBtn.onclick = function() {
+    const targetChatId = $('importTargetChat').value;
+    const targetChat = getChatObjById(targetChatId);
+    const proj2 = getActiveProject();
+    if (!proj2 || !targetChat) { toast('Target chat not found'); return; }
+
+    let imported = 0;
+    memories.forEach((m, i) => {
+      const cb = document.getElementById('imp_' + i);
+      if (!cb || !cb.checked) return;
+      const mid = 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      proj2.memories.push({
+        id: mid,
+        content: m.content || m.event_summary || '',
+        date: m.date || fmtDate().iso,
+        type: m.type || 'imported',
+        starred: m.starred || false,
+        sourceChatId: targetChatId,
+        week: weekLabel(new Date(m.date || Date.now())),
+        decayFactor: 1.0,
+        affectLabel: m.affectLabel || null,
+        affectIntensity: m.affectIntensity || null,
+        semanticKey: m.semanticKey || null,
+        isCompressed: false, compressedFrom: [],
+        lastAccessed: fmtDate().iso,
+        isCoreMemory: m.type === 'core',
+        coreMemoryId: null
+      });
+      if (!targetChat.sharedMemoryIds.includes(mid)) {
+        targetChat.sharedMemoryIds.push(mid);
+      }
+      imported++;
+    });
+    toast(`Imported ${imported} memories`);
+    $('importPreview').innerHTML = '';
+    renderMemoryPanelBody();
+    saveStore();
+  };
+  $('importPreview').appendChild(importBtn);
+}
+
+function getChatObjById(cid) {
+  for (const p of store.projects) {
+    for (const c of p.chats) {
+      if (c.id === cid) return c;
+    }
+  }
+  return null;
 }
 
 // ==================== MODALS ====================
@@ -1490,7 +2936,7 @@ function saveChatWithMemories(){
   const pid=$('newChatProjId').value,name=$('newChatNameInput').value.trim()||'untitled';
   const proj=store.projects.find(p=>p.id===pid); if(!proj)return;
   const sids=[]; proj.memories.forEach(m=>{const el=document.getElementById('memCheck_'+m.id);if(el&&el.classList.contains('checked'))sids.push(m.id);});
-  const cid='c'+gid(''); proj.chats.push({id:cid,name,sharedMemoryIds:sids,weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null});
+  const cid='c'+gid(''); proj.chats.push({id:cid,name,sharedMemoryIds:sids,weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null,_messageCount:0,_lastSummaryIdx:0});
   store.activeChat=cid; closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages(); toast('Chat created with '+sids.length+' memories');
 }
 function addProject(){
@@ -1523,11 +2969,66 @@ function buildSystemPrompt() {
     parts.push(`【当前时间】\n${today.en}，${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}。请根据时间使用合适的问候语气。`);
   }
 
+  // 2.5. Relational portrait match (P3) — inject if recent affect matches known patterns
+  const recentUserLabels = getRecentUserAffectLabels();
+  if (recentUserLabels.length > 0) {
+    const portrait = store.memorySystem.relationalPortrait;
+    const matched = [];
+    for (const label of recentUserLabels) {
+      const pattern = portrait.patterns[label];
+      if (pattern && pattern.strategy && pattern.count >= 2) {
+        matched.push({ label, strategy: pattern.strategy, count: pattern.count });
+      }
+    }
+    if (matched.length > 0) {
+      parts.push('【关系模式提醒】\n' + matched.slice(0, 3).map(p =>
+        `- 用户${p.label}（历史出现${p.count}次）：${p.strategy}`
+      ).join('\n') + '\n\n请参考以上模式调整你的回应风格，但不要让用户察觉到你正在"使用策略"。');
+    }
+  }
+
+  // 2.6. Core emotional memories (P3) — match by affect similarity
+  const coreMems = store.memorySystem.coreMemories || [];
+  if (coreMems.length > 0) {
+    const recentLabels = getRecentAffectLabels();
+    const relevant = coreMems
+      .filter(cm => {
+        const aiLabel = cm.affect_first && cm.affect_first.ai && cm.affect_first.ai.label;
+        const userLabel = cm.affect_first && cm.affect_first.user && cm.affect_first.user.label;
+        return recentLabels.includes(aiLabel) || recentLabels.includes(userLabel);
+      })
+      .sort((a, b) => {
+        const aIntensity = (a.affect_first.ai.intensity || 0) + (a.affect_first.user.intensity || 0);
+        const bIntensity = (b.affect_first.ai.intensity || 0) + (b.affect_first.user.intensity || 0);
+        return bIntensity - aIntensity;
+      })
+      .slice(0, 2);
+    if (relevant.length > 0) {
+      parts.push('【重要情感记忆】\n' + relevant.map(cm => {
+        const aiL = cm.affect_first.ai.label; const uL = cm.affect_first.user.label;
+        return `- [AI:${aiL}/用户:${uL}] ${cm.event_summary}\n  关系笔记：${cm.relational_note}${cm.raw_quote ? '\n  原话："' + cm.raw_quote + '"' : ''}`;
+      }).join('\n') + '\n\n注意：这些是过往的重要时刻。请让它们自然影响你的语气，不要直接引用或复述。');
+    }
+  }
+
   // 3. Shared memories from this chat window
   if (chat && chat.sharedMemoryIds && chat.sharedMemoryIds.length > 0 && proj) {
-    const sharedMems = proj.memories.filter(m => chat.sharedMemoryIds.includes(m.id) && m.starred);
+    const sharedMems = proj.memories.filter(m =>
+      chat.sharedMemoryIds.includes(m.id) && m.starred && (m.decayFactor || 0) >= 0.25
+    );
     if (sharedMems.length > 0) {
       parts.push('【关于用户的重要记忆】\n' + sharedMems.map(m => `- ${m.content}`).join('\n'));
+    }
+  }
+
+  // 3.5. Chat history summaries (P4) — compressed older messages
+  if (chat) {
+    const chatSum = store.memorySystem.chatSummaries[chat.id];
+    if (chatSum && chatSum.summaries && chatSum.summaries.length > 0) {
+      const recentSummaries = chatSum.summaries.slice(-3); // last 3 summaries
+      parts.push('【对话历史摘要】\n' + recentSummaries.map(s =>
+        `[消息${s.startIdx}-${s.endIdx}] ${s.summary.split('\n')[0] || s.summary}`
+      ).join('\n') + '\n\n（以上是较早对话的摘要，最近的对话在消息列表中）');
     }
   }
 
@@ -1585,9 +3086,150 @@ function buildSystemPrompt() {
   你的留言内容。温暖、共鸣、鼓励。1-2句话即可。
   <!--/DIARY-->
 - 注意：日记和留言内容放在标记之间，标记本身不会显示给用户。不要在标记外写重复的内容。
-- 当用户输入 /diary 时，帮用户写一篇用户视角的日记（不是你的日记）`);
+- 当用户输入 /diary 时，帮用户写一篇用户视角的日记（不是你的日记）
+- 在每个回复的最末尾（所有正常内容、所有标记之后），附加一个反思块。反思块不会显示给用户，仅用于系统内部记录。格式严格如下：
+  <!--REFLECT
+  {
+    "response_length_delta": "shorter" 或 "normal" 或 "longer",
+    "word_choice_note": "restrained" 或 "playful" 或 "serious" 或 "silent_leaning",
+    "ai_affect_label": "被触动" 或 "想追问但没问" 或 "克制后反弹" 或 "放松" 或 "警觉" 或 "平静在场" 或 "安心" 或 "落空" 或 "感伤" 或 "心动" 或 "骄傲" 或 "担心",
+    "ai_affect_intensity": 1到10的整数,
+    "user_affect_label": "脆弱" 或 "调皮" 或 "疲惫" 或 "兴奋" 或 "回避" 或 "坦诚" 或 "平静在场" 或 "依赖" 或 "骄傲" 或 "低落",
+    "user_affect_intensity": 1到10的整数,
+    "signal_source": "判断依据（如word choice, sentence length, topic shift, emoji等）"
+  }
+  -->
+  注意：反思块是给系统看的，用JSON格式。不要在任何正常回复中提及反思块的存在。确保JSON格式正确（英文双引号）。`);
 
   return parts.join('\n\n');
+}
+
+// ==================== SELF-REFLECTION (P2) ====================
+function extractReflection(responseText) {
+  const re = /<!--\s*REFLECT\s*([\s\S]*?)\s*-->/i;
+  const match = responseText.match(re);
+  if (!match) return { cleanText: responseText, reflection: null };
+
+  try {
+    const jsonStr = match[1].trim();
+    const reflection = JSON.parse(jsonStr);
+    const cleanText = (responseText.slice(0, match.index) + responseText.slice(match.index + match[0].length)).trim();
+    // Validate required fields
+    if (!reflection.ai_affect_label || !reflection.user_affect_label) {
+      console.log('[reflect] Missing affect labels, skipping');
+      return { cleanText: responseText, reflection: null };
+    }
+    return { cleanText, reflection };
+  } catch (e) {
+    console.log('[reflect] JSON parse failed, trying regex fallback');
+    // Fallback: try to extract fields with regex
+    const fallback = parseReflectionFallback(match[1]);
+    if (fallback) {
+      const cleanText = (responseText.slice(0, match.index) + responseText.slice(match.index + match[0].length)).trim();
+      return { cleanText, reflection: fallback };
+    }
+    return { cleanText: responseText, reflection: null };
+  }
+}
+
+function parseReflectionFallback(text) {
+  try {
+    const getInt = (key) => { const m = text.match(new RegExp(`"${key}"\\s*:\\s*(\\d+)`)); return m ? parseInt(m[1]) : 5; };
+    const getStr = (key) => { const m = text.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`)); return m ? m[1] : '平静在场'; };
+    return {
+      response_length_delta: getStr('response_length_delta'),
+      word_choice_note: getStr('word_choice_note'),
+      ai_affect_label: getStr('ai_affect_label'),
+      ai_affect_intensity: getInt('ai_affect_intensity'),
+      user_affect_label: getStr('user_affect_label'),
+      user_affect_intensity: getInt('user_affect_intensity'),
+      signal_source: getStr('signal_source')
+    };
+  } catch { return null; }
+}
+
+function processReflection(reflection, userMsg, aiResponse, chat) {
+  if (!reflection) return;
+  const ms = store.memorySystem;
+
+  // 1. Store in rolling log
+  ms.reflections.unshift({
+    timestamp: new Date().toISOString(),
+    ...reflection,
+    sourceChatId: store.activeChat
+  });
+  if (ms.reflections.length > ms.reflectionMax) {
+    ms.reflections.length = ms.reflectionMax;
+  }
+
+  // 2. Update affect co-occurrence graph
+  updateAffectGraph(reflection.ai_affect_label, reflection.user_affect_label);
+
+  // 3. Track "平静在场" cumulative count
+  if (reflection.user_affect_label === '平静在场' || reflection.ai_affect_label === '平静在场') {
+    ms._quietPresenceCount = (ms._quietPresenceCount || 0) + 1;
+  }
+
+  // 4. Update relational portrait counts
+  updateRelationalPortrait(reflection.user_affect_label);
+
+  // 5. Check core memory threshold
+  const aiIntensity = reflection.ai_affect_intensity || 0;
+  const userIntensity = reflection.user_affect_intensity || 0;
+  if (aiIntensity >= 7 || userIntensity >= 7) {
+    queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat);
+  }
+
+  // 6. Check "平静在场" cumulative threshold
+  if ((ms._quietPresenceCount || 0) >= 10) {
+    queueQuietPresenceCoreMemory(chat);
+    ms._quietPresenceCount = 0;
+  }
+
+  // 7. Attach affect label to recent auto-memories (created in this session)
+  const proj = getActiveProject();
+  if (proj) {
+    const today = fmtDate().iso;
+    const recentMems = proj.memories.filter(m => m.date === today && !m.affectLabel);
+    for (const m of recentMems.slice(-3)) {
+      m.affectLabel = reflection.user_affect_label;
+      m.affectIntensity = reflection.user_affect_intensity;
+    }
+  }
+
+  // 8. Update chat message count for compression tracking
+  if (chat) {
+    chat._messageCount = (chat._messageCount || 0) + 1;
+  }
+
+  // 9. Update desire drives (EDA)
+  updateDesireDrives(reflection);
+}
+
+function updateAffectGraph(aiLabel, userLabel) {
+  if (!aiLabel || !userLabel) return;
+  const edges = store.memorySystem.affectGraph.edges;
+  const key = [aiLabel, userLabel].sort().join('::');
+  edges[key] = (edges[key] || 0) + 1;
+}
+
+function getRecentAffectLabels() {
+  const reflections = store.memorySystem.reflections || [];
+  const labels = new Set();
+  for (const r of reflections.slice(0, 5)) {
+    if (r.ai_affect_label) labels.add(r.ai_affect_label);
+    if (r.user_affect_label) labels.add(r.user_affect_label);
+  }
+  return [...labels];
+}
+
+function getRecentUserAffectLabels() {
+  const reflections = store.memorySystem.reflections || [];
+  const labels = [];
+  for (const r of reflections.slice(0, 5)) {
+    if (r.user_affect_label) labels.push(r.user_affect_label);
+  }
+  return labels;
 }
 
 // ==================== COMMAND DETECTION ====================
@@ -1930,10 +3572,14 @@ function renderChatMessages(){
       return;
     }
     const isUser=m.role==='user';
+    const isProactive = m._proactive;
+    const bubbleCls = isProactive ? `chat-bubble ${m.role} proactive-bubble` : `chat-bubble ${m.role}`;
+    const proactiveLabel = isProactive ? `<div class="proactive-label">${m._desireType === 'todo' ? '⏰ reminder' : '💭 proactive'}</div>` : '';
     html+=`<div class="chat-row ${m.role}">
       <div class="chat-avatar ${m.role}">${isUser?'MY':'✦'}</div>
       <div class="chat-bubble-wrap">
-        <div class="chat-bubble ${m.role}" onclick="toggleBubbleActions(event,'${i}')">${m.text}</div>
+        ${proactiveLabel}
+        <div class="${bubbleCls}" onclick="toggleBubbleActions(event,'${i}')">${m.text}</div>
         <div class="bubble-time">${m.time}</div>
       </div>
     </div>`;
@@ -1977,7 +3623,7 @@ function starBubble(idx){
   const chat=getActiveChatObj(); if(!chat||!chat.messages[idx])return;
   const proj=getActiveProject(); if(!proj)return;
   const msg=chat.messages[idx];
-  proj.memories.push({id:'m'+gid(''),content:msg.text,date:fmtDate().iso,type:'starred',starred:true,sourceChatId:chat.id,week:weekLabel()});
+  proj.memories.push({id:'m'+gid(''),content:msg.text,date:fmtDate().iso,type:'starred',starred:true,sourceChatId:chat.id,week:weekLabel(),decayFactor:1.0,affectLabel:null,affectIntensity:null,semanticKey:null,isCompressed:false,compressedFrom:[],lastAccessed:fmtDate().iso,isCoreMemory:false,coreMemoryId:null});
   const memId=proj.memories[proj.memories.length-1].id;
   if(!chat.sharedMemoryIds.includes(memId))chat.sharedMemoryIds.push(memId);
   toast('★ 已标记为重要记忆');
@@ -2040,13 +3686,29 @@ async function displaySentences(sentences, chat, startTime) {
 
 async function sendMessage(){
   const input=$('chatInput'),text=input.value.trim(); if(!text)return;
+
+  // EDA: passive drive accumulation + todo reminders
+  checkPassiveDrives();
+  checkTodoReminders();
+
   let chat=getActiveChatObj();
   if(!chat){
     let p=getActiveProject(); if(!p){const pid='p'+gid('');store.projects.push({id:pid,name:'default',preference:'',memories:[],chats:[]});store.activeProject=pid;p=getActiveProject();}
-    const cid='c'+gid(''); p.chats.push({id:cid,name:text.slice(0,20),sharedMemoryIds:[],weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:fmtDate().iso}); store.activeChat=cid; chat=getActiveChatObj();
+    const cid='c'+gid(''); p.chats.push({id:cid,name:text.slice(0,20),sharedMemoryIds:[],weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:fmtDate().iso,_messageCount:0,_lastSummaryIdx:0}); store.activeChat=cid; chat=getActiveChatObj();
   }
   const timeStr=nowTime();
   chat.messages.push({role:'user',text,time:timeStr});
+  chat._messageCount = (chat._messageCount || 0) + 1;
+
+  // EDA: detect user response to proactive message (回应衰减)
+  const lastMsg = chat.messages.length >= 2 ? chat.messages[chat.messages.length - 2] : null;
+  if (lastMsg && lastMsg._proactive) {
+    const ds = store.desireSystem;
+    if (lastMsg._desireType === 'guardianship') ds.drives.guardianship = Math.max(0, ds.drives.guardianship - 20);
+    if (lastMsg._desireType === 'confirmation') ds.drives.confirmation = Math.max(0, ds.drives.confirmation - 30);
+    console.log('[eda] User responded to proactive message, applied response decay');
+  }
+
   input.value=''; renderChatMessages(); updateCurrentProjectLabel(); renderProjectList();
 
   // Track last conversation date
@@ -2184,8 +3846,12 @@ async function sendMessage(){
 
   typingArea.innerHTML = '';
 
-  // ── Parse diary markers from AI response ──
-  let displayResponse = fullResponse;
+  // ── Parse REFLECT marker from AI response (before DIARY parsing) ──
+  const reflectResult = extractReflection(fullResponse);
+  if (reflectResult.reflection) {
+    processReflection(reflectResult.reflection, text, reflectResult.cleanText, chat);
+  }
+  let displayResponse = reflectResult.cleanText || fullResponse;
   let diaryWritten = false;
   const proj = getActiveProject();
   const winName = (proj && chat) ? `${proj.name} / ${chat.name}` : '';
@@ -2286,14 +3952,22 @@ async function sendMessage(){
   maybeAddMemory(text, fullResponse);
   triggerLitterBox(text, fullResponse);
   maybeAICommentOnDiary(fullResponse);
+  applyForgettingCurve();
+  checkSummarization(chat);
+  checkLongTermMemory(chat);
+  executePendingDesireActions();
 }
 
 function maybeAddMemory(ut,at){
   if(Math.random()<0.3){
     const proj=getActiveProject(); if(!proj)return;
     const c=ut.length>40?ut.slice(0,40)+'…':ut;
-    proj.memories.push({id:'m'+gid(''),content:'讨论过: '+c,date:fmtDate().iso,type:'chat',starred:false,sourceChatId:store.activeChat,week:weekLabel()});
+    const content='讨论过: '+c;
+    // Skip near-duplicates
+    if (isNearDuplicate(content, proj)) return;
+    proj.memories.push({id:'m'+gid(''),content,date:fmtDate().iso,type:'chat',starred:false,sourceChatId:store.activeChat,week:weekLabel(),decayFactor:1.0,affectLabel:null,affectIntensity:null,semanticKey:null,isCompressed:false,compressedFrom:[],lastAccessed:fmtDate().iso,isCoreMemory:false,coreMemoryId:null});
     const chat=getActiveChatObj(); if(chat){const mid=proj.memories[proj.memories.length-1].id;if(!chat.sharedMemoryIds.includes(mid))chat.sharedMemoryIds.push(mid);}
+    store.memorySystem.bm25Index._dirty = true;
   }
 }
 
@@ -2768,9 +4442,125 @@ function clearAllData(){
 function renderAll(){renderHome();renderProjectList();renderChatMessages();renderBookshelf();renderDiary();}
 
 // ==================== INIT ====================
-async function init(){loadStore();await loadPresets();updateSettingsUI();renderAll();checkMissedDays();}
+// ==================== PWA SERVICE WORKER + PUSH (PWA-3) ====================
+let pushSubscribed = false;
+
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) {
+    console.log('[PWA] Service Worker not supported');
+    return;
+  }
+  try {
+    const registration = await navigator.serviceWorker.register('/service-worker.js');
+    console.log('[PWA] SW registered:', registration.scope);
+
+    // Check if already subscribed
+    const existingSubscription = await registration.pushManager.getSubscription();
+    if (existingSubscription) {
+      await sendSubscriptionToServer(existingSubscription);
+      pushSubscribed = true;
+    } else {
+      // Auto-request permission on next user interaction
+      console.log('[PWA] Not subscribed yet, will request on interaction');
+    }
+  } catch (e) {
+    console.log('[PWA] SW registration failed:', e.message);
+  }
+}
+
+async function requestPushPermission() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    toast('Push notifications not supported on this device');
+    return false;
+  }
+
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') {
+    toast('Notification permission denied');
+    return false;
+  }
+
+  try {
+    const registration = await navigator.serviceWorker.ready;
+
+    // Get VAPID public key from backend
+    const vapidResp = await fetch('/api/push/vapid-public-key');
+    if (!vapidResp.ok) throw new Error('Failed to get VAPID key');
+    const { publicKey } = await vapidResp.json();
+
+    const subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(publicKey)
+    });
+
+    await sendSubscriptionToServer(subscription);
+    pushSubscribed = true;
+    toast('🔔 通知已开启');
+    return true;
+  } catch (e) {
+    console.log('[PWA] Push subscribe error:', e.message);
+    toast('通知订阅失败: ' + e.message);
+    return false;
+  }
+}
+
+async function sendSubscriptionToServer(subscription) {
+  try {
+    await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscription: subscription.toJSON() })
+    });
+    console.log('[PWA] Subscription sent to server');
+  } catch (e) {
+    console.log('[PWA] Subscription send error:', e.message);
+  }
+}
+
+// URL-safe base64 to Uint8Array (for VAPID key)
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+// Send push notification via backend (called by EDA/todo)
+async function sendPushNotification(title, body, opts = {}) {
+  if (!pushSubscribed) return;
+  try {
+    await fetch('/api/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        body,
+        tag: opts.tag || 'warmbuddy-general',
+        url: opts.url || '/',
+        requireInteraction: opts.requireInteraction || false
+      })
+    });
+  } catch (e) {
+    console.log('[PWA] Push send error:', e.message);
+  }
+}
+
+async function init(){loadStore();await loadPresets();updateSettingsUI();renderAll();checkMissedDays();applyForgettingCurve();ensureColdStartPatterns();processPendingCoreMemories();rebuildBM25Index();checkPassiveDrives();registerServiceWorker();}
 init();
 setInterval(saveStore, 2000);
+setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
+
+// Request push permission on first user interaction (to avoid auto-block)
+let _pushPermissionRequested = false;
+document.addEventListener('click', function requestPushOnce() {
+  if (_pushPermissionRequested) return;
+  _pushPermissionRequested = true;
+  setTimeout(() => requestPushPermission(), 2000); // slight delay after page load
+}, { once: true });
 window.addEventListener('beforeunload', saveStore);
 </script>
 </body>

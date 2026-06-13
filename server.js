@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const webpush = require('web-push');
 
 const app = express();
 app.use(cors());
@@ -8,6 +9,19 @@ app.use(express.json());
 
 const cookieParser = require('cookie-parser');
 app.use(cookieParser());
+
+// ==================== WEB PUSH SETUP ====================
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:warmbuddy@example.com';
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  console.log('🔔 Web Push initialized');
+}
+
+// In-memory push subscription store (single-user app)
+let pushSubscription = null;
 
 // ==================== AUTH MIDDLEWARE ====================
 const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || 'mays2026';
@@ -780,6 +794,74 @@ app.post('/api/chat', async (req, res) => {
   } catch (err) {
     console.error('Chat error:', err);
     res.status(500).json({ error: 'Backend request failed: ' + err.message });
+  }
+});
+
+// ==================== PUSH NOTIFICATION ENDPOINTS ====================
+
+/**
+ * GET /api/push/vapid-public-key
+ * Returns the VAPID public key so the frontend can subscribe
+ */
+app.get('/api/push/vapid-public-key', (req, res) => {
+  if (!VAPID_PUBLIC_KEY) return res.status(500).json({ error: 'VAPID not configured' });
+  res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
+/**
+ * POST /api/push/subscribe
+ * Body: subscription object from PushManager.subscribe()
+ * Stores the subscription (single-user: overwrites previous)
+ */
+app.post('/api/push/subscribe', (req, res) => {
+  const { subscription } = req.body;
+  if (!subscription || !subscription.endpoint) {
+    return res.status(400).json({ error: 'Invalid subscription' });
+  }
+  pushSubscription = subscription;
+  console.log('[push] Subscription saved:', subscription.endpoint.slice(0, 60) + '...');
+  res.json({ success: true });
+});
+
+/**
+ * POST /api/push/send
+ * Body: { title, body, tag?, url?, requireInteraction? }
+ * Sends a push notification to the subscribed device
+ */
+app.post('/api/push/send', async (req, res) => {
+  if (!pushSubscription) {
+    return res.status(404).json({ error: 'No subscription registered' });
+  }
+  if (!VAPID_PUBLIC_KEY) {
+    return res.status(500).json({ error: 'VAPID not configured' });
+  }
+
+  const { title, body, tag, url, requireInteraction } = req.body || {};
+  if (!title && !body) {
+    return res.status(400).json({ error: 'Missing title or body' });
+  }
+
+  const payload = JSON.stringify({
+    title: title || '暖伴',
+    body: body || '',
+    tag: tag || 'warmbuddy-general',
+    data: { url: url || '/' },
+    requireInteraction: requireInteraction || false,
+    timestamp: Date.now()
+  });
+
+  try {
+    await webpush.sendNotification(pushSubscription, payload);
+    console.log('[push] Notification sent:', title);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[push] Send error:', err.message);
+    // If subscription is invalid/expired, clear it
+    if (err.statusCode === 404 || err.statusCode === 410) {
+      pushSubscription = null;
+      console.log('[push] Subscription expired, cleared');
+    }
+    res.status(502).json({ error: err.message });
   }
 });
 
