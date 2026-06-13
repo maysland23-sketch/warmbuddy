@@ -1054,7 +1054,7 @@ AI回应: ${item.aiResponse.slice(0, 150)}`;
 }]`;
 
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1169,7 +1169,7 @@ ${patternsText}
 请评估这些策略是否需要调整，返回优化后的完整策略列表。`;
 
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1243,7 +1243,7 @@ async function summarizeMessages(batch, startIdx, endIdx, chat) {
 - 情绪基调：用一个词描述`;
 
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1585,7 +1585,7 @@ async function checkLongTermMemory(chat) {
 关键词：物哀, 川端康成, 文学偏好`;
 
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1857,7 +1857,7 @@ async function generateProactiveMessage(driveType, driveValue, tone) {
     : '直接地，这是少见的坦诚时刻，说平时不会说的话';
 
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
@@ -1906,7 +1906,7 @@ async function generateDesireLitterThought(driveType, driveValue, tone) {
   if (!store.apiKey) return null;
   const config = DESIRE_CONFIG[driveType];
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
@@ -1937,7 +1937,7 @@ async function generateDesireDiary(driveType, driveValue, tone) {
   if (!store.apiKey) return null;
   const config = DESIRE_CONFIG[driveType];
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
@@ -2013,7 +2013,7 @@ async function triggerTodoReminder(todo) {
   ).join('\n');
 
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
@@ -2405,7 +2405,7 @@ function closeModal() { $('modalOverlay').classList.remove('show'); }
 // ==================== PROVIDER PRESETS ====================
 async function loadPresets() {
   try {
-    const resp = await fetch('/api/presets');
+    const resp = await fetch(BACKEND_URL + '/api/presets');
     const data = await resp.json();
     store.providerPresets = data.presets || [];
     // If no endpoint configured, set default preset
@@ -2499,7 +2499,7 @@ async function testConnection() {
   store.connectionStatus = 'testing';
 
   try {
-    const response = await fetch('/api/test-connection', {
+    const response = await fetch(BACKEND_URL + '/api/test-connection', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ apiKey, endpoint, model })
@@ -2534,7 +2534,7 @@ async function testConnection() {
 async function fetchModelsFromAPI() {
   if (!store.apiKey) { toast('Please configure API key first'); return; }
   try {
-    const response = await fetch('/api/models', {
+    const response = await fetch(BACKEND_URL + '/api/models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ apiKey: store.apiKey, endpoint: store.apiEndpoint })
@@ -2849,7 +2849,7 @@ ${recentMsgs}
 请生成这一刻你没说出口的心里话。`;
 
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
@@ -3331,7 +3331,7 @@ async function executeCommand(cmd, userText) {
 async function classifyDiaryIntent(userText) {
   if (!store.apiKey) return 'none';
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3362,7 +3362,7 @@ async function genAIResponseForCommand(userPrompt, systemPrompt) {
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
     ];
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -3794,7 +3794,7 @@ async function sendMessage(){
   const bubbleTime = nowTime();
 
   try {
-    const response = await fetch('/api/chat/stream', {
+    const response = await fetch(BACKEND_URL + '/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -4092,7 +4092,7 @@ async function doSubmitAskAI(){
   if (!store.apiKey) { toast('请先配置 API Key'); return openBookDetail(bid); }
   const prompt = `关于书籍《${book.title}》中的这段话："${hl.text}"${hl.note ? '，我的笔记是：'+hl.note : ''}。请用中文简短点评这段话（2-3句话），可以从文学角度、情感角度或叙事角度分析。`;
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model, messages: [{ role: 'user', content: prompt }] })
@@ -4117,7 +4117,7 @@ async function submitAskAI(){
 
   const prompt = `关于书籍《${book.title}》中的这段话："${hl.text}"${hl.note ? '，我的笔记是：'+hl.note : ''}。请用中文简短点评这段话（2-3句话），可以从文学角度、情感角度或叙事角度分析。`;
   try {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
