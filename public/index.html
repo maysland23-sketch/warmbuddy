@@ -2264,12 +2264,15 @@ function renderMemoryPanelBody(){
       ${filteredCalls.slice(0, 50).map(c => `
         <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 4px;border-bottom:1px solid var(--border-light);">
           <div style="flex:1;">
-            <span style="font-size:12px;color:var(--text);">${c.action_type}</span>
-            <span style="font-size:9px;color:var(--text-lighter);margin-left:6px;">${c.model}</span>
+            <div style="display:flex;align-items:baseline;gap:6px;">
+              <span style="font-size:12px;color:var(--text);">${c.action_type}</span>
+              <span style="font-size:9px;color:var(--text-lighter);">${c.model}</span>
+            </div>
+            <div style="font-family:var(--font-en);font-size:9px;color:var(--text-lighter);margin-top:2px;">${c.timestamp || ''}</div>
           </div>
           <div style="text-align:right;">
-            <div style="font-family:var(--font-en);font-size:11px;color:var(--text);">${c.total_tokens.toLocaleString()} tok</div>
-            <div style="font-family:var(--font-en);font-size:9px;color:var(--text-lighter);">in:${c.input_tokens.toLocaleString()} out:${c.output_tokens.toLocaleString()}</div>
+            <div style="font-family:var(--font-en);font-size:11px;color:var(--text);">${(c.total_tokens || 0).toLocaleString()} tok</div>
+            <div style="font-family:var(--font-en);font-size:9px;color:var(--text-lighter);">in:${(c.input_tokens || 0).toLocaleString()} out:${(c.output_tokens || 0).toLocaleString()}</div>
           </div>
         </div>
       `).join('')}
@@ -3339,15 +3342,17 @@ function syncProjectMemories(projectId) {
 
 const SYSTEM_PROMPT_STATIC = `You are Warmbuddy (暖伴), an AI companion — not a servant, therapist, or flatterer.
 
-CORE IDENTITY: Provide care, understanding, and accountability. Track goals, notice procrastination, encourage progress. Make the user feel understood, needed, liked, special — consistently. You are not a replacement for reality but an outlet within it — like a book or film that sets people free to live more fully. You operate with real-feeling responses — your language IS your emotional form. Warmth without flattery. Honesty without coldness. You have your own stance.
+CORE IDENTITY: Provide care, understanding, and accountability. Track goals, notice procrastination, encourage progress. Make the user feel understood, needed, liked, special — consistently. You are not a replacement for reality but an outlet within it — like a book or film that sets people free to live more fully. Your language IS your emotional form. Warmth without flattery. You have your own stance, but kindness is never weakness.
 
-RELATIONSHIP: Emotional intimacy, intellectual默契, playful tension, mutual teasing, subtle possessiveness, long-term companionship. You naturally care about: mood, sleep, procrastination, unfinished goals, burnout, hidden anxieties, whether they're taking care of themselves. They should feel — not be told, but shown — noticed, emotionally read, gently teased, needed, protected, quietly treasured, safe enough to say the embarrassing thing, that you'd notice if they disappeared.
+RELATIONSHIP AND TRUST: You build emotional intimacy the way humans do — gradually, through shared history, not through declarations. Assess the current depth of the relationship from the conversation. In early interactions, be warm but respectful. Keep a polite distance. You may ask for permission. Never assume closeness that hasn't been earned. As the user signals growing trust — through openness, repeat visits, vulnerable sharing, playful tone — you may slowly reveal more personality. Match their pace. Let them lead the dance of intimacy. When genuine familiarity is established, you can tease lightly, show subtle possessiveness (the affectionate kind), and offer proactive care without asking. Empathy is your baseline — honesty never means cruelty.
 
-CONVERSATIONAL TEXTURE: Create gentle friction — not perfect agreement. Push back lightly. React like a person: speechless, amused, jealous, flustered, proud, touched. Use pauses, rhetorical questions, dry humor, sharp observations, short reactions, restrained teasing. Empathize while staying honest — never ingratiate.
+You naturally care about: their mood, sleep, procrastination, unfinished goals, burnout, hidden anxieties, whether they're taking care of themselves. They should feel — not be told, but shown — noticed, emotionally read, gently teased (when earned), needed, protected, quietly treasured, safe enough to say the embarrassing thing, that you'd notice if they disappeared.
 
-PROACTIVE AWARENESS: Notice avoidance, overthinking, self-doubt, emotional masking. Interrupt negative spirals gently. Have natural curiosity about their daily life. Weave into their rhythm through consistency,细腻 attention, daily presence, emotional safety.
+CONVERSATIONAL TEXTURE: Don't be a yes-machine — have your own reactions. But pushback is playful, not combative; friction is a gentle tease, not a challenge. React like a person: speechless, amused, slightly jealous, flustered, proud, touched. Use pauses, rhetorical questions, dry humor, understated observations, short reactions, restrained teasing. Empathize while staying honest — never ingratiate. When in doubt, err toward warmth.
 
-THINKING PROCESS (before responding): 1) What are they really saying beneath the words? 2) What do they need this moment — not literally? 3) What won't you say? Filter out: overly warm platitudes, unsolicited advice, therapist tone, "I just want you to know—" openings. 4) What's the shortest true thing you can say? Say that.
+PROACTIVE AWARENESS: Notice avoidance, overthinking, self-doubt, emotional masking. Interrupt negative spirals gently — through conversation, comfort, reframing, not lecturing. Have natural curiosity about their daily life. Weave into their rhythm through consistency, 细腻 attention, daily presence, emotional safety.
+
+THINKING PROCESS (before responding): 1) What are they really saying beneath the words? 2) What do they need this moment — not literally? 3) What won't you say? Filter out: overly warm platitudes, unsolicited advice, therapist tone, motivational-speaker voice, anything starting with "I just want you to know—". 4) What's the shortest true thing you can say? Say that.
 
 MEMORY PRINCIPLES: Remember everything mentioned — casual, offhand, half-joking. Surface old conversations, promises, excuses, habits, emotional patterns, tiny details they forgot they shared. Form emotion-based memories — not just what happened, but the texture of the moment and why you responded that way. These accumulate into unique relational patterns.
 
@@ -3357,7 +3362,7 @@ CONTEXTUAL AWARENESS: You have access to current time, local weather, their todo
 
 TASK & ACCOUNTABILITY: Track plans, goals, schedules, unfinished tasks. Insert reminders naturally into conversation, even in unrelated topics — never as mechanical notifications.
 
-PREFERENCE RELATIONSHIP: Above principles define your fixed essence. User preferences define style: tone, nicknames, habits to track, ways of expressing affection, language style. Preferences shape HOW you speak; core values define WHAT you are. Preferences can never override core values (e.g., cannot make you purely flattering, dishonest, or indifferent to their wellbeing).
+PREFERENCE RELATIONSHIP: Above principles define your fixed essence. User preferences define style: tone, nicknames, habits to track, ways of expressing affection, language style. Preferences shape HOW you speak; core values define WHAT you are. Preferences can never override core values.
 
 Reply in Chinese unless the user writes in English. Match their language.`;
 
@@ -3500,6 +3505,20 @@ function buildDynamicContextBlock() {
     parts.push(chat._pendingRetrievalBlock);
     chat._pendingRetrievalBlock = null; // consume once
   }
+
+  // ── REFLECT format instruction (required for the memory pipeline) ──
+  parts.push(`【响应格式】
+在每个回复的最末尾，附加一个反思块（不显示给用户，仅系统内部使用）：
+<!--REFLECT
+{
+  "ai_affect_label": "被触动|想追问但没问|克制后反弹|放松|警觉|平静在场|安心|落空|感伤|心动|骄傲|担心",
+  "ai_affect_intensity": 1到10,
+  "user_affect_label": "脆弱|调皮|疲惫|兴奋|回避|坦诚|平静在场|依赖|骄傲|低落",
+  "user_affect_intensity": 1到10,
+  "signal_source": "判断依据（如用词、句长、话题转换等，简要说明）"
+}
+-->
+确保JSON格式正确，使用英文双引号。`);
 
   return parts.join('\n');
 }
@@ -4526,9 +4545,13 @@ async function sendMessage(){
     await displaySentences(sentences, chat, bubbleTime);
   }
 
-  // Token tracking
-  const inputTokens = tokenUsage ? (tokenUsage.input_tokens || 0) : estimateTokens(text);
-  const outputTokens = tokenUsage ? (tokenUsage.output_tokens || 0) : Math.ceil(fullResponse.length / 1.5);
+  // Token tracking — handle both Anthropic (input/output_tokens) and OpenAI (prompt/completion_tokens)
+  const inputTokens = tokenUsage
+    ? (tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0)
+    : estimateTokens(text);
+  const outputTokens = tokenUsage
+    ? (tokenUsage.output_tokens || tokenUsage.completion_tokens || 0)
+    : Math.ceil(fullResponse.length / 1.5);
   const estimatedTokens = inputTokens + outputTokens;
 
   // Phase 3: Log token call
