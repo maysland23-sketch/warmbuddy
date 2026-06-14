@@ -846,6 +846,121 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+// ==================== SEARCH ENDPOINT ====================
+const SEARCH_API_KEY = (process.env.SEARCH_API_KEY || '').trim();
+
+app.post('/api/search', async (req, res) => {
+  const { query } = req.body;
+  if (!query || !query.trim()) {
+    return res.status(400).json({ error: 'Missing search query' });
+  }
+
+  const q = query.trim();
+
+  try {
+    let results = '';
+
+    if (SEARCH_API_KEY) {
+      // Paid search API — use SerpAPI-compatible endpoint or Brave Search
+      const searchEndpoint = process.env.SEARCH_API_ENDPOINT || 'https://serpapi.com/search';
+      const resp = await fetch(`${searchEndpoint}?q=${encodeURIComponent(q)}&api_key=${SEARCH_API_KEY}`);
+      if (!resp.ok) throw new Error(`Search API returned ${resp.status}`);
+      const data = await resp.json();
+      if (data.organic_results) {
+        results = data.organic_results.slice(0, 3)
+          .map(r => `${r.title}: ${r.snippet}`)
+          .join(' | ');
+      } else if (data.web && data.web.results) {
+        results = data.web.results.slice(0, 3)
+          .map(r => `${r.title}: ${r.description}`)
+          .join(' | ');
+      } else {
+        results = JSON.stringify(data).slice(0, 500);
+      }
+    } else {
+      // Free DuckDuckGo Instant Answer API (no key needed)
+      const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`;
+      const resp = await fetch(ddgUrl);
+      if (!resp.ok) throw new Error(`DuckDuckGo returned ${resp.status}`);
+      const data = await resp.json();
+
+      const parts = [];
+      if (data.AbstractText && data.AbstractText.trim()) {
+        parts.push(data.AbstractText.trim());
+      }
+      if (data.Answer && data.Answer.trim()) {
+        parts.push(data.Answer.trim());
+      }
+      if (data.RelatedTopics && Array.isArray(data.RelatedTopics)) {
+        for (const topic of data.RelatedTopics.slice(0, 3)) {
+          if (topic.Text) parts.push(topic.Text.trim());
+        }
+      }
+      results = parts.join(' | ');
+      if (!results) results = '(no results found)';
+    }
+
+    if (results.length > 500) {
+      results = results.slice(0, 497) + '...';
+    }
+
+    console.log(`[search] query="${q}" results=${results.length} chars`);
+    res.json({ query: q, results });
+  } catch (err) {
+    console.error('[search] Error:', err.message);
+    res.status(502).json({ error: err.message, results: '(search unavailable)' });
+  }
+});
+
+// ==================== WEATHER ENDPOINT ====================
+const WEATHER_API_KEY = (process.env.WEATHER_API_KEY || '').trim();
+
+app.post('/api/weather', async (req, res) => {
+  const { lat, lon } = req.body;
+  if (lat == null || lon == null) {
+    return res.status(400).json({ error: 'Missing lat/lon' });
+  }
+
+  try {
+    let weatherText = '';
+
+    if (WEATHER_API_KEY) {
+      // Paid: OpenWeatherMap with Chinese locale
+      const owmUrl = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${WEATHER_API_KEY}&units=metric&lang=zh_cn`;
+      const resp = await fetch(owmUrl);
+      if (!resp.ok) throw new Error(`OpenWeatherMap returned ${resp.status}`);
+      const data = await resp.json();
+      weatherText = `${data.name || ''} ${data.weather?.[0]?.description || ''}, ${Math.round(data.main?.temp || 0)}°C, 湿度${data.main?.humidity || 0}%`;
+    } else {
+      // Free: Open-Meteo (no API key required)
+      const meteoUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`;
+      const resp = await fetch(meteoUrl);
+      if (!resp.ok) throw new Error(`Open-Meteo returned ${resp.status}`);
+      const data = await resp.json();
+      const cw = data.current_weather;
+      if (cw) {
+        const weatherCodeMap = {
+          0: '晴天', 1: '大部晴朗', 2: '多云', 3: '阴天',
+          45: '有雾', 48: '霜雾', 51: '小雨', 53: '中雨', 55: '大雨',
+          61: '小雨', 63: '中雨', 65: '大雨', 71: '小雪', 73: '中雪', 75: '大雪',
+          80: '阵雨', 81: '中阵雨', 82: '大阵雨',
+          95: '雷暴', 96: '雷暴伴冰雹', 99: '强雷暴伴冰雹'
+        };
+        const desc = weatherCodeMap[cw.weathercode] || `天气代码${cw.weathercode}`;
+        weatherText = `当前${desc}, ${cw.temperature}°C, 风速${cw.windspeed}km/h`;
+      }
+    }
+
+    if (!weatherText) weatherText = '(无法获取天气数据)';
+
+    console.log(`[weather] lat=${lat} lon=${lon} result="${weatherText}"`);
+    res.json({ weather: weatherText });
+  } catch (err) {
+    console.error('[weather] Error:', err.message);
+    res.status(502).json({ error: err.message, weather: '(天气服务不可用)' });
+  }
+});
+
 // ==================== PUSH NOTIFICATION ENDPOINTS ====================
 
 /**
