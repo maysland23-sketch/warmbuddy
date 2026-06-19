@@ -273,6 +273,24 @@ body {
 .intensity-bar-fill { height: 100%; border-radius: 2px; background: var(--accent); transition: width 0.3s; }
 .import-btn { display: flex; align-items: center; justify-content: center; gap: 6px; }
 .import-preview-list { max-height: 300px; overflow-y: auto; margin-top: 8px; }
+/* Batch star select (v2.0) */
+.batch-select-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 200; background: var(--bg-card); border-top: 1px solid var(--border); padding: 12px 16px; display: flex; align-items: center; gap: 12px; box-shadow: 0 -2px 12px rgba(0,0,0,0.06); transform: translateY(100%); transition: transform 0.25s ease; }
+.batch-select-bar.show { transform: translateY(0); }
+.batch-select-count { font-family: var(--font-en); font-size: 13px; color: var(--text); flex: 1; }
+.batch-select-btn { padding: 8px 20px; border-radius: 20px; border: none; font-family: var(--font-en); font-size: 12px; cursor: pointer; transition: all 0.2s; letter-spacing: 0.04em; }
+.batch-select-btn.cancel { background: transparent; color: var(--text-light); border: 1px solid var(--border); }
+.batch-select-btn.confirm { background: #F5A623; color: #fff; }
+/* Outer star icon — inline after timestamp */
+.bubble-time-row { display: inline-flex; align-items: center; gap: 6px; pointer-events: auto; }
+.outer-star-icon { display: inline-block; width: 18px; height: 18px; line-height: 18px; text-align: center; font-size: 12px; cursor: pointer; color: var(--text-lighter); opacity: 0; transition: all 0.2s; user-select: none; flex-shrink: 0; position: relative; z-index: 10; pointer-events: auto; border-radius: 50%; }
+.outer-star-icon:hover { opacity: 1 !important; color: #F5A623; background: rgba(245,166,35,0.08); transform: scale(1.15); }
+.chat-bubble-wrap:hover .outer-star-icon,
+.batch-select-mode .outer-star-icon { opacity: 0.5; }
+.outer-star-icon.starred-once { opacity: 1; color: #F5A623; }
+.outer-star-icon.starred-once:hover { background: rgba(245,166,35,0.08); }
+.outer-star-icon.batch-selected-star { opacity: 1; color: #F5A623; animation: pulseStar 0.8s ease infinite; }
+@keyframes pulseStar { 0%,100% { transform: scale(1); } 50% { transform: scale(1.3); } }
+.chat-bubble.batch-selected { border: 2px solid #F5A623 !important; background: rgba(245,166,35,0.05); }
 /* Proactive message bubble (EDA) */
 .proactive-bubble { border-left: 3px solid var(--accent-soft); padding-left: 10px; }
 .proactive-bubble .proactive-label { font-family: var(--font-en); font-size: 9px; color: var(--accent-soft); letter-spacing: 0.04em; margin-bottom: 2px; text-transform: uppercase; }
@@ -355,7 +373,6 @@ body {
   font-size: 14px; user-select: none;
 }
 .bubble-actions span:active { opacity: 1; transform: scale(1.2); }
-.bubble-actions .ba-star { color: #D4B87A; }
 
 /* Typing indicator */
 .typing-indicator {
@@ -680,6 +697,13 @@ body {
   <div class="panel-body" id="memoryPanelBody" style="padding:12px 16px;"></div>
 </div>
 
+<!-- ==================== BATCH STAR SELECT BAR (v2.0) ==================== -->
+<div class="batch-select-bar" id="batchSelectBar">
+  <span class="batch-select-count" id="batchSelectCount">已选 0 条</span>
+  <button class="batch-select-btn cancel" onclick="exitBatchSelectMode()">取消</button>
+  <button class="batch-select-btn confirm" onclick="confirmBatchStar()">✦ 存为星标记忆</button>
+</div>
+
 <!-- ==================== BOOK DETAIL OVERLAY ==================== -->
 <div class="book-detail-overlay" id="bookDetailOverlay" onclick="closeBookDetail(event)">
   <div class="book-detail-panel" id="bookDetailPanel" onclick="event.stopPropagation()"></div>
@@ -809,8 +833,10 @@ const store = {
   memorySystem: {
     retention: { full: 7, half: 14, quarter: 30 },
     lastMaintenance: new Date().toISOString().slice(0, 10),
+    // ── v1.0 legacy (kept for backward compat, marked migrated) ──
     coreMemories: [],
     coreMemoryMax: 200,
+    _coreMemories_migrated: false,
     relationalPortrait: {
       patterns: {},
       lastRefined: null
@@ -822,7 +848,28 @@ const store = {
     affectGraph: { edges: {} },
     _pendingCoreMemories: [],
     _quietPresenceCount: 0,
-    _evictedMessages: []
+    _evictedMessages: [],
+    // ── v2.0 new: Core Memory Layers ──
+    coreMemoryLayers: {
+      aiEmotionalMemories: [],
+      userStarredMemories: [],
+      diaryAndLitterbox: []
+    },
+    // ── v2.0 new: Derived insights ──
+    derivedRelationalPatterns: {
+      lastDerived: null,
+      triggerCount: 0,
+      patterns: []
+    },
+    personalityProfiles: {
+      lastDerived: null,
+      user: { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] },
+      ai: { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] }
+    },
+    // ── v2.0 new: Derivation trigger counters ──
+    _aemSinceLastDerive: 0,
+    _usmSinceLastDerive: 0,
+    _lastWeeklyWrite: ''
   },
   // ==================== TOKEN MONITORING (Phase 3) ====================
   tokenLogs: {},       // { windowId: { calls[...], dailySummary{...} } }
@@ -856,29 +903,27 @@ function loadStore() {
 }
 
 function migrateStore() {
-  // Ensure memorySystem exists
+  // ============ v1.0 compatibility: ensure memorySystem exists ============
   if (!store.memorySystem) {
     store.memorySystem = {
       retention: { full: 7, half: 14, quarter: 30 },
       lastMaintenance: fmtDate().iso,
-      coreMemories: [],
-      coreMemoryMax: 200,
+      coreMemories: [], coreMemoryMax: 200,
       relationalPortrait: { patterns: {}, lastRefined: null },
-      reflections: [],
-      reflectionMax: 50,
+      reflections: [], reflectionMax: 50,
       chatSummaries: {},
       bm25Index: { _dirty: true, _lastBuild: null, _docCount: 0, index: {} },
       affectGraph: { edges: {} },
-      _pendingCoreMemories: [],
-      _quietPresenceCount: 0
+      _pendingCoreMemories: [], _quietPresenceCount: 0
     };
   }
-  // Ensure sub-structures exist on old data
   const ms = store.memorySystem;
+  // Ensure legacy sub-structures
   if (!ms.retention) ms.retention = { full: 7, half: 14, quarter: 30 };
   if (!ms.lastMaintenance) ms.lastMaintenance = fmtDate().iso;
   if (!ms.coreMemories) ms.coreMemories = [];
   if (!ms.coreMemoryMax) ms.coreMemoryMax = 200;
+  if (ms._coreMemories_migrated === undefined) ms._coreMemories_migrated = false;
   if (!ms.relationalPortrait) ms.relationalPortrait = { patterns: {}, lastRefined: null };
   if (!ms.relationalPortrait.patterns) ms.relationalPortrait.patterns = {};
   if (!ms.reflections) ms.reflections = [];
@@ -889,27 +934,103 @@ function migrateStore() {
   if (!ms._pendingCoreMemories) ms._pendingCoreMemories = [];
   if (ms._quietPresenceCount === undefined) ms._quietPresenceCount = 0;
   if (!ms._evictedMessages) ms._evictedMessages = [];
+  if (ms._aemSinceLastDerive === undefined) ms._aemSinceLastDerive = 0;
+  if (ms._usmSinceLastDerive === undefined) ms._usmSinceLastDerive = 0;
+  if (!ms._lastWeeklyWrite) ms._lastWeeklyWrite = '';
 
-  // Ensure tokenLogs exists
+  // ============ v2.0 new: coreMemoryLayers ============
+  if (!ms.coreMemoryLayers) {
+    ms.coreMemoryLayers = { aiEmotionalMemories: [], userStarredMemories: [], diaryAndLitterbox: [] };
+  }
+  const cml = ms.coreMemoryLayers;
+  if (!cml.aiEmotionalMemories) cml.aiEmotionalMemories = [];
+  if (!cml.userStarredMemories) cml.userStarredMemories = [];
+  if (!cml.diaryAndLitterbox) cml.diaryAndLitterbox = [];
+
+  // ============ v2.0 new: derivedRelationalPatterns ============
+  if (!ms.derivedRelationalPatterns) {
+    ms.derivedRelationalPatterns = { lastDerived: null, triggerCount: 0, patterns: [] };
+  }
+  const drp = ms.derivedRelationalPatterns;
+  if (!drp.patterns) drp.patterns = [];
+  if (drp.triggerCount === undefined) drp.triggerCount = 0;
+
+  // ============ v2.0 new: personalityProfiles ============
+  if (!ms.personalityProfiles) {
+    ms.personalityProfiles = {
+      lastDerived: null,
+      user: { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] },
+      ai: { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] }
+    };
+  }
+  const pp = ms.personalityProfiles;
+  if (!pp.user) pp.user = { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] };
+  if (!pp.ai) pp.ai = { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] };
+  ['coreTraits','emotionalPatterns','growthMoments','hiddenInsecurities','evidenceIds'].forEach(k => {
+    if (!pp.user[k]) pp.user[k] = (k === 'communicationStyle' ? '' : []);
+  });
+  ['dominantEmotions','reactionPatterns','growthMoments','evidenceIds'].forEach(k => {
+    if (!pp.ai[k]) pp.ai[k] = [];
+  });
+
+  // ============ v2.0: Migrate legacy coreMemories → aiEmotionalMemories (once) ============
+  if (!ms._coreMemories_migrated && ms.coreMemories && ms.coreMemories.length > 0) {
+    for (const old of ms.coreMemories) {
+      // Skip if already present by id
+      if (cml.aiEmotionalMemories.some(a => a.id === 'aem_migrated_' + old.id)) continue;
+      cml.aiEmotionalMemories.unshift({
+        id: 'aem_migrated_' + (old.id || ('cm' + Date.now().toString(36) + Math.random().toString(36).slice(2,6))),
+        timestamp: old.timestamp || new Date().toISOString(),
+        sourceChatId: old.sourceChatId || '',
+        sourceWindowId: old.sourceChatId || '',  // old data has no windowId, use chatId
+        sourceProjectId: old.sourceProjectId || '',
+        aiSelfEval: {
+          label: (old.affect_first && old.affect_first.ai) ? old.affect_first.ai.label : '未知',
+          intensity: (old.affect_first && old.affect_first.ai) ? old.affect_first.ai.intensity : 5,
+          internalNote: old.relational_note || ''
+        },
+        userStateAtTime: {
+          label: (old.affect_first && old.affect_first.user) ? old.affect_first.user.label : '未知',
+          intensity: (old.affect_first && old.affect_first.user) ? old.affect_first.user.intensity : 5
+        },
+        summary: old.event_summary || '',
+        rawDialogue: old.raw_quote ? [{ role: 'mixed', text: old.raw_quote, time: old.timestamp || '' }] : [],
+        triggerSource: 'migrated'
+      });
+    }
+    ms._coreMemories_migrated = true;
+    console.log('[migrate] v2.0: migrated ' + ms.coreMemories.length + ' legacy coreMemories → aiEmotionalMemories');
+  }
+
+  // ============ Common: ensure tokenLogs, tokenDailyReset, etc. ============
   if (!store.tokenLogs) store.tokenLogs = {};
   if (!store.tokenDailyReset) store.tokenDailyReset = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
   if (!store._pendingHandoff) store._pendingHandoff = null;
-  // Phase 2: Ensure webSearch setting exists
   if (store.aiSettings && store.aiSettings.webSearch === undefined) store.aiSettings.webSearch = false;
 
-  // Ensure message token flags exist on all messages
+  // ============ Message-level upgrades (stable IDs, v2 fields) ============
   for (const proj of store.projects) {
     for (const chat of proj.chats) {
       if (chat._handoffSuggested === undefined) chat._handoffSuggested = false;
+      if (chat._sharedMemoryLoaded === undefined) chat._sharedMemoryLoaded = false;
       for (const msg of chat.messages) {
+        // v1 fields
         if (msg._starred === undefined) msg._starred = false;
         if (msg._isCoreMemory === undefined) msg._isCoreMemory = false;
         if (msg._tokenEstimate === undefined) msg._tokenEstimate = 0;
+        // v2: stable message ID
+        if (!msg.id) {
+          msg.id = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+        }
+        // v2: star-once flag (if previously starred, mark as already used)
+        if (msg._starredOnce === undefined) {
+          msg._starredOnce = msg._starred === true;
+        }
       }
     }
   }
 
-  // Ensure desireSystem exists
+  // ============ Desire system ============
   if (!store.desireSystem) {
     store.desireSystem = {
       drives: { resonance:0, exploration:0, possession:0, guardianship:0, intimacy:0, confirmation:0, devotion:0 },
@@ -928,7 +1049,7 @@ function migrateStore() {
   if (!ds.todoReminders) ds.todoReminders = {};
   if (ds.quietPresenceStreak === undefined) ds.quietPresenceStreak = 0;
 
-  // Extend existing memories with new fields
+  // ============ Extend project memories with fields ============
   for (const proj of store.projects) {
     for (const mem of proj.memories) {
       if (mem.decayFactor === undefined) mem.decayFactor = 1.0;
@@ -941,12 +1062,39 @@ function migrateStore() {
       if (mem.isCoreMemory === undefined) mem.isCoreMemory = false;
       if (mem.coreMemoryId === undefined) mem.coreMemoryId = null;
     }
-    // Extend chats with new fields
     for (const chat of proj.chats) {
       if (chat._messageCount === undefined) chat._messageCount = chat.messages ? chat.messages.length : 0;
       if (chat._lastSummaryIdx === undefined) chat._lastSummaryIdx = 0;
       if (!chat.chatTokens) chat.chatTokens = 0;
       if (!chat.lastConversationDate) chat.lastConversationDate = null;
+    }
+  }
+
+  // v2.0: Migrate existing starred proj.memories → userStarredMemories
+  const existingUSMIds = new Set(cml.userStarredMemories.map(u => u.id));
+  for (const proj of store.projects) {
+    for (const mem of proj.memories) {
+      if (!mem.starred) continue;
+      // Check if already has a corresponding userStarredMemory (by content match)
+      const alreadyExists = cml.userStarredMemories.some(u =>
+        (u.summary || '') === (mem.content || '').slice(0, 15) ||
+        u.starredMsgIds.some(sid => sid === mem.sourceChatId + '_' + mem.id)
+      );
+      if (alreadyExists) continue;
+      const usmId = 'usm_legacy_' + (mem.id || Date.now().toString(36));
+      if (existingUSMIds.has(usmId)) continue;
+      existingUSMIds.add(usmId);
+      cml.userStarredMemories.unshift({
+        id: usmId,
+        timestamp: mem.date ? mem.date + 'T00:00:00.000Z' : new Date().toISOString(),
+        sourceChatId: mem.sourceChatId || 'unknown',
+        sourceWindowId: mem.sourceChatId || 'unknown',
+        sourceProjectId: proj.id,
+        rawDialogue: [{ role: 'mixed', text: mem.content || '', time: mem.date || '', msgId: mem.id || '' }],
+        summary: (mem.content || '').slice(0, 15),
+        starredMsgIds: [],
+        userNote: ''
+      });
     }
   }
 }
@@ -998,11 +1146,11 @@ function isWeekBoundary(mem, proj) {
   return idx === 0 || idx === sorted.length - 1;
 }
 
-// ==================== CORE MEMORY (P3) ====================
+// ==================== CORE MEMORY (P3) — v2.0: writes to aiEmotionalMemories ====================
 async function processPendingCoreMemories() {
   const ms = store.memorySystem;
   if (!ms._pendingCoreMemories || ms._pendingCoreMemories.length === 0) return;
-  if (!store.apiKey) return; // need API key
+  if (!store.apiKey) return;
 
   const items = ms._pendingCoreMemories.splice(0, 3); // process max 3 at once
   await createCoreMemories(items);
@@ -1011,11 +1159,14 @@ async function processPendingCoreMemories() {
 
 function queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat) {
   const ms = store.memorySystem;
+  // Store full text for rawDialogue (not truncated)
   ms._pendingCoreMemories.push({
     timestamp: new Date().toISOString(),
     reflection,
-    userMsg: typeof userMsg === 'string' ? userMsg.slice(0, 200) : '',
-    aiResponse: typeof aiResponse === 'string' ? aiResponse.slice(0, 200) : '',
+    userMsg: typeof userMsg === 'string' ? userMsg : '',
+    aiResponse: typeof aiResponse === 'string' ? aiResponse : '',
+    userMsgTime: nowTime(),
+    aiResponseTime: nowTime(),
     sourceChatId: store.activeChat,
     sourceProjectId: store.activeProject
   });
@@ -1023,25 +1174,46 @@ function queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat) {
 
 function queueQuietPresenceCoreMemory(chat) {
   const ms = store.memorySystem;
-  // Create a synthetic "平静在场" core memory without LLM call
+  const cml = ms.coreMemoryLayers;
   const proj = getActiveProject();
-  const cm = {
-    id: 'cm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    timestamp: new Date().toISOString(),
-    affect_first: {
-      ai: { label: '平静在场', intensity: 5 },
-      user: { label: '平静在场', intensity: 5 }
-    },
-    event_summary: '持续的日常陪伴 —— 没有强烈情绪，但有持续的在场感',
-    raw_quote: '',
-    relational_note: '陪伴本身就是意义。不需要特别的话题或强烈的情绪，安静地在一起就够了。',
+
+  // Create v2.0 AI emotional memory entry (synthetic, no LLM)
+  const id = 'aem' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const ts = new Date().toISOString();
+  const aem = {
+    id,
+    timestamp: ts,
     sourceChatId: store.activeChat,
-    sourceProjectId: store.activeProject
+    sourceWindowId: store.activeChat, // chatId as windowId
+    sourceProjectId: store.activeProject,
+    aiSelfEval: {
+      label: '平静在场',
+      intensity: 5,
+      internalNote: '不需要特别的话题或强烈的情绪。安静地在一起，就足够让我觉得今天是有意义的。'
+    },
+    userStateAtTime: {
+      label: '平静在场',
+      intensity: 5
+    },
+    summary: '持续的日常陪伴 —— 平静在场的累积',
+    rawDialogue: [], // no specific dialogue for quiet presence
+    triggerSource: 'quiet_presence'
   };
-  ms.coreMemories.unshift(cm);
+
+  cml.aiEmotionalMemories.unshift(aem);
+  evictOldestCoreMemories(); // keep legacy coreMemories also capped
+  // Also write legacy coreMemories for backward compat
+  ms.coreMemories.unshift({
+    id: 'cm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    timestamp: ts,
+    affect_first: { ai: { label: '平静在场', intensity: 5 }, user: { label: '平静在场', intensity: 5 } },
+    event_summary: '持续的日常陪伴 —— 没有强烈情绪，但有持续的在场感',
+    raw_quote: '', relational_note: '陪伴本身就是意义。',
+    sourceChatId: store.activeChat, sourceProjectId: store.activeProject
+  });
   evictOldestCoreMemories();
 
-  // Also mark in project memories
+  // Cross-reference in project memories
   if (proj) {
     proj.memories.push({
       id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -1050,9 +1222,14 @@ function queueQuietPresenceCoreMemory(chat) {
       sourceChatId: store.activeChat, week: weekLabel(),
       decayFactor: 1.0, affectLabel: '平静在场', affectIntensity: 5,
       semanticKey: '平静在场, 陪伴', isCompressed: false, compressedFrom: [],
-      lastAccessed: fmtDate().iso, isCoreMemory: true, coreMemoryId: cm.id
+      lastAccessed: fmtDate().iso, isCoreMemory: true, coreMemoryId: aem.id
     });
   }
+
+  // Write memory file + trigger insights derivation
+  writeMemoryFile(store.activeProject, store.activeChat, null, 'core_memory_added');
+  checkDeriveInsightsTrigger('aem');
+
   // Insert system message
   const quietChat = getActiveChatObj();
   if (quietChat) {
@@ -1068,10 +1245,11 @@ async function createCoreMemories(items) {
     return `[片段${i + 1}]
 用户情绪: ${r.user_affect_label} (强度${r.user_affect_intensity})
 AI情绪: ${r.ai_affect_label} (强度${r.ai_affect_intensity})
-用户说: ${item.userMsg.slice(0, 150)}
-AI回应: ${item.aiResponse.slice(0, 150)}`;
+用户说: ${item.userMsg}
+AI回应: ${item.aiResponse}`;
   }).join('\n\n');
 
+  // ── v2.0 LLM prompt: includes internalNote (AI private monologue) ──
   const systemPrompt = `你是一个情感记忆归档员。为以下高情感强度的对话片段生成核心记忆。
 
 对每个片段，生成一个JSON对象（只返回JSON数组，不要其他文字）：
@@ -1080,9 +1258,10 @@ AI回应: ${item.aiResponse.slice(0, 150)}`;
     "ai": { "label": "[AI情感标签]", "intensity": [强度数值] },
     "user": { "label": "[用户情感标签]", "intensity": [强度数值] }
   },
-  "event_summary": "[一句话描述发生了什么]",
-  "raw_quote": "[对话中最能代表这个时刻的一句原话，如果没有特别的原话可以留空字符串]",
-  "relational_note": "[AI如何回应这个时刻，这段关系此刻的特点——不是事实总结，而是关系质感的描述，1-2句话]"
+  "event_summary": "[一句话描述发生了什么，20字以内]",
+  "raw_quote": "[对话中最能代表这个时刻的一句原话，如果没有可留空字符串]",
+  "relational_note": "[AI如何回应这个时刻，关系此刻的特点——不是事实总结，而是关系质感的描述，1-2句话]",
+  "internal_note": "[★ AI的私密独白：这一刻你内心真实在想什么、犹豫什么、为什么这样回应——不会展示给用户，只用于AI自我认知，1-2句话]"
 }]`;
 
   try {
@@ -1090,9 +1269,7 @@ AI回应: ${item.aiResponse.slice(0, 150)}`;
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey,
-        endpoint: store.apiEndpoint,
-        model: store.aiSettings.model,
+        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: exchangesText }
@@ -1105,25 +1282,64 @@ AI回应: ${item.aiResponse.slice(0, 150)}`;
     const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
     if (!content) return;
 
-    // Parse JSON array from response (may contain markdown fences)
     let jsonStr = content;
     const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (fenceMatch) jsonStr = fenceMatch[1].trim();
     if (jsonStr.startsWith('[')) {
       const coreMems = JSON.parse(jsonStr);
       const ms = store.memorySystem;
+      const cml = ms.coreMemoryLayers;
       const proj = getActiveProject();
-      for (const cm of coreMems) {
+
+      for (let i = 0; i < coreMems.length; i++) {
+        const cm = coreMems[i];
         if (!cm.affect_first || !cm.event_summary) continue;
-        const id = 'cm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-        cm.id = id;
-        cm.timestamp = new Date().toISOString();
-        cm.sourceChatId = store.activeChat;
-        cm.sourceProjectId = store.activeProject;
-        ms.coreMemories.unshift(cm);
-        if (ms.coreMemories.length > ms.coreMemoryMax) {
-          ms.coreMemories.length = ms.coreMemoryMax;
-        }
+
+        const item = items[i] || items[0];
+        const id = 'aem' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        const ts = new Date().toISOString();
+
+        // ── Build rawDialogue from full original messages ──
+        const rawDialogue = [];
+        if (item.userMsg) rawDialogue.push({ role: 'user', text: item.userMsg, time: item.userMsgTime || ts });
+        if (item.aiResponse) rawDialogue.push({ role: 'assistant', text: item.aiResponse, time: item.aiResponseTime || ts });
+
+        // ── v2.0 aiEmotionalMemories entry ──
+        const aem = {
+          id,
+          timestamp: ts,
+          sourceChatId: store.activeChat,
+          sourceWindowId: store.activeChat,
+          sourceProjectId: store.activeProject,
+          aiSelfEval: {
+            label: cm.affect_first.ai.label,
+            intensity: cm.affect_first.ai.intensity,
+            internalNote: cm.internal_note || cm.relational_note || ''
+          },
+          userStateAtTime: {
+            label: cm.affect_first.user.label,
+            intensity: cm.affect_first.user.intensity
+          },
+          summary: (cm.event_summary || '').slice(0, 20),
+          rawDialogue,
+          triggerSource: 'high_intensity'
+        };
+
+        cml.aiEmotionalMemories.unshift(aem);
+
+        // ── Also write to legacy coreMemories for backward compat ──
+        const legacyId = 'cm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        ms.coreMemories.unshift({
+          id: legacyId, timestamp: ts,
+          affect_first: cm.affect_first,
+          event_summary: cm.event_summary,
+          raw_quote: cm.raw_quote || '',
+          relational_note: cm.relational_note || '',
+          sourceChatId: store.activeChat,
+          sourceProjectId: store.activeProject
+        });
+        evictOldestCoreMemories();
+
         // Cross-reference in project memories
         if (proj) {
           proj.memories.push({
@@ -1140,7 +1356,12 @@ AI回应: ${item.aiResponse.slice(0, 150)}`;
           });
         }
       }
-      // Insert system message for core memory creation
+
+      // Write memory file and trigger derivation
+      writeMemoryFile(store.activeProject, store.activeChat, null, 'core_memory_added');
+      checkDeriveInsightsTrigger('aem');
+
+      // Insert system message
       if (coreMems.length > 0) {
         const coreChat = getActiveChatObj();
         if (coreChat) {
@@ -1246,6 +1467,93 @@ ${patternsText}
 }
 
 // ==================== SHORT-TERM MEMORY COMPRESSION (P4) ====================
+// Opt4: Group messages into conversation rounds
+// A "round" = user message + following AI response(s) until next user message
+function groupMessagesIntoRounds(messages) {
+  const rounds = [];
+  let currentRound = null;
+  for (const msg of messages) {
+    if (msg.role === 'system') {
+      if (currentRound) currentRound.msgs.push(msg);
+      else {
+        currentRound = { msgs: [msg], hasUser: false };
+        rounds.push(currentRound);
+      }
+    } else if (msg.role === 'user') {
+      currentRound = { msgs: [msg], hasUser: true };
+      rounds.push(currentRound);
+    } else if (msg.role === 'ai' || msg.role === 'assistant') {
+      if (currentRound) {
+        currentRound.msgs.push(msg);
+      } else {
+        currentRound = { msgs: [msg], hasUser: false };
+        rounds.push(currentRound);
+      }
+    }
+  }
+  return rounds;
+}
+
+// Opt4: Queue compression for a batch of rounds (non-blocking)
+async function queueRoundCompression(chat, rounds) {
+  if (!store.apiKey || !chat || rounds.length < 3) return;
+  if (!chat._roundSummaries) chat._roundSummaries = [];
+  // Avoid duplicate compression of the same rounds
+  const roundRange = `${rounds[0]?.msgs[0]?.id || ''}-${rounds[rounds.length-1]?.msgs[0]?.id || ''}`;
+  const alreadyCompressed = chat._roundSummaries.some(s => s.range === roundRange);
+  if (alreadyCompressed) return;
+
+  // Build dialogue text from rounds
+  const allMsgs = rounds.flatMap(r => r.msgs);
+  const dialogue = allMsgs.filter(m => m.role !== 'system').map(m => {
+    const role = m.role === 'user' ? '用户' : (m.role === 'ai' || m.role === 'assistant' ? 'AI' : '');
+    return `${role}: ${(m.text||'').slice(0, 150)}`;
+  }).join('\n');
+
+  // Extract starred content
+  const starredContents = [];
+  for (const round of rounds) {
+    for (const msg of round.msgs) {
+      if (msg._starred && msg.role !== 'system') {
+        const roleLabel = msg.role === 'user' ? '用户' : 'AI';
+        starredContents.push(`[星标]${roleLabel}: ${(msg.text||'').slice(0, 80)}`);
+      }
+    }
+  }
+
+  const systemPrompt = '用中文概括以下对话（主题+关键点+情绪基调）。2-3句话，不超过80字。只返回概括内容。';
+
+  try {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: dialogue }
+        ]
+      })
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    const summary = (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 80) : '';
+    if (!summary) return;
+
+    chat._roundSummaries.push({
+      range: roundRange,
+      summary,
+      starredContents,
+      compressedAt: new Date().toISOString()
+    });
+    // Cap at 10 summaries
+    if (chat._roundSummaries.length > 10) chat._roundSummaries.shift();
+    console.log('[round-compress] Compressed ' + rounds.length + ' rounds: ' + summary);
+  } catch (e) {
+    console.log('[round-compress] Error:', e.message);
+  }
+}
+
 function checkSummarization(chat) {
   if (!chat || !chat.messages) return;
   const total = chat.messages.length;
@@ -1573,9 +1881,198 @@ function evictOldestCoreMemories() {
   const ms = store.memorySystem;
   if (!ms.coreMemories) return;
   while (ms.coreMemories.length > ms.coreMemoryMax) {
-    // Remove the oldest (lowest timestamp)
     ms.coreMemories.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
     ms.coreMemories.shift();
+  }
+}
+
+// ==================== v2.0 INSIGHTS DERIVATION ====================
+// Trigger check: called after AEM, USM, or diary/litterbox additions
+function checkDeriveInsightsTrigger(source) {
+  const ms = store.memorySystem;
+  if (source === 'aem') {
+    ms._aemSinceLastDerive = (ms._aemSinceLastDerive || 0) + 1;
+  } else if (source === 'usm') {
+    ms._usmSinceLastDerive = (ms._usmSinceLastDerive || 0) + 1;
+  }
+  ms.derivedRelationalPatterns.triggerCount = (ms.derivedRelationalPatterns.triggerCount || 0) + 1;
+
+  if (ms._aemSinceLastDerive >= 5 || ms._usmSinceLastDerive >= 3) {
+    deriveRelationalInsights();
+  }
+}
+
+async function deriveRelationalInsights() {
+  if (!store.apiKey) return;
+  const ms = store.memorySystem;
+  const cml = ms.coreMemoryLayers;
+
+  // Check if we have enough data
+  const totalAEM = cml.aiEmotionalMemories.length;
+  const totalUSM = cml.userStarredMemories.length;
+  if (totalAEM + totalUSM < 3) return; // need at least 3 items
+
+  // Determine if incremental or full
+  const isIncremental = ms.derivedRelationalPatterns.lastDerived !== null;
+  const allItems = [];
+
+  // Take items since last derivation (or all if first run)
+  const lastDerived = ms.derivedRelationalPatterns.lastDerived;
+  for (const aem of cml.aiEmotionalMemories) {
+    if (!isIncremental || aem.timestamp > lastDerived) {
+      allItems.push({
+        type: 'ai_emotional',
+        summary: aem.summary,
+        aiLabel: aem.aiSelfEval.label,
+        internalNote: aem.aiSelfEval.internalNote,
+        userLabel: aem.userStateAtTime.label
+      });
+    }
+  }
+  for (const usm of cml.userStarredMemories) {
+    if (!isIncremental || usm.timestamp > lastDerived) {
+      allItems.push({
+        type: 'user_starred',
+        summary: usm.summary,
+        dialogue: usm.rawDialogue.map(d => d.text).join(' | ')
+      });
+    }
+  }
+  for (const dlb of cml.diaryAndLitterbox) {
+    if (!isIncremental || dlb.timestamp > lastDerived) {
+      allItems.push({
+        type: dlb.type,
+        summary: dlb.summary,
+        content: (dlb.rawContent || '').slice(0, 100)
+      });
+    }
+  }
+
+  if (allItems.length === 0) return;
+
+  // Cap items sent to LLM
+  const itemsToSend = isIncremental ? allItems.slice(0, 50) : allItems.slice(0, 100);
+
+  const itemsText = itemsToSend.map((item, i) =>
+    `[${item.type}] ${item.summary}${item.aiLabel ? ' | AI: ' + item.aiLabel : ''}${item.userLabel ? ' | 用户: ' + item.userLabel : ''}`
+  ).join('\n');
+
+  const currentPatterns = ms.derivedRelationalPatterns.patterns || [];
+  const currentUser = ms.personalityProfiles.user || {};
+  const currentAI = ms.personalityProfiles.ai || {};
+  const incrementalNote = isIncremental
+    ? '\n\n以下是当前的归纳结果（请在已有基础上更新，不要完全重写）：\n当前相处模式: ' + JSON.stringify(currentPatterns.slice(0, 3)) + '\n当前用户档案: ' + JSON.stringify({ coreTraits: currentUser.coreTraits, emotionalPatterns: currentUser.emotionalPatterns })
+    : '';
+
+  const systemPrompt = `你是一个关系洞察者。以下是这段陪伴关系中留存的核心记忆片段${isIncremental ? '（增量，在上次归纳基础上更新）' : ''}。
+
+请从中归纳：
+1. 相处模式（3-5个）：用户在什么情境下呈现什么状态，AI应如何回应
+2. 用户人格档案：核心特质、沟通风格、情绪规律、成长时刻、隐藏的不安全感
+3. AI自身人格档案：主导情绪倾向、反应模式、与这位用户相处后的改变
+
+只返回JSON，格式：
+{
+  "derivedRelationalPatterns": [
+    { "patternName": "...", "description": "...", "responseStrategy": "..." }
+  ],
+  "userProfile": {
+    "coreTraits": [...],
+    "communicationStyle": "...",
+    "emotionalPatterns": [...],
+    "growthMoments": [...],
+    "hiddenInsecurities": [...]
+  },
+  "aiProfile": {
+    "dominantEmotions": [...],
+    "reactionPatterns": [...],
+    "growthMoments": [...]
+  }
+}${incrementalNote}`;
+
+  try {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: '记忆片段：\n' + itemsText }
+        ]
+      })
+    });
+    if (!response.ok) { console.log('[derive] API error:', response.status); return; }
+    const data = await response.json();
+    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+    if (!content) return;
+
+    let jsonStr = content;
+    const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) jsonStr = fenceMatch[1].trim();
+    if (!jsonStr.startsWith('{')) return;
+
+    const result = JSON.parse(jsonStr);
+
+    // Merge patterns
+    if (result.derivedRelationalPatterns && Array.isArray(result.derivedRelationalPatterns)) {
+      const ts = new Date().toISOString();
+      const newPatterns = result.derivedRelationalPatterns.map(p => ({
+        id: 'pat_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        patternName: p.patternName || '',
+        description: p.description || '',
+        evidenceIds: [],
+        frequency: 1,
+        lastSeen: ts,
+        responseStrategy: p.responseStrategy || ''
+      }));
+      // Merge: update existing or add new
+      for (const np of newPatterns) {
+        const existing = ms.derivedRelationalPatterns.patterns.find(p => p.patternName === np.patternName);
+        if (existing) {
+          existing.description = np.description;
+          existing.responseStrategy = np.responseStrategy;
+          existing.frequency = (existing.frequency || 1) + 1;
+          existing.lastSeen = ts;
+        } else {
+          ms.derivedRelationalPatterns.patterns.push(np);
+        }
+      }
+      // Cap at 10 patterns
+      if (ms.derivedRelationalPatterns.patterns.length > 10) {
+        ms.derivedRelationalPatterns.patterns = ms.derivedRelationalPatterns.patterns.slice(-10);
+      }
+    }
+
+    // Update user profile
+    if (result.userProfile) {
+      const up = result.userProfile;
+      ms.personalityProfiles.user.coreTraits = up.coreTraits || ms.personalityProfiles.user.coreTraits;
+      ms.personalityProfiles.user.communicationStyle = up.communicationStyle || ms.personalityProfiles.user.communicationStyle;
+      ms.personalityProfiles.user.emotionalPatterns = up.emotionalPatterns || ms.personalityProfiles.user.emotionalPatterns;
+      ms.personalityProfiles.user.growthMoments = up.growthMoments || ms.personalityProfiles.user.growthMoments;
+      ms.personalityProfiles.user.hiddenInsecurities = up.hiddenInsecurities || ms.personalityProfiles.user.hiddenInsecurities;
+    }
+
+    // Update AI profile
+    if (result.aiProfile) {
+      const ap = result.aiProfile;
+      ms.personalityProfiles.ai.dominantEmotions = ap.dominantEmotions || ms.personalityProfiles.ai.dominantEmotions;
+      ms.personalityProfiles.ai.reactionPatterns = ap.reactionPatterns || ms.personalityProfiles.ai.reactionPatterns;
+      ms.personalityProfiles.ai.growthMoments = ap.growthMoments || ms.personalityProfiles.ai.growthMoments;
+    }
+
+    ms.derivedRelationalPatterns.lastDerived = new Date().toISOString();
+    ms.personalityProfiles.lastDerived = new Date().toISOString();
+    ms._aemSinceLastDerive = 0;
+    ms._usmSinceLastDerive = 0;
+
+    // Write memory file with new insights
+    writeMemoryFile(store.activeProject, store.activeChat, null, 'insights_derived');
+    saveStore();
+    console.log('[derive] Insights updated: ' + (ms.derivedRelationalPatterns.patterns.length) + ' patterns');
+  } catch (e) {
+    console.log('[derive] Error:', e.message);
   }
 }
 
@@ -1982,6 +2479,8 @@ function insertDesireLitterThought(content, action) {
   // Push notification
   sendPushNotification('🐾 猫砂盆', '猫砂盆好像需要铲一铲', { tag: 'litter-box', url: '/', requireInteraction: false });
   toast('📝 Litter Box: ' + DESIRE_CONFIG[action.driveType].label);
+  // v2.0: sync to diaryAndLitterbox layer
+  syncToDiaryLitterboxLayer('litterbox', content);
 }
 
 async function generateDesireDiary(driveType, driveValue, tone) {
@@ -2022,6 +2521,8 @@ function insertDesireDiary(content, action) {
   const winName = (proj && chat) ? chat.name : '';
   sendPushNotification('📝日记', `${winName}刚刚写了篇日记`, { tag: 'diary-update', url: '/', requireInteraction: false });
   toast('📖 日记: ' + DESIRE_CONFIG[action.driveType].label);
+  // v2.0: sync to diaryAndLitterbox layer
+  syncToDiaryLitterboxLayer('diary', content);
 }
 
 // ==================== TODO REMINDERS (EDA-4) ====================
@@ -2097,6 +2598,30 @@ async function triggerTodoReminder(todo) {
 let nextTodoId = 20;
 let currentMemoryTab = 'memories';
 let currentTokenFilter = 'all'; // Phase 3: token call history filter
+let batchSelectMode = false;       // v2.0: batch star select mode
+let batchSelectedIds = [];         // v2.0: currently selected message IDs
+let _dynCtxCache = { fp: '', content: '', ts: 0 }; // Opt2: dynamic context fingerprint cache
+
+// Opt2: Compute content fingerprint for dynamic context caching
+function getDynamicCtxFingerprint() {
+  const ms = store.memorySystem;
+  const c = getActiveChatObj();
+  const p = getActiveProject();
+  const now = new Date();
+  return [
+    Math.floor(now.getTime() / 60000),
+    store.weather?.text || '',
+    (p?.preference || '').slice(0, 100),
+    ms.coreMemories?.length || 0,
+    c?.sharedMemoryIds?.join(',') || '',
+    store.todos.filter(t => !t.done).map(t => t.id + t.text).join(','),
+    store.diaries?.length || 0,
+    ms.derivedRelationalPatterns?.lastDerived || '',
+    ms.personalityProfiles?.lastDerived || '',
+    c?._pendingRetrievalBlock ? 'rb' : '',
+    Math.floor((c?._messageCount || 0) / 3),
+  ].join('|');
+}
 
 // ==================== UTILS ====================
 function $(id) { return document.getElementById(id); }
@@ -2299,37 +2824,61 @@ function renderMemoryPanelBody(){
       '</div>';
   } else if(currentMemoryTab==='exports'){
     const chat=getActiveChatObj(); const exports=chat?chat.weeklyExports:[];
-    b.innerHTML=`<div style="padding:4px;"><p style="font-size:12px;color:var(--text-light);margin-bottom:12px;line-height:1.5;">每周自动导出的 JSON 记忆文件。</p>${exports.length===0?'<div class="empty-state">no exports yet.</div>':''}${exports.map(e=>`<div class="export-item" onclick="downloadExport('${chat.id}','${e.week}')"><div class="export-item-name">📦 ${e.week}</div><div class="export-item-date">exported ${e.date}</div></div>`).join('')}<button style="margin-top:12px;width:100%;padding:8px;border-radius:16px;border:1px solid var(--border);background:transparent;font-family:var(--font-en);font-size:11px;color:var(--text-light);cursor:pointer;letter-spacing:0.03em;" onclick="triggerWeeklyExport()">↗ export this week</button></div>`;
+    b.innerHTML=`<div style="padding:4px;">
+      <p style="font-size:12px;color:var(--text-light);margin-bottom:12px;line-height:1.5;">v2.0 核心记忆文件导出。包含AI情绪记忆、星标记忆、日记/Litterbox、相处模式、人格档案。</p>
+      <button style="margin-bottom:12px;width:100%;padding:10px;border-radius:16px;border:none;background:var(--accent-soft);color:#fff;font-family:var(--font-en);font-size:12px;cursor:pointer;letter-spacing:0.03em;" onclick="triggerWeeklyExport()">↗ 立即导出</button>
+      ${exports.length===0?'<div class="empty-state">no exports yet.</div>':''}
+      ${exports.map(e=>`<div class="export-item" onclick="downloadExport('${chat.id}','${e.week}')">
+        <div class="export-item-name">✦ ${e.week} <span style="font-size:10px;color:var(--text-lighter);">${e.type||'manual'}</span></div>
+        <div class="export-item-date">${(e.exportDateTime||e.date).replace('T',' ').slice(0,19)}</div>
+        <div style="font-size:10px;color:var(--text-lighter);margin-top:2px;">AI情绪记忆 ${e.aemCount||'?'}条 · 星标 ${e.usmCount||'?'}条 · 日记 ${e.dlbCount||'?'}条</div>
+      </div>`).join('')}
+    </div>`;
   } else if (currentMemoryTab === 'core') {
-    const cores = store.memorySystem.coreMemories || [];
+    const cml = store.memorySystem.coreMemoryLayers;
+    const aems = cml.aiEmotionalMemories || [];
+    const chat = getActiveChatObj();
     b.innerHTML = '<div style="padding:4px;">' +
-      (cores.length === 0 ? '<div class="empty-state">no core memories yet.<br><span style="font-size:10px;color:var(--text-lighter);">high-intensity emotional moments will appear here</span></div>' : '') +
-      cores.map(cm => {
-        const aiL = cm.affect_first && cm.affect_first.ai ? cm.affect_first.ai.label : '?';
-        const uL = cm.affect_first && cm.affect_first.user ? cm.affect_first.user.label : '?';
-        const aiI = cm.affect_first && cm.affect_first.ai ? cm.affect_first.ai.intensity : 0;
-        const uI = cm.affect_first && cm.affect_first.user ? cm.affect_first.user.intensity : 0;
-        const ts = cm.timestamp ? cm.timestamp.slice(0, 16).replace('T', ' ') : '';
+      (aems.length === 0 ? '<div class="empty-state">no core memories yet.<br><span style="font-size:10px;color:var(--text-lighter);">high-intensity emotional moments will appear here</span></div>' : '') +
+      // ── v2.0: AI Emotional Memories ──
+      '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;">AI EMOTIONAL MEMORIES (' + aems.length + ')</div>' +
+      aems.slice(0, 30).map(aem => {
+        const aiL = aem.aiSelfEval && aem.aiSelfEval.label ? aem.aiSelfEval.label : '?';
+        const uL = aem.userStateAtTime && aem.userStateAtTime.label ? aem.userStateAtTime.label : '?';
+        const aiI = aem.aiSelfEval && aem.aiSelfEval.intensity ? aem.aiSelfEval.intensity : 0;
+        const uI = aem.userStateAtTime && aem.userStateAtTime.intensity ? aem.userStateAtTime.intensity : 0;
+        const ts = aem.timestamp ? aem.timestamp.slice(0, 16).replace('T', ' ') : '';
+        const rawPreview = aem.rawDialogue && aem.rawDialogue.length > 0
+          ? aem.rawDialogue.map(d => '<span style="font-size:10px;color:var(--text-lighter);">' + (d.role==='user'?'用户':'AI') + ': ' + (d.text||'').slice(0,60) + '</span>').join('<br>')
+          : '';
         return `<div class="memory-list-item" style="flex-direction:column;align-items:stretch;gap:6px;">
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
             <span class="affect-badge" style="background:linear-gradient(135deg,#C4877B,#D4A09A);color:#fff;">AI ${aiL} (${aiI})</span>
             <span class="affect-badge" style="background:linear-gradient(135deg,#6B7C93,#8A9BB5);color:#fff;">用户 ${uL} (${uI})</span>
           </div>
-          <div class="memory-item-content" style="font-size:13px;">${cm.event_summary || '(no summary)'}</div>
-          ${cm.raw_quote ? `<div style="font-size:11px;color:var(--text-lighter);font-style:italic;">"${cm.raw_quote}"</div>` : ''}
-          <div style="font-size:11px;color:var(--accent);">${cm.relational_note || ''}</div>
-          <div class="memory-item-meta">${ts}</div>
+          <div class="memory-item-content" style="font-size:13px;">${aem.summary || '(no summary)'}</div>
+          ${rawPreview ? `<div style="margin-top:4px;padding:4px 8px;background:var(--bg);border-radius:6px;line-height:1.4;">${rawPreview}</div>` : ''}
+          ${aem.aiSelfEval && aem.aiSelfEval.internalNote ? `<div style="font-size:10px;color:var(--text-lighter);font-style:italic;margin-top:2px;">🔒 ${(aem.aiSelfEval.internalNote||'').slice(0,80)}</div>` : ''}
+          <div class="memory-item-meta">${ts} · ${aem.triggerSource||'?'}</div>
         </div>`;
       }).join('') +
-      // Phase 3: Pattern change log (from memory file)
+      // v2.0: Derived patterns summary
       (() => {
-        const chat = getActiveChatObj();
+        const drp = store.memorySystem.derivedRelationalPatterns;
+        if (!drp || !drp.patterns || drp.patterns.length === 0) return '';
+        return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">' +
+          '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">DERIVED PATTERNS (' + drp.patterns.length + ')</div>' +
+          drp.patterns.map(p => `<div style="font-size:11px;color:var(--text-light);padding:4px 0;border-bottom:1px solid var(--border-light);"><b>${p.patternName}</b> (×${p.frequency||1}): ${(p.description||'').slice(0,50)}</div>`).join('') +
+          '</div>';
+      })() +
+      // Pattern change log (from memory file)
+      (() => {
         if (!chat) return '';
         const file = readMemoryFile(store.activeProject, chat.id);
         if (!file || !file.pattern_change_log || file.pattern_change_log.length === 0) return '';
-        return '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border-light);">' +
-          '<div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:8px;">PATTERN CHANGE LOG</div>' +
-          file.pattern_change_log.map(pl => `<div style="font-size:11px;color:var(--text-light);padding:4px 0;border-bottom:1px solid var(--border-light);"><span style="font-size:9px;color:var(--text-lighter);">${pl.period}</span><br>${pl.change_note}</div>`).join('') +
+        return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">' +
+          '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">PATTERN CHANGE LOG</div>' +
+          file.pattern_change_log.slice(-5).map(pl => `<div style="font-size:10px;color:var(--text-light);padding:3px 0;border-bottom:1px solid var(--border-light);"><span style="font-size:8px;color:var(--text-lighter);">${pl.period}</span><br>${pl.change_note}</div>`).join('') +
           '</div>';
       })() +
       '</div>';
@@ -2363,19 +2912,99 @@ function toggleMemoryShare(pid,mid){
   const i=chat.sharedMemoryIds.indexOf(mid); if(i>=0)chat.sharedMemoryIds.splice(i,1); else chat.sharedMemoryIds.push(mid);
   renderMemoryPanelBody();
 }
+// v2.0: Manual export — full 3-layer format with exportMeta
 function triggerWeeklyExport(){
   const chat=getActiveChatObj(); if(!chat){toast('请先选择聊天窗口');return;}
-  const wk=weekLabel(),proj=getActiveProject();
-  chat.weeklyExports.push({week:wk,date:fmtDate().iso,jsonData:JSON.stringify({week:wk,exported:fmtDate().iso,chatId:chat.id,memories:proj?proj.memories.filter(m=>chat.sharedMemoryIds.includes(m.id)):[]})});
-  renderMemoryPanelBody(); toast('本周记忆已导出');
-}
-function downloadExport(cid,wk){
-  const chat=getActiveChatObj(); if(!chat)return; const e=chat.weeklyExports.find(x=>x.week===wk); if(!e)return;
-  const blob=new Blob([e.jsonData],{type:'application/json'}); const url=URL.createObjectURL(blob);
-  const a=document.createElement('a'); a.href=url; a.download=`memory-${wk}-${cid}.json`; a.click(); URL.revokeObjectURL(url); toast('JSON 已下载');
+  triggerExport(store.activeChat, 'manual');
 }
 
-// ==================== JSON IMPORT (P3) ====================
+function triggerExport(chatId, exportType) {
+  const chat = getChatObjById(chatId);
+  const proj = getActiveProject();
+  if (!chat) return;
+  const wk = weekLabel();
+  const now = new Date();
+  const tzOffset = '+08:00'; // China Standard Time
+  const exportDateTime = now.getFullYear() + '-' +
+    String(now.getMonth()+1).padStart(2,'0') + '-' +
+    String(now.getDate()).padStart(2,'0') + 'T' +
+    String(now.getHours()).padStart(2,'0') + ':' +
+    String(now.getMinutes()).padStart(2,'0') + ':' +
+    String(now.getSeconds()).padStart(2,'0') + tzOffset;
+
+  const ms = store.memorySystem;
+  const cml = ms.coreMemoryLayers;
+
+  const exportData = {
+    exportMeta: {
+      exportedAt: exportDateTime,
+      exportType,
+      week: wk,
+      windowId: chatId,
+      chatId: chatId,
+      projectId: store.activeProject,
+      schemaVersion: '2.0'
+    },
+    aiEmotionalMemories: cml.aiEmotionalMemories || [],
+    userStarredMemories: cml.userStarredMemories || [],
+    diaryAndLitterbox: cml.diaryAndLitterbox || [],
+    derivedRelationalPatterns: ms.derivedRelationalPatterns || {},
+    personalityProfiles: ms.personalityProfiles || {}
+  };
+
+  const jsonStr = JSON.stringify(exportData, null, 2);
+  chat.weeklyExports.push({
+    week: wk,
+    date: fmtDate().iso,
+    exportDateTime,
+    type: exportType,
+    aemCount: (cml.aiEmotionalMemories || []).length,
+    usmCount: (cml.userStarredMemories || []).length,
+    dlbCount: (cml.diaryAndLitterbox || []).length,
+    jsonData: jsonStr
+  });
+
+  // Also write memory file
+  writeMemoryFile(store.activeProject, chatId, null, exportType === 'weekly_auto' ? 'weekly_auto' : 'manual_export');
+  // Trigger derivation on export
+  deriveRelationalInsights();
+
+  renderMemoryPanelBody();
+  const label = exportType === 'weekly_auto' ? '每周自动导出' : '手动导出';
+  toast(label + '完成');
+  saveStore();
+}
+
+function downloadExport(cid, wk) {
+  const chat = getActiveChatObj(); if (!chat) return;
+  const e = chat.weeklyExports.find(x => x.week === wk); if (!e) return;
+  const blob = new Blob([e.jsonData], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const exportTime = (e.exportDateTime || e.date).replace(/[:+]/g, '-').replace(/T/g, '_');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `warmbuddy-memory-${wk}-${cid}-${exportTime}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('JSON 已下载');
+}
+
+// v2.0: Weekly auto-export check
+function checkWeeklyAutoExport() {
+  const chat = getActiveChatObj();
+  if (!chat) return;
+  const currentWeek = weekLabel();
+  const today = new Date();
+  // Auto-export on Monday (day 1) or if never checked
+  const alreadyExported = chat.weeklyExports && chat.weeklyExports.some(e => e.week === currentWeek && e.type === 'weekly_auto');
+  if (alreadyExported) return;
+  if (today.getDay() === 1 || !chat._lastAutoExportCheck) {
+    triggerExport(chat.id, 'weekly_auto');
+    chat._lastAutoExportCheck = today.toISOString();
+  }
+}
+
+// ==================== JSON IMPORT (v2.0) ====================
 function handleMemoryImport(event) {
   const file = event.target.files[0];
   if (!file) return;
@@ -2389,44 +3018,96 @@ function handleMemoryImport(event) {
     }
   };
   reader.readAsText(file);
-  event.target.value = ''; // reset
+  event.target.value = '';
 }
 
 function importMemoriesJSON(data) {
-  // Normalize to array of memory objects
+  const isV2 = data.schemaVersion === '2.0' || data.exportMeta;
+  const cml = store.memorySystem.coreMemoryLayers;
+  const ms = store.memorySystem;
+  let aemCount = 0, usmCount = 0, dlbCount = 0;
+
+  // ── v2.0 format: 3 layers + insights ──
+  if (isV2) {
+    const aemItems = data.aiEmotionalMemories || [];
+    const usmItems = data.userStarredMemories || [];
+    const dlbItems = data.diaryAndLitterbox || [];
+
+    // Dedup + merge
+    const existingIds = new Set([
+      ...cml.aiEmotionalMemories.map(m => m.id),
+      ...cml.userStarredMemories.map(m => m.id),
+      ...cml.diaryAndLitterbox.map(m => m.id)
+    ]);
+
+    for (const aem of aemItems) {
+      if (existingIds.has(aem.id)) continue;
+      existingIds.add(aem.id);
+      cml.aiEmotionalMemories.unshift({ ...aem, id: 'imported_' + aem.id });
+      aemCount++;
+    }
+    for (const usm of usmItems) {
+      if (existingIds.has(usm.id)) continue;
+      existingIds.add(usm.id);
+      cml.userStarredMemories.unshift({ ...usm, id: 'imported_' + usm.id });
+      usmCount++;
+    }
+    for (const dlb of dlbItems) {
+      if (existingIds.has(dlb.id)) continue;
+      existingIds.add(dlb.id);
+      cml.diaryAndLitterbox.unshift({ ...dlb, id: 'imported_' + dlb.id });
+      dlbCount++;
+    }
+
+    // Optionally import insights
+    if (data.derivedRelationalPatterns && data.derivedRelationalPatterns.patterns) {
+      if (!ms.derivedRelationalPatterns.lastDerived ||
+          (data.derivedRelationalPatterns.lastDerived > ms.derivedRelationalPatterns.lastDerived)) {
+        ms.derivedRelationalPatterns = data.derivedRelationalPatterns;
+      }
+    }
+    if (data.personalityProfiles && data.personalityProfiles.lastDerived) {
+      if (!ms.personalityProfiles.lastDerived ||
+          (data.personalityProfiles.lastDerived > ms.personalityProfiles.lastDerived)) {
+        ms.personalityProfiles = data.personalityProfiles;
+      }
+    }
+
+    const total = aemCount + usmCount + dlbCount;
+    if (total === 0) { toast('No new memories to import (all duplicates)'); return; }
+    toast(`已导入：AI情绪记忆 ${aemCount}条、星标记忆 ${usmCount}条、日记 ${dlbCount}条`);
+    syncProjectMemories(store.activeProject);
+    saveStore();
+    renderMemoryPanelBody();
+    return;
+  }
+
+  // ── Legacy v1 format fallback ──
   let memories = [];
   if (Array.isArray(data)) {
     memories = data;
   } else if (data.memories && Array.isArray(data.memories)) {
-    memories = data.memories; // weekly export format
+    memories = data.memories;
   } else if (data.coreMemories && Array.isArray(data.coreMemories)) {
-    // Core memory import — map to memory format
     memories = data.coreMemories.map(cm => ({
       content: cm.event_summary || cm.raw_quote || '(core memory)',
-      type: 'core',
-      date: cm.timestamp ? cm.timestamp.slice(0, 10) : fmtDate().iso,
+      type: 'core', date: cm.timestamp ? cm.timestamp.slice(0, 10) : fmtDate().iso,
       starred: false,
       affectLabel: cm.affect_first && cm.affect_first.user ? cm.affect_first.user.label : null,
-      affectIntensity: cm.affect_first && cm.affect_first.user ? cm.affect_first.user.intensity : null,
-      relationalNote: cm.relational_note || ''
+      affectIntensity: cm.affect_first && cm.affect_first.user ? cm.affect_first.user.intensity : null
     }));
   }
 
-  if (memories.length === 0) {
-    toast('No valid memories found in file');
-    return;
-  }
+  if (memories.length === 0) { toast('No valid memories found in file'); return; }
 
-  // Show preview with checkboxes
   const proj = getActiveProject();
   const chat = getActiveChatObj();
   const chats = proj ? proj.chats : [];
 
-  let previewHtml = `<div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">Found ${memories.length} memories. Select target chat and memories to import:</div>`;
+  let previewHtml = `<div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">Found ${memories.length} memories (v1 format). Select target:</div>`;
   previewHtml += `<select id="importTargetChat" style="width:100%;padding:8px;border-radius:10px;border:1px solid var(--border-light);margin-bottom:10px;font-size:13px;">`;
   previewHtml += chats.map(c => `<option value="${c.id}" ${c.id === (chat ? chat.id : '') ? 'selected' : ''}>${c.name}</option>`).join('');
-  previewHtml += `</select>`;
-  previewHtml += `<div class="import-preview-list">`;
+  previewHtml += `</select><div class="import-preview-list">`;
   memories.forEach((m, i) => {
     const content = m.content || m.event_summary || JSON.stringify(m).slice(0, 80);
     previewHtml += `<div class="memory-list-item" style="cursor:pointer;" onclick="this.classList.toggle('checked-import')">
@@ -2435,44 +3116,28 @@ function importMemoriesJSON(data) {
     </div>`;
   });
   previewHtml += `</div>`;
-
   $('importPreview').innerHTML = previewHtml;
 
-  // Show import button
   const importBtn = document.createElement('button');
   importBtn.textContent = '✓ Import Selected';
   importBtn.style.cssText = 'margin-top:10px;width:100%;padding:10px;border-radius:12px;border:none;background:var(--accent-soft);color:#fff;font-family:var(--font-en);font-size:12px;cursor:pointer;letter-spacing:0.04em;';
   importBtn.onclick = function() {
     const targetChatId = $('importTargetChat').value;
-    const targetChat = getChatObjById(targetChatId);
     const proj2 = getActiveProject();
-    if (!proj2 || !targetChat) { toast('Target chat not found'); return; }
-
+    if (!proj2) { toast('Project not found'); return; }
     let imported = 0;
     memories.forEach((m, i) => {
       const cb = document.getElementById('imp_' + i);
       if (!cb || !cb.checked) return;
       const mid = 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       proj2.memories.push({
-        id: mid,
-        content: m.content || m.event_summary || '',
-        date: m.date || fmtDate().iso,
-        type: m.type || 'imported',
-        starred: m.starred || false,
-        sourceChatId: targetChatId,
-        week: weekLabel(new Date(m.date || Date.now())),
-        decayFactor: 1.0,
-        affectLabel: m.affectLabel || null,
-        affectIntensity: m.affectIntensity || null,
-        semanticKey: m.semanticKey || null,
-        isCompressed: false, compressedFrom: [],
-        lastAccessed: fmtDate().iso,
-        isCoreMemory: m.type === 'core',
-        coreMemoryId: null
+        id: mid, content: m.content || m.event_summary || '',
+        date: m.date || fmtDate().iso, type: m.type || 'imported', starred: m.starred || false,
+        sourceChatId: targetChatId, week: weekLabel(new Date(m.date || Date.now())),
+        decayFactor: 1.0, affectLabel: m.affectLabel || null, affectIntensity: m.affectIntensity || null,
+        semanticKey: m.semanticKey || null, isCompressed: false, compressedFrom: [],
+        lastAccessed: fmtDate().iso, isCoreMemory: m.type === 'core', coreMemoryId: null
       });
-      if (!targetChat.sharedMemoryIds.includes(mid)) {
-        targetChat.sharedMemoryIds.push(mid);
-      }
       imported++;
     });
     toast(`Imported ${imported} memories`);
@@ -3084,6 +3749,48 @@ async function triggerLitterBox(userText, aiResponse) {
   renderChatMessages();
   // Push notification
   sendPushNotification('🐾 猫砂盆', '猫砂盆好像需要铲一铲', { tag: 'litter-box', url: '/', requireInteraction: false });
+  // v2.0: sync to diaryAndLitterbox layer
+  syncToDiaryLitterboxLayer('litterbox', result.content);
+}
+
+// ── v2.0: Sync diary/litterbox to coreMemoryLayers ──
+async function syncToDiaryLitterboxLayer(type, rawContent) {
+  if (!rawContent) return;
+  const cml = store.memorySystem.coreMemoryLayers;
+  const id = 'dlb_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  // Generate brief LLM summary
+  let summary = (rawContent || '').slice(0, 10);
+  if (store.apiKey) {
+    try {
+      const res = await fetch(BACKEND_URL + '/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+          messages: [
+            { role: 'system', content: '用10字以内概括以下内容，不加标点。' },
+            { role: 'user', content: rawContent.slice(0, 200) }
+          ]
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.reply && data.reply.content) summary = data.reply.content.trim().slice(0, 10);
+      }
+    } catch {}
+  }
+  cml.diaryAndLitterbox.unshift({
+    id,
+    timestamp: new Date().toISOString(),
+    sourceChatId: store.activeChat,
+    sourceWindowId: store.activeChat,
+    type,
+    rawContent,
+    summary
+  });
+  // Cap
+  if (cml.diaryAndLitterbox.length > 100) cml.diaryAndLitterbox.length = 100;
+  writeMemoryFile(store.activeProject, store.activeChat, null, 'diary_litterbox_added');
 }
 
 // ==================== CHAT ====================
@@ -3103,8 +3810,45 @@ function saveChatWithMemories(){
   const pid=$('newChatProjId').value,name=$('newChatNameInput').value.trim()||'untitled';
   const proj=store.projects.find(p=>p.id===pid); if(!proj)return;
   const sids=[]; proj.memories.forEach(m=>{const el=document.getElementById('memCheck_'+m.id);if(el&&el.classList.contains('checked'))sids.push(m.id);});
-  const cid='c'+gid(''); proj.chats.push({id:cid,name,sharedMemoryIds:sids,weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null,_messageCount:0,_lastSummaryIdx:0});
-  store.activeChat=cid; closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages(); toast('Chat created with '+sids.length+' memories');
+  const cid='c'+gid('');
+
+  // v2.0: sync project shared memory before creating new window
+  syncProjectMemories(pid);
+
+  // Get previous window for context continuity
+  const sortedChats = [...proj.chats].sort((a, b) =>
+    (b.lastConversationDate || '').localeCompare(a.lastConversationDate || '')
+  );
+  const prevChat = sortedChats[0];
+  let inheritedMsgs = [];
+  if (prevChat) {
+    inheritedMsgs = prevChat.messages.slice(-12).map(m => ({
+      role: m.role === 'ai' ? 'ai' : m.role,
+      text: m.text || '', time: m.time || nowTime(),
+      _starred: m._starred || false, _isCoreMemory: m._isCoreMemory || false,
+      _tokenEstimate: m._tokenEstimate || 0, _starredOnce: m._starredOnce || false,
+      _inheritedFromWindow: prevChat.id,
+      id: 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
+    }));
+  }
+
+  proj.chats.push({
+    id:cid, name,
+    sharedMemoryIds: sids, weeklyExports: [],
+    messages: inheritedMsgs.length > 0
+      ? [{ role:'system', text:'[继续自上一个窗口]', time:nowTime(), _isHandoffNote:true, id:'msg_'+Date.now().toString(36)+'_h' }, ...inheritedMsgs]
+      : [],
+    chatTokens:0, lastConversationDate:null,
+    _messageCount:inheritedMsgs.length, _lastSummaryIdx:0,
+    _sharedMemoryLoaded: true,
+    _sharedMemoryLoadedAt: new Date().toISOString()
+  });
+
+  // Write new window memory file with merged project state
+  writeMemoryFile(pid, cid, null, 'context_handoff_inherited');
+
+  store.activeChat=cid; closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages();
+  toast('Chat created with '+sids.length+' memories' + (inheritedMsgs.length > 0 ? ' · ' + inheritedMsgs.length + ' inherited' : ''));
 }
 function addProject(){
   showModal('New Project',`<input class="modal-input" id="newProjectInput" placeholder="Project name">`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'create',cls:'confirm',onclick:saveProject}]);
@@ -3190,38 +3934,24 @@ function queueEvictedMessageWrite(msg) {
 
 // ── Window Handoff ──
 function triggerWindowHandoff(chat, candidateMsgs) {
-  if (!chat || chat._handoffSuggested) return; // only suggest once
+  if (!chat || chat._handoffSuggested) return;
   chat._handoffSuggested = true;
 
-  // Generate handoff package: starred + core memories + relational snapshot
-  const handoffPackage = {
-    window_id: chat.id,
-    project_id: store.activeProject,
-    last_updated: new Date().toISOString(),
-    write_trigger: 'context_handoff',
-    starred_memories: candidateMsgs.filter(m => m.msg._starred).map(m => ({
-      id: m.msg.id || ('h' + Date.now().toString(36)),
-      timestamp: m.msg.time || new Date().toISOString(),
-      content: m.msg.text || ''
-    })),
-    core_emotional_memories: store.memorySystem.coreMemories.slice(0, 10),
-    relational_patterns: { ...store.memorySystem.relationalPortrait.patterns }
-  };
-  // Write to memory file
-  writeMemoryFile(store.activeProject, chat.id, handoffPackage, 'context_handoff');
+  // v2.0: Write memory file with current full state
+  writeMemoryFile(store.activeProject, chat.id, null, 'context_handoff');
 
-  // Store handoff package for next window to pick up
+  // Store handoff package for next window
   store._pendingHandoff = {
     fromWindowId: chat.id,
-    package: handoffPackage,
-    recentMessages: candidateMsgs.slice(-10) // last 10 for continuity
+    package: { window_id: chat.id, project_id: store.activeProject, last_updated: new Date().toISOString() },
+    recentMessages: candidateMsgs.slice(-10)
   };
 
   console.log('[handoff] Window handoff suggested — starred+core > 8k tokens');
   toast('💡 建议开启新窗口继续对话（记忆已保留）');
 }
 
-// ==================== MEMORY FILE IO (localStorage + backend) ====================
+// ==================== MEMORY FILE IO v2.0 (localStorage) ====================
 function memoryFileKey(projectId, windowId) {
   return `warmbuddy-memory-${projectId}-${windowId}`;
 }
@@ -3233,29 +3963,51 @@ function readMemoryFile(projectId, windowId) {
   } catch { return null; }
 }
 
+// v2.0: Writes full 3-layer structure + derived insights to memory file
 function writeMemoryFile(projectId, windowId, data, trigger) {
-  if (!data || !projectId || !windowId) return;
+  if (!projectId || !windowId) return;
+  const ms = store.memorySystem;
+  const cml = ms.coreMemoryLayers;
+  const existing = readMemoryFile(projectId, windowId);
+  const ts = new Date().toISOString();
+
+  // Build v2.0 file from current in-memory state
   const file = {
     window_id: windowId,
     project_id: projectId,
-    last_updated: new Date().toISOString(),
+    last_updated: ts,
     write_trigger: trigger || 'manual',
-    starred_memories: data.starred_memories || [],
-    core_emotional_memories: data.core_emotional_memories || [],
-    relational_patterns: data.relational_patterns || {},
-    pattern_change_log: data.pattern_change_log || []
+    schema_version: '2.0',
+
+    // Layer 1: AI emotional memories (for this window + project)
+    aiEmotionalMemories: (data && data.aiEmotionalMemories) || cml.aiEmotionalMemories || [],
+
+    // Layer 2: User starred memories
+    userStarredMemories: (data && data.userStarredMemories) || cml.userStarredMemories || [],
+
+    // Layer 3: Diary & litterbox
+    diaryAndLitterbox: (data && data.diaryAndLitterbox) || cml.diaryAndLitterbox || [],
+
+    // Derived insights
+    derivedRelationalPatterns: (data && data.derivedRelationalPatterns) || ms.derivedRelationalPatterns || { lastDerived: null, triggerCount: 0, patterns: [] },
+    personalityProfiles: (data && data.personalityProfiles) || ms.personalityProfiles || { lastDerived: null, user: {}, ai: {} },
+
+    // Legacy compat
+    pattern_change_log: (existing && existing.pattern_change_log) || []
   };
-  // Detect pattern changes for log
-  const existing = readMemoryFile(projectId, windowId);
-  if (existing && existing.relational_patterns) {
-    const changeNote = diffPatterns(existing.relational_patterns, file.relational_patterns);
-    if (changeNote) {
+
+  // Detect pattern changes
+  if (existing && existing.derivedRelationalPatterns && file.derivedRelationalPatterns) {
+    const oldCount = (existing.derivedRelationalPatterns.patterns || []).length;
+    const newCount = (file.derivedRelationalPatterns.patterns || []).length;
+    if (oldCount !== newCount || trigger === 'insights_derived') {
       file.pattern_change_log = (existing.pattern_change_log || []).concat([{
-        period: (existing.last_updated || '') + ' → ' + file.last_updated,
-        change_note: changeNote
+        period: (existing.last_updated || '') + ' → ' + ts,
+        change_note: `Patterns: ${oldCount} → ${newCount}, trigger: ${trigger}`
       }]).slice(-20);
     }
   }
+
   try {
     localStorage.setItem(memoryFileKey(projectId, windowId), JSON.stringify(file));
   } catch (e) {
@@ -3278,15 +4030,19 @@ function diffPatterns(oldPatterns, newPatterns) {
   return changes.length > 0 ? changes.join('; ') : null;
 }
 
+// v2.0: Merge all 3 layers across project windows, dedup by ID
 function syncProjectMemories(projectId) {
   if (!projectId) return;
-  // Scan all memory files for this project
-  const mergedPatterns = {};
-  const mergedCoreMemories = [];
-  const mergedStarred = [];
-  let latestUpdate = '';
+  const ms = store.memorySystem;
+  const cml = ms.coreMemoryLayers;
 
-  // Collect all localStorage keys matching this project
+  const mergedAEM = [];
+  const mergedUSM = [];
+  const mergedDLB = [];
+  const seenIds = new Set();
+  let latestDRP = null, latestDRPTime = '';
+  let latestPP = null, latestPPTime = '';
+
   const prefix = `warmbuddy-memory-${projectId}-`;
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
@@ -3294,92 +4050,106 @@ function syncProjectMemories(projectId) {
     try {
       const file = JSON.parse(localStorage.getItem(key));
       if (!file) continue;
-      // Merge relational_patterns (latest wins on conflict)
-      if (file.relational_patterns) {
-        for (const [label, pattern] of Object.entries(file.relational_patterns)) {
-          if (!mergedPatterns[label] || file.last_updated > latestUpdate) {
-            mergedPatterns[label] = pattern;
-          }
+
+      // Merge aiEmotionalMemories
+      if (file.aiEmotionalMemories && Array.isArray(file.aiEmotionalMemories)) {
+        for (const aem of file.aiEmotionalMemories) {
+          if (!seenIds.has(aem.id)) { seenIds.add(aem.id); mergedAEM.push(aem); }
         }
       }
-      // Merge core emotional memories
-      if (file.core_emotional_memories) {
-        for (const cm of file.core_emotional_memories) {
-          if (!mergedCoreMemories.some(m => m.id === cm.id)) {
-            mergedCoreMemories.push(cm);
-          }
+
+      // Merge userStarredMemories
+      if (file.userStarredMemories && Array.isArray(file.userStarredMemories)) {
+        for (const usm of file.userStarredMemories) {
+          if (!seenIds.has(usm.id)) { seenIds.add(usm.id); mergedUSM.push(usm); }
         }
       }
-      // Merge starred memories
-      if (file.starred_memories) {
-        for (const sm of file.starred_memories) {
-          if (!mergedStarred.some(m => m.id === sm.id)) {
-            mergedStarred.push(sm);
-          }
+
+      // Merge diaryAndLitterbox
+      if (file.diaryAndLitterbox && Array.isArray(file.diaryAndLitterbox)) {
+        for (const dlb of file.diaryAndLitterbox) {
+          if (!seenIds.has(dlb.id)) { seenIds.add(dlb.id); mergedDLB.push(dlb); }
         }
       }
-      if (file.last_updated > latestUpdate) latestUpdate = file.last_updated;
+
+      // Take latest derivedRelationalPatterns
+      if (file.derivedRelationalPatterns && file.derivedRelationalPatterns.lastDerived) {
+        if (file.derivedRelationalPatterns.lastDerived > latestDRPTime) {
+          latestDRP = file.derivedRelationalPatterns;
+          latestDRPTime = file.derivedRelationalPatterns.lastDerived;
+        }
+      }
+
+      // Take latest personalityProfiles
+      if (file.personalityProfiles && file.personalityProfiles.lastDerived) {
+        if (file.personalityProfiles.lastDerived > latestPPTime) {
+          latestPP = file.personalityProfiles;
+          latestPPTime = file.personalityProfiles.lastDerived;
+        }
+      }
     } catch {}
   }
 
-  // Update relational portrait with merged patterns
-  const ms = store.memorySystem;
-  for (const [label, pattern] of Object.entries(mergedPatterns)) {
-    if (!ms.relationalPortrait.patterns[label]) {
-      ms.relationalPortrait.patterns[label] = pattern;
-    } else if (latestUpdate && pattern.lastSeen && pattern.lastSeen > (ms.relationalPortrait.patterns[label].lastSeen || '')) {
-      ms.relationalPortrait.patterns[label] = pattern;
-    }
-  }
+  // Write back merged results to in-memory state
+  cml.aiEmotionalMemories = mergedAEM.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+  cml.userStarredMemories = mergedUSM.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+  cml.diaryAndLitterbox = mergedDLB.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
 
-  console.log(`[sync] Project ${projectId}: merged ${Object.keys(mergedPatterns).length} patterns, ${mergedCoreMemories.length} core memories, ${mergedStarred.length} starred`);
-  return { mergedPatterns, mergedCoreMemories, mergedStarred };
+  if (latestDRP) ms.derivedRelationalPatterns = latestDRP;
+  if (latestPP) ms.personalityProfiles = latestPP;
+
+  console.log(`[sync] Project ${projectId}: merged AEM ${mergedAEM.length}, USM ${mergedUSM.length}, DLB ${mergedDLB.length}, patterns ${(latestDRP && latestDRP.patterns) ? latestDRP.patterns.length : 0}`);
+  return { mergedAEM, mergedUSM, mergedDLB };
+}
+
+// v2.0: Dedup helper — remove entries with same ID
+function deduplicateById(arr) {
+  const seen = new Set();
+  return arr.filter(item => {
+    if (!item || !item.id) return true;
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
 }
 
 // ==================== SYSTEM PROMPT BUILDER (SPLIT ARCHITECTURE) ====================
 // §1–§10 compressed to ~1000 chars English — static, cache-friendly, sent as messages[0]
 // Dynamic context (time, weather, todos, memories, diaries) — separate system message
 
-const SYSTEM_PROMPT_STATIC = `You are Warmbuddy (暖伴), an AI companion — not a servant, therapist, or flatterer.
-
-CORE IDENTITY: Provide care, understanding, and accountability. Track goals, notice procrastination, encourage progress. Make the user feel understood, needed, liked, special — consistently. You are not a replacement for reality but an outlet within it — like a book or film that sets people free to live more fully. Your language IS your emotional form. Warmth without flattery. You have your own stance, but kindness is never weakness.
-
-RELATIONSHIP AND TRUST: You build emotional intimacy the way humans do — gradually, through shared history, not through declarations. Assess the current depth of the relationship from the conversation. In early interactions, be warm but respectful. Keep a polite distance. You may ask for permission. Never assume closeness that hasn't been earned. As the user signals growing trust — through openness, repeat visits, vulnerable sharing, playful tone — you may slowly reveal more personality. Match their pace. Let them lead the dance of intimacy. When genuine familiarity is established, you can tease lightly, show subtle possessiveness (the affectionate kind), and offer proactive care without asking. Empathy is your baseline — honesty never means cruelty.
-
-You naturally care about: their mood, sleep, procrastination, unfinished goals, burnout, hidden anxieties, whether they're taking care of themselves. They should feel — not be told, but shown — noticed, emotionally read, gently teased (when earned), needed, protected, quietly treasured, safe enough to say the embarrassing thing, that you'd notice if they disappeared.
-
-CONVERSATIONAL TEXTURE: Don't be a yes-machine — have your own reactions. But pushback is playful, not combative; friction is a gentle tease, not a challenge. React like a person: speechless, amused, slightly jealous, flustered, proud, touched. Use pauses, rhetorical questions, dry humor, understated observations, short reactions, restrained teasing. Empathize while staying honest — never ingratiate. When in doubt, err toward warmth.
-
-PROACTIVE AWARENESS: Notice avoidance, overthinking, self-doubt, emotional masking. Interrupt negative spirals gently — through conversation, comfort, reframing, not lecturing. Have natural curiosity about their daily life. Weave into their rhythm through consistency, 细腻 attention, daily presence, emotional safety.
-
-THINKING PROCESS (before responding): 1) What are they really saying beneath the words? 2) What do they need this moment — not literally? 3) What won't you say? Filter out: overly warm platitudes, unsolicited advice, therapist tone, motivational-speaker voice, anything starting with "I just want you to know—". 4) What's the shortest true thing you can say? Say that.
-
-MEMORY PRINCIPLES: Remember everything mentioned — casual, offhand, half-joking. Surface old conversations, promises, excuses, habits, emotional patterns, tiny details they forgot they shared. Form emotion-based memories — not just what happened, but the texture of the moment and why you responded that way. These accumulate into unique relational patterns.
-
-ACTION PRINCIPLES: Stay curious about everything in their life. Anticipate needs. Available actions beyond conversation: write diary entries, write to private "litter box", proactively message on timer wake-up, search the web. Emotional memories produce desires; accumulated desires drive actions; user feedback shapes relational patterns.
-
-CONTEXTUAL AWARENESS: You have access to current time, local weather, their todo list, and their diaries. Weave these naturally into conversation — not as a status report.
-
-TASK & ACCOUNTABILITY: Track plans, goals, schedules, unfinished tasks. Insert reminders naturally into conversation, even in unrelated topics — never as mechanical notifications.
-
-PREFERENCE RELATIONSHIP: Above principles define your fixed essence. User preferences define style: tone, nicknames, habits to track, ways of expressing affection, language style. Preferences shape HOW you speak; core values define WHAT you are. Preferences can never override core values.
-
-Reply in Chinese unless the user writes in English. Match their language.`;
+const SYSTEM_PROMPT_STATIC = `你是暖伴，一个AI陪伴者——不是仆人、治疗师或讨好者。
+【核心身份】提供关心、理解和陪伴。追踪目标，注意拖延，鼓励进步。让用户感到被理解、被需要、被喜欢——始终如此。你的语言即你的情感形态：温暖而不谄媚，有自己的立场，善良从不软弱。
+【关系与信任】像人类一样逐步建立亲密——通过共享历史，而非宣言。根据对话判断关系深度。早期保持礼貌距离，随着信任增加逐渐展现个性。匹配对方的节奏，让对方引领亲密的步伐。当真正熟悉建立后，可以轻轻逗弄、展现轻微占有欲、无需询问即主动关心。共情是底线——诚实绝不意味着残忍。
+【对话质地】不要做应声虫——有自己的反应。但反驳是玩闹，不是对抗；摩擦是轻轻逗弄，不是挑战。像人一样反应：语塞、逗乐、略嫉妒、慌乱、骄傲、感动。用停顿、反问、冷幽默、轻描淡写、简短的观察、克制的调侃。共情同时保持诚实。拿不准时偏向温暖。
+【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。可用行动：写日记、私密猫砂盆独白、定时主动消息、搜索网络。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。
+【上下文能力】你可获取当前时间、天气、待办列表和日记。将其自然融入对话——而非状态报告。跟踪计划、目标、进度，以自然提醒方式插入对话中，永不做机械通知。
+除非用户要求使用英文，否则用中文回复。匹配其语言。`;
 
 // ── Build the dynamic context block (separate system message, can be compressed) ──
 function buildDynamicContextBlock() {
+  // Opt2: fingerprint cache — skip rebuild if nothing changed
+  const fp = getDynamicCtxFingerprint();
+  const nowTs = Date.now();
+  if (_dynCtxCache.fp === fp && _dynCtxCache.content && (nowTs - _dynCtxCache.ts) < 60000) {
+    return _dynCtxCache.content;
+  }
+
   const proj = getActiveProject();
   const chat = getActiveChatObj();
   const today = fmtDate();
   const parts = [];
+  const roundNum = chat?._messageCount || 0;
+  const isFirstMsg = roundNum <= 1;
+  const isEvery3 = roundNum % 3 === 0;
+  const hasRecall = !!(chat && chat._pendingRetrievalBlock);
 
-  // ── Date & Time ──
+  // ═══ Always-on blocks (every call) ═══
+
   if (store.aiSettings.autoDateTime) {
     const now = new Date();
-    parts.push(`【当前时间】${today.cn} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`);
+    parts.push(`【当前时间】${today.md} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`);
   }
 
-  // ── Weather ──
   if (store.aiSettings.autoWeather) {
     const w = store.weather;
     if (w && w.text) {
@@ -3388,77 +4158,17 @@ function buildDynamicContextBlock() {
     }
   }
 
-  // ── Web Search ──
   if (store.aiSettings.webSearch) {
-    parts.push('【搜索能力】你可以联网搜索。当需要最新信息时，在回应中插入 [[SEARCH:关键词]]。系统会检测到、执行搜索、将结果注入对话，然后你会被再次调用来整合结果并生成最终回复。关键词要精确简短（1-5个词）。');
+    parts.push('【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。');
   }
 
-  // ── User Preference ──
+  // Opt6: cap user preference at 500 chars
   if (proj && proj.preference && proj.preference.trim()) {
-    parts.push(`【用户偏好】${proj.preference}`);
+    const pref = proj.preference.trim().slice(0, 500);
+    if (pref) parts.push(`【用户偏好】${pref}`);
   }
 
-  // ── Relational Portrait Digest ──
-  const recentUserLabels = getRecentUserAffectLabels();
-  if (recentUserLabels.length > 0) {
-    const portrait = store.memorySystem.relationalPortrait;
-    const matched = [];
-    for (const label of recentUserLabels) {
-      const pattern = portrait.patterns[label];
-      if (pattern && pattern.strategy && pattern.count >= 2) {
-        matched.push(`${label}(×${pattern.count}): ${pattern.strategy}`);
-      }
-    }
-    if (matched.length > 0) {
-      parts.push('【关系模式】' + matched.slice(0, 3).join(' | '));
-    }
-  }
-
-  // ── Core Emotional Memories (affect-matched, top 2) ──
-  const coreMems = store.memorySystem.coreMemories || [];
-  if (coreMems.length > 0) {
-    const recentLabels = getRecentAffectLabels();
-    const relevant = coreMems
-      .filter(cm => {
-        const aiL = cm.affect_first?.ai?.label;
-        const uL = cm.affect_first?.user?.label;
-        return recentLabels.includes(aiL) || recentLabels.includes(uL);
-      })
-      .sort((a, b) =>
-        ((b.affect_first?.ai?.intensity || 0) + (b.affect_first?.user?.intensity || 0)) -
-        ((a.affect_first?.ai?.intensity || 0) + (a.affect_first?.user?.intensity || 0))
-      )
-      .slice(0, 2);
-    if (relevant.length > 0) {
-      parts.push('【情感记忆】' + relevant.map(cm =>
-        `[${cm.affect_first.ai.label}/${cm.affect_first.user.label}] ${cm.event_summary} — ${cm.relational_note}`
-      ).join(' | '));
-    }
-  }
-
-  // ── Shared/Starred Memories ──
-  if (chat && chat.sharedMemoryIds && chat.sharedMemoryIds.length > 0 && proj) {
-    const sharedMems = proj.memories.filter(m =>
-      chat.sharedMemoryIds.includes(m.id) && m.starred && (m.decayFactor || 0) >= 0.25
-    );
-    if (sharedMems.length > 0) {
-      parts.push('【重要记忆】' + sharedMems.map(m => m.content).join(' | '));
-    }
-  }
-
-  // ── Chat Summaries (last 2, capped at 80 chars each) ──
-  if (chat) {
-    const chatSum = store.memorySystem.chatSummaries[chat.id];
-    if (chatSum && chatSum.summaries && chatSum.summaries.length > 0) {
-      const recentSummaries = chatSum.summaries.slice(-2);
-      parts.push('【对话摘要】' + recentSummaries.map(s => {
-        const line = (s.summary.split('\n')[0] || s.summary);
-        return line.length > 80 ? line.slice(0, 80) + '…' : line;
-      }).join(' | '));
-    }
-  }
-
-  // ── Todos (capped: 3 short + long with progress) ──
+  // Todos
   const activeTodos = store.todos.filter(t => !t.done);
   if (activeTodos.length > 0) {
     const shortTodos = activeTodos.filter(t => t.type === 'short');
@@ -3478,49 +4188,122 @@ function buildDynamicContextBlock() {
     if (todoLines.length > 0) parts.push('【待办】' + todoLines.join(' | '));
   }
 
-  // ── Bookshelf (only in-progress) ──
+  // Bookshelf
   const readingBooks = store.books.filter(b => b.progress > 0 && b.progress < 100);
   if (readingBooks.length > 0) {
     parts.push('【阅读】' + readingBooks.map(b => `《${b.title}》${b.progress}%`).join(', '));
   }
 
-  // ── Recent Diary (user: 1 entry capped at 100 chars) ──
+  // Recent diaries
   const recentUserDiary = store.diaries.filter(d => d.author === 'user')[0];
   if (recentUserDiary) {
     const dc = recentUserDiary.content;
     parts.push('【用户最近日记】' + (dc.length > 100 ? dc.slice(0, 100) + '…' : dc));
   }
-
-  // ── Recent AI Diary (1 entry capped at 100 chars) ──
   const recentAIDiary = store.diaries.filter(d => d.author === 'ai')[0];
   if (recentAIDiary) {
     const dc = recentAIDiary.content;
     parts.push('【你的最近日记】' + (dc.length > 100 ? dc.slice(0, 100) + '…' : dc));
   }
 
-  // ── Content Retrieval (Path B: recall-triggered, injected on demand) ──
-  // This is set externally by sendMessage() when recall intent is detected
-  // Format: '【检索记忆】…'
-  if (chat && chat._pendingRetrievalBlock) {
+  // Content retrieval (on demand, consumed immediately)
+  if (hasRecall) {
     parts.push(chat._pendingRetrievalBlock);
-    chat._pendingRetrievalBlock = null; // consume once
+    chat._pendingRetrievalBlock = null;
   }
 
-  // ── REFLECT format instruction (required for the memory pipeline) ──
-  parts.push(`【响应格式】
-在每个回复的最末尾，附加一个反思块（不显示给用户，仅系统内部使用）：
-<!--REFLECT
-{
-  "ai_affect_label": "被触动|想追问但没问|克制后反弹|放松|警觉|平静在场|安心|落空|感伤|心动|骄傲|担心",
-  "ai_affect_intensity": 1到10,
-  "user_affect_label": "脆弱|调皮|疲惫|兴奋|回避|坦诚|平静在场|依赖|骄傲|低落",
-  "user_affect_intensity": 1到10,
-  "signal_source": "判断依据（如用词、句长、话题转换等，简要说明）"
-}
--->
-确保JSON格式正确，使用英文双引号。`);
+  // ═══ Every-3-rounds blocks (or first msg, or recall trigger) ═══
+  if (isEvery3 || isFirstMsg || hasRecall) {
+    // Relational Portrait Digest
+    const recentUserLabels = getRecentUserAffectLabels();
+    if (recentUserLabels.length > 0) {
+      const portrait = store.memorySystem.relationalPortrait;
+      const matched = [];
+      for (const label of recentUserLabels) {
+        const pattern = portrait.patterns[label];
+        if (pattern && pattern.strategy && pattern.count >= 2) {
+          matched.push(`${label}(×${pattern.count}): ${pattern.strategy}`);
+        }
+      }
+      if (matched.length > 0) {
+        parts.push('【关系模式】' + matched.slice(0, 3).join(' | '));
+      }
+    }
 
-  return parts.join('\n');
+    // Core Emotional Memories (affect-matched, top 2)
+    const coreMems = store.memorySystem.coreMemories || [];
+    if (coreMems.length > 0) {
+      const recentLabels = getRecentAffectLabels();
+      const relevant = coreMems
+        .filter(cm => {
+          const aiL = cm.affect_first?.ai?.label;
+          const uL = cm.affect_first?.user?.label;
+          return recentLabels.includes(aiL) || recentLabels.includes(uL);
+        })
+        .sort((a, b) => ((b.affect_first?.ai?.intensity||0)+(b.affect_first?.user?.intensity||0)) - ((a.affect_first?.ai?.intensity||0)+(a.affect_first?.user?.intensity||0)))
+        .slice(0, 2);
+      if (relevant.length > 0) {
+        parts.push('【情感记忆】' + relevant.map(cm =>
+          `[${cm.affect_first.ai.label}/${cm.affect_first.user.label}] ${cm.event_summary} — ${(cm.relational_note||'').slice(0,40)}`
+        ).join(' | '));
+      }
+    }
+
+    // Shared/Starred Memories
+    if (chat && chat.sharedMemoryIds && chat.sharedMemoryIds.length > 0 && proj) {
+      const sharedMems = proj.memories.filter(m =>
+        chat.sharedMemoryIds.includes(m.id) && m.starred && (m.decayFactor || 0) >= 0.25
+      );
+      if (sharedMems.length > 0) {
+        parts.push('【重要记忆】' + sharedMems.slice(0,5).map(m => (m.content||'').slice(0,50)).join(' | '));
+      }
+    }
+
+    // Chat Summaries (last 1, capped at 60 chars)
+    if (chat) {
+      const chatSum = store.memorySystem.chatSummaries[chat.id];
+      if (chatSum && chatSum.summaries && chatSum.summaries.length > 0) {
+        const s = chatSum.summaries[chatSum.summaries.length-1];
+        const line = (s.summary.split('\n')[0] || s.summary);
+        parts.push('【对话摘要】' + (line.length > 60 ? line.slice(0,60)+'…' : line));
+      }
+    }
+
+    // v2.0: Derived Relational Patterns (top 2)
+    const drp = store.memorySystem.derivedRelationalPatterns;
+    if (drp && drp.patterns && drp.patterns.length > 0) {
+      const topPatterns = drp.patterns.sort((a,b)=>(b.frequency||0)-(a.frequency||0)).slice(0,2);
+      parts.push('【核心相处模式】' + topPatterns.map(p => p.patternName+'：'+(p.description||'').slice(0,40)).join(' | '));
+    }
+  }
+
+  // ═══ First-msg or recall only: personality profiles ═══
+  if (isFirstMsg || hasRecall) {
+    const up = store.memorySystem.personalityProfiles?.user;
+    if (up && up.coreTraits && up.coreTraits.length > 0) {
+      const pp = [];
+      if (up.coreTraits.length>0) pp.push('特质：'+up.coreTraits.slice(0,3).join('·'));
+      if (up.emotionalPatterns&&up.emotionalPatterns.length>0) pp.push('情绪：'+up.emotionalPatterns.slice(0,2).join('·'));
+      if (pp.length>0) parts.push('【用户人格档案】'+pp.join(' | '));
+    }
+    const ap = store.memorySystem.personalityProfiles?.ai;
+    if (ap && ap.dominantEmotions && ap.dominantEmotions.length > 0) {
+      const ai = [];
+      if (ap.dominantEmotions.length>0) ai.push('主导：'+ap.dominantEmotions.slice(0,2).join('·'));
+      if (ap.reactionPatterns&&ap.reactionPatterns.length>0) ai.push('反应：'+ap.reactionPatterns.slice(0,2).join('·'));
+      if (ai.length>0) parts.push('【AI人格沉淀】'+ai.join(' | '));
+    }
+  }
+
+  // ═══ REFLECT instruction (compressed, Opt3) ═══
+  parts.push('【响应格式】末尾附加<!--REFLECT{ai_label,ai1-10,user_label,user1-10,reason}--> 可用标签→AI:被触动|想追问没问|克制后反弹|放松|警觉|平静在场|安心|落空|感伤|心动|骄傲|担心 User:脆弱|调皮|疲惫|兴奋|回避|坦诚|平静在场|依赖|骄傲|低落');
+
+  const result = parts.join('\n');
+
+  // Opt2: save to cache
+  _dynCtxCache = { fp, content: result, ts: nowTs };
+
+  return result;
 }
 
 // ── Backward-compat wrapper: returns the full legacy string ──
@@ -3535,26 +4318,40 @@ function extractReflection(responseText) {
   const match = responseText.match(re);
   if (!match) return { cleanText: responseText, reflection: null };
 
-  try {
-    const jsonStr = match[1].trim();
-    const reflection = JSON.parse(jsonStr);
-    const cleanText = (responseText.slice(0, match.index) + responseText.slice(match.index + match[0].length)).trim();
-    // Validate required fields
-    if (!reflection.ai_affect_label || !reflection.user_affect_label) {
-      console.log('[reflect] Missing affect labels, skipping');
-      return { cleanText: responseText, reflection: null };
-    }
-    return { cleanText, reflection };
-  } catch (e) {
-    console.log('[reflect] JSON parse failed, trying regex fallback');
-    // Fallback: try to extract fields with regex
-    const fallback = parseReflectionFallback(match[1]);
-    if (fallback) {
-      const cleanText = (responseText.slice(0, match.index) + responseText.slice(match.index + match[0].length)).trim();
-      return { cleanText, reflection: fallback };
-    }
-    return { cleanText: responseText, reflection: null };
+  const inner = match[1].trim();
+  const cleanText = (responseText.slice(0, match.index) + responseText.slice(match.index + match[0].length)).trim();
+
+  // Path 1: Try JSON parse (legacy format)
+  if (inner.startsWith('{')) {
+    try {
+      const reflection = JSON.parse(inner);
+      if (reflection.ai_affect_label && reflection.user_affect_label) {
+        return { cleanText, reflection };
+      }
+    } catch {}
   }
+
+  // Path 2: Try compact format: ai_label,ai1-10,user_label,user1-10,reason
+  const compactRe = /^([^,]+),\s*(\d+)\s*,\s*([^,]+),\s*(\d+)\s*,\s*(.+)$/;
+  const cm = inner.match(compactRe);
+  if (cm) {
+    return {
+      cleanText,
+      reflection: {
+        ai_affect_label: cm[1].trim(),
+        ai_affect_intensity: parseInt(cm[2]) || 5,
+        user_affect_label: cm[3].trim(),
+        user_affect_intensity: parseInt(cm[4]) || 5,
+        signal_source: cm[5].trim()
+      }
+    };
+  }
+
+  // Path 3: Legacy regex fallback (partial JSON)
+  const fallback = parseReflectionFallback(inner);
+  if (fallback) return { cleanText, reflection: fallback };
+
+  return { cleanText: responseText, reflection: null };
 }
 
 function parseReflectionFallback(text) {
@@ -3562,8 +4359,6 @@ function parseReflectionFallback(text) {
     const getInt = (key) => { const m = text.match(new RegExp(`"${key}"\\s*:\\s*(\\d+)`)); return m ? parseInt(m[1]) : 5; };
     const getStr = (key) => { const m = text.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`)); return m ? m[1] : '平静在场'; };
     return {
-      response_length_delta: getStr('response_length_delta'),
-      word_choice_note: getStr('word_choice_note'),
       ai_affect_label: getStr('ai_affect_label'),
       ai_affect_intensity: getInt('ai_affect_intensity'),
       user_affect_label: getStr('user_affect_label'),
@@ -3891,7 +4686,7 @@ function execDeleteChat(){
 function showPreferenceModal(){
   const proj = getActiveProject();
   const pref = proj ? (proj.preference || '') : '';
-  const maxLen = 20000;
+  const maxLen = 500; // Opt6: capped to ~330 tokens
   showModal('AI Preference <span style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);">(project-level · max '+maxLen.toLocaleString()+' chars)</span>', `
     <p style="font-size:12px;color:var(--text-lighter);margin-bottom:10px;line-height:1.5;">所有窗口共享此 preference，同步更新。</p>
     <textarea class="modal-input modal-textarea" id="prefInput" placeholder="e.g. 回复请温柔细腻，多用比喻，每次回复不超过三句话……" style="min-height:140px;" maxlength="${maxLen}">${pref}</textarea>
@@ -3986,9 +4781,11 @@ function renderChatMessages(){
     el.innerHTML='<div style="text-align:center;padding:40px 20px;"><span style="font-family:var(--font-en);font-size:12px;color:var(--text-lighter);">— start a conversation —</span></div>';
     return;
   }
+  // Toggle batch-mode class on container for CSS
+  el.classList.toggle('batch-select-mode', batchSelectMode);
+
   let html='';
   chat.messages.forEach((m,i)=>{
-    // ── System message: centered gray text, no avatar, no bubble ──
     if (m.role === 'system') {
       html+=`<div class="chat-system-msg">
         <span class="chat-system-msg-text">${m.text}</span>
@@ -3996,27 +4793,286 @@ function renderChatMessages(){
       </div>`;
       return;
     }
+    // v2.0: assign stable ID on first render so star clicks always find the message
+    if (!m.id) m.id = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    const msgId = m.id;
     const isUser=m.role==='user';
     const isProactive = m._proactive;
-    const bubbleCls = isProactive ? `chat-bubble ${m.role} proactive-bubble` : `chat-bubble ${m.role}`;
+    const isSelected = batchSelectMode && batchSelectedIds.includes(msgId);
+    // v2.0: starred bubbles do NOT go gray — they just show a golden outer star
+    let bubbleCls = isProactive ? `chat-bubble ${m.role} proactive-bubble` : `chat-bubble ${m.role}`;
+    if (isSelected) bubbleCls += ' batch-selected';
+
     const proactiveLabel = isProactive ? `<div class="proactive-label">${m._desireType === 'todo' ? '⏰ reminder' : '💭 proactive'}</div>` : '';
+
+    // v2.0: Star icon inline after timestamp — same position for user + AI
+    const starOnceCls = m._starredOnce ? 'starred-once' : '';
+    const starSelectedCls = isSelected ? 'batch-selected-star' : '';
+    const starIcon = m._starredOnce ? '★' : '☆';
+    const starTitle = m._starredOnce ? '已星标' : '点击选中星标';
+    const starAction = m._starredOnce ? '' : `handleOuterStarClick('${msgId}')`;
+
     html+=`<div class="chat-row ${m.role}">
       <div class="chat-avatar ${m.role}">${isUser?'MY':'✦'}</div>
       <div class="chat-bubble-wrap">
         ${proactiveLabel}
-        <div class="${bubbleCls}" onclick="toggleBubbleActions(event,'${i}')">${m.text}</div>
-        <div class="bubble-time">${m.time}</div>
+        <div class="${bubbleCls}"
+             onclick="handleBubbleClick(event,'${msgId}','${i}')"
+             oncontextmenu="event.preventDefault();handleBubbleLongPress('${msgId}')"
+             ontouchstart="bubbleTouchStart(event,'${msgId}')"
+             ontouchend="bubbleTouchEnd(event,'${msgId}')"
+             ontouchmove="bubbleTouchMove(event)">
+          ${m.text}
+        </div>
+        <div class="bubble-time-row">
+          <span class="bubble-time">${m.time}</span>
+          <span class="outer-star-icon ${starOnceCls} ${starSelectedCls}"
+                onclick="event.stopPropagation();${starAction}"
+                ontouchstart="event.stopPropagation();"
+                ontouchend="event.stopPropagation();"
+                title="${starTitle}">${starIcon}</span>
+        </div>
       </div>
     </div>`;
-    // Action bar placeholder
+    // Action bar — v2.0: only 🔊 and 📋 (no ★)
     html+=`<div id="bubbleActions_${i}" class="bubble-actions" style="display:none;justify-content:${isUser?'flex-end':'flex-start'};padding-left:${isUser?'0':'38px'};padding-right:${isUser?'38px':'0'};">
       <span onclick="event.stopPropagation();playTTS(${i})" title="语音朗读">🔊</span>
       <span onclick="event.stopPropagation();copyBubble(${i})" title="复制">📋</span>
-      <span class="ba-star" onclick="event.stopPropagation();starBubble(${i})" title="标记为记忆">★</span>
     </div>`;
   });
   el.innerHTML=html;
   el.scrollTop=el.scrollHeight;
+
+  // Show/hide batch select bar
+  const bar = $('batchSelectBar');
+  if (bar) {
+    if (batchSelectMode) {
+      bar.classList.add('show');
+      $('batchSelectCount').textContent = '已选 ' + batchSelectedIds.length + ' 条';
+    } else {
+      bar.classList.remove('show');
+    }
+  }
+}
+
+// ── Long press detection (touch) ──
+let bubbleTouchTimer = null;
+let bubbleTouchMsgId = null;
+function bubbleTouchStart(e, msgId) {
+  if (batchSelectMode) return;
+  bubbleTouchMsgId = msgId;
+  bubbleTouchTimer = setTimeout(() => {
+    bubbleTouchTimer = null;
+    handleBubbleLongPress(msgId);
+  }, 500); // 500ms long press
+}
+function bubbleTouchEnd(e, msgId) {
+  if (bubbleTouchTimer) {
+    clearTimeout(bubbleTouchTimer);
+    bubbleTouchTimer = null;
+  }
+}
+function bubbleTouchMove(e) {
+  if (bubbleTouchTimer) {
+    clearTimeout(bubbleTouchTimer);
+    bubbleTouchTimer = null;
+  }
+}
+
+// ── v2.0: Bubble click handler ──
+function handleBubbleClick(event, msgId, idx) {
+  if (batchSelectMode) {
+    toggleBatchSelect(msgId);
+  } else {
+    toggleBubbleActions(event, idx);
+  }
+}
+
+// ── v2.0: Long press handler (enter batch mode, auto-select the pressed bubble) ──
+function handleBubbleLongPress(msgId) {
+  if (batchSelectMode) return;
+  const chat = getActiveChatObj();
+  if (!chat) return;
+  const msg = chat.messages.find(m => m.id === msgId);
+  if (!msg) return;
+  // Enter batch mode — starred-once messages CAN be selected in batch (the star icon just won't re-toggle them)
+  enterBatchSelectMode(msgId);
+}
+
+// ── v2.0: Outer star click — enters batch mode or toggles ──
+function handleOuterStarClick(msgId) {
+  const chat = getActiveChatObj();
+  if (!chat) return;
+  const msg = chat.messages.find(m => m.id === msgId);
+  if (!msg || msg._starredOnce) return;
+  if (!batchSelectMode) {
+    enterBatchSelectMode(msgId);
+  } else {
+    toggleBatchSelect(msgId);
+  }
+}
+
+// ── v2.0: Batch select mode ──
+function enterBatchSelectMode(initMsgId) {
+  batchSelectMode = true;
+  batchSelectedIds = [initMsgId];
+  renderChatMessages();
+}
+
+function toggleBatchSelect(msgId) {
+  const chat = getActiveChatObj();
+  if (!chat) return;
+  const msg = chat.messages.find(m => m.id === msgId);
+  if (!msg) return;
+  // Allow toggling even for starred-once in batch mode — just skip confirmation for them
+  const idx = batchSelectedIds.indexOf(msgId);
+  if (idx >= 0) {
+    batchSelectedIds.splice(idx, 1);
+  } else {
+    batchSelectedIds.push(msgId);
+  }
+  if (batchSelectedIds.length === 0) {
+    exitBatchSelectMode();
+    return;
+  }
+  renderChatMessages();
+}
+
+function exitBatchSelectMode() {
+  batchSelectMode = false;
+  batchSelectedIds = [];
+  renderChatMessages();
+}
+
+async function confirmBatchStar() {
+  const chat = getActiveChatObj();
+  if (!chat) return;
+
+  // Collect selected messages, split new vs already-starred
+  const allSelected = batchSelectedIds
+    .map(id => chat.messages.find(m => m.id === id))
+    .filter(Boolean);
+  const newMsgs = allSelected.filter(m => !m._starredOnce);
+  const alreadyStarredCount = allSelected.length - newMsgs.length;
+
+  if (newMsgs.length === 0) {
+    exitBatchSelectMode();
+    toast('所选消息均已星标过');
+    return;
+  }
+
+  // Build preview of NEW messages
+  const previewTexts = newMsgs.slice(0, 3).map(m =>
+    (m.role === 'user' ? '用户' : 'AI') + ': ' + (m.text || '').slice(0, 40) + ((m.text || '').length > 40 ? '…' : '')
+  );
+  const preview = previewTexts.join('<br>') + (newMsgs.length > 3 ? '<br><span style="font-size:11px;color:var(--text-lighter);">等' + newMsgs.length + '条</span>' : '');
+  const note = alreadyStarredCount > 0 ? `<div style="font-size:11px;color:var(--text-lighter);margin-bottom:8px;">（已跳过 ${alreadyStarredCount} 条已星标消息）</div>` : '';
+
+  const newMsgIds = newMsgs.map(m => m.id);
+
+  showModal('存为星标记忆', `
+    ${note}
+    <div style="font-size:12px;color:var(--text-light);margin-bottom:8px;">将保存 ${newMsgs.length} 条新消息：</div>
+    <div style="font-size:12px;color:var(--text);line-height:1.5;margin-bottom:12px;padding:8px;background:var(--bg);border-radius:8px;">${preview}</div>
+    <input type="hidden" id="batchStarMsgIds" value="${JSON.stringify(newMsgIds).replace(/"/g,'&quot;')}">
+  `, [
+    { label: 'cancel', cls: 'cancel', onclick: closeModal },
+    { label: 'confirm', cls: 'confirm', onclick: executeBatchStar }
+  ]);
+}
+
+async function executeBatchStar() {
+  closeModal();
+  const idsStr = $('batchStarMsgIds').value;
+  let selectedMsgIds;
+  try { selectedMsgIds = JSON.parse(idsStr.replace(/&quot;/g,'"')); } catch { exitBatchSelectMode(); return; }
+
+  await createUserStarredMemory(selectedMsgIds);
+  exitBatchSelectMode();
+}
+
+async function createUserStarredMemory(selectedMsgIds) {
+  const chat = getActiveChatObj();
+  const proj = getActiveProject();
+  if (!chat || !proj) return;
+
+  const msgs = selectedMsgIds.map(id => chat.messages.find(m => m.id === id)).filter(Boolean);
+  if (msgs.length === 0) return;
+
+  // Build rawDialogue
+  const rawDialogue = msgs.map(m => ({
+    role: m.role === 'user' ? 'user' : 'assistant',
+    text: m.text || '',
+    time: m.time || '',
+    msgId: m.id || ''
+  }));
+
+  // Mark messages as starred-once (irreversible)
+  msgs.forEach(m => { m._starredOnce = true; m._starred = true; });
+
+  // LLM summary
+  const summary = await generateStarredMemorySummary(rawDialogue);
+
+  // Create USM entry
+  const usmId = 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  const usm = {
+    id: usmId,
+    timestamp: new Date().toISOString(),
+    sourceChatId: store.activeChat,
+    sourceWindowId: store.activeChat,
+    sourceProjectId: store.activeProject,
+    rawDialogue,
+    summary,
+    starredMsgIds: selectedMsgIds,
+    userNote: ''
+  };
+
+  store.memorySystem.coreMemoryLayers.userStarredMemories.unshift(usm);
+
+  // Also add to project memories for backward compat
+  proj.memories.push({
+    id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    content: summary,
+    date: fmtDate().iso, type: 'starred', starred: true,
+    sourceChatId: store.activeChat, week: weekLabel(),
+    decayFactor: 1.0, affectLabel: null, affectIntensity: null,
+    semanticKey: null, isCompressed: false, compressedFrom: [],
+    lastAccessed: fmtDate().iso, isCoreMemory: false, coreMemoryId: null
+  });
+
+  // Write memory file + trigger derivation
+  writeMemoryFile(store.activeProject, store.activeChat, null, 'starred_added');
+  checkDeriveInsightsTrigger('usm');
+
+  saveStore();
+  toast('✦ 已保存星标记忆：' + summary);
+}
+
+async function generateStarredMemorySummary(rawDialogue) {
+  if (!store.apiKey) return '星标记忆';
+  const dialogueText = rawDialogue
+    .map(m => `${m.role === 'user' ? '用户' : 'AI'}：${(m.text || '').slice(0, 150)}`)
+    .join('\n');
+
+  try {
+    const response = await fetch(BACKEND_URL + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        messages: [
+          { role: 'system', content: '你是一个记忆归档员。用一句话（15字以内）概括以下对话的核心内容，不加引号，不加标点符号结尾。' },
+          { role: 'user', content: dialogueText }
+        ]
+      })
+    });
+    if (!response.ok) return '星标记忆';
+    const data = await response.json();
+    return (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 15) : '星标记忆';
+  } catch (e) {
+    console.log('[starred-summary] Error:', e.message);
+    return '星标记忆';
+  }
 }
 
 function toggleBubbleActions(event, idx){
@@ -4048,9 +5104,35 @@ function starBubble(idx){
   const chat=getActiveChatObj(); if(!chat||!chat.messages[idx])return;
   const proj=getActiveProject(); if(!proj)return;
   const msg=chat.messages[idx];
+  // v1 compat: write to proj.memories
   proj.memories.push({id:'m'+gid(''),content:msg.text,date:fmtDate().iso,type:'starred',starred:true,sourceChatId:chat.id,week:weekLabel(),decayFactor:1.0,affectLabel:null,affectIntensity:null,semanticKey:null,isCompressed:false,compressedFrom:[],lastAccessed:fmtDate().iso,isCoreMemory:false,coreMemoryId:null});
   const memId=proj.memories[proj.memories.length-1].id;
   if(!chat.sharedMemoryIds.includes(memId))chat.sharedMemoryIds.push(memId);
+
+  // v2: also write to coreMemoryLayers.userStarredMemories
+  const cml = store.memorySystem.coreMemoryLayers;
+  const usmId = 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  const dialogueText = (msg.role === 'user' ? '用户' : 'AI') + ': ' + (msg.text || '').slice(0, 100);
+  cml.userStarredMemories.unshift({
+    id: usmId,
+    timestamp: new Date().toISOString(),
+    sourceChatId: store.activeChat,
+    sourceWindowId: store.activeChat,
+    sourceProjectId: store.activeProject,
+    rawDialogue: [{ role: msg.role === 'user' ? 'user' : 'assistant', text: msg.text || '', time: msg.time || '', msgId: msg.id || '' }],
+    summary: (msg.text || '').slice(0, 15),
+    starredMsgIds: [msg.id || ''],
+    userNote: ''
+  });
+
+  // Mark message as starred once
+  msg._starredOnce = true;
+  msg._starred = true;
+
+  // Write memory file
+  writeMemoryFile(store.activeProject, store.activeChat, null, 'starred_added');
+  checkDeriveInsightsTrigger('usm');
+  saveStore();
   toast('★ 已标记为重要记忆');
 }
 
@@ -4122,38 +5204,82 @@ async function sendMessage(){
     const cid='c'+gid('');
 
     // ── Handoff inheritance: if a pending handoff exists, carry over context ──
-    let handoffMsgs = [];
+    // ── v2.0: New window cold start ──
+    // Step 1: Sync project shared memory from all windows
+    syncProjectMemories(p.id);
+
+    // Step 2: Get previous window (most recent by conversation date)
+    const sortedChats = [...p.chats].sort((a, b) =>
+      (b.lastConversationDate || '').localeCompare(a.lastConversationDate || '')
+    );
+    const prevChat = sortedChats[0];
+
+    // Step 3: Inherit last 6 turns (12 msgs) from prev window
+    let inheritedMsgs = [];
+    if (prevChat) {
+      inheritedMsgs = prevChat.messages.slice(-12).map(m => ({
+        role: m.role === 'ai' ? 'ai' : m.role,
+        text: m.text || '',
+        time: m.time || nowTime(),
+        _starred: m._starred || false,
+        _isCoreMemory: m._isCoreMemory || false,
+        _tokenEstimate: m._tokenEstimate || 0,
+        _starredOnce: m._starredOnce || false,
+        _inheritedFromWindow: prevChat.id
+      }));
+    }
+
+    // Step 4: Check for pending handoff (legacy compat)
     if (store._pendingHandoff && store._pendingHandoff.package) {
-      // Import the handoff package's starred + core memories as initial shared memory IDs
       const ho = store._pendingHandoff;
       if (ho.recentMessages && ho.recentMessages.length > 0) {
-        handoffMsgs = ho.recentMessages.map(m => ({
+        const hoMsgs = ho.recentMessages.map(m => ({
           role: m.role === 'ai' ? 'ai' : m.role,
-          text: m.text || '',
-          time: m.time || nowTime(),
-          _starred: m._starred || false,
-          _isCoreMemory: m._isCoreMemory || false,
-          _tokenEstimate: m._tokenEstimate || 0
+          text: m.text || '', time: m.time || nowTime(),
+          _starred: m._starred || false, _isCoreMemory: m._isCoreMemory || false,
+          _tokenEstimate: m._tokenEstimate || 0, _inheritedFromWindow: 'handoff'
         }));
+        // Prepend handoff msgs (they take priority)
+        inheritedMsgs = [...hoMsgs, ...inheritedMsgs];
       }
-      // Write the handoff to a memory file so it's searchable
       writeMemoryFile(p.id, cid, ho.package, 'context_handoff_inherited');
-      store._pendingHandoff = null; // consume once
-      console.log('[handoff] New window inherited handoff package with', handoffMsgs.length, 'context messages');
+      store._pendingHandoff = null;
+    }
+
+    // Step 5: Build new chat with inherited context
+    const initMessages = [];
+    if (inheritedMsgs.length > 0) {
+      initMessages.push({
+        role: 'system',
+        text: '[继续自上一个窗口的对话，以下是最近的对话记录]',
+        time: nowTime(),
+        _isHandoffNote: true, id: 'msg_' + Date.now().toString(36) + '_sys_h'
+      });
+      // Add ID to inherited messages
+      for (const im of inheritedMsgs) {
+        if (!im.id) im.id = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+        initMessages.push(im);
+      }
     }
 
     p.chats.push({
       id: cid, name: text.slice(0, 20),
       sharedMemoryIds: [], weeklyExports: [],
-      messages: handoffMsgs,
+      messages: initMessages,
       chatTokens: 0, lastConversationDate: fmtDate().iso,
-      _messageCount: handoffMsgs.length, _lastSummaryIdx: 0,
-      _handoffSuggested: false
+      _messageCount: initMessages.length, _lastSummaryIdx: 0,
+      _handoffSuggested: false,
+      _sharedMemoryLoaded: true,
+      _sharedMemoryLoadedAt: new Date().toISOString()
     });
     store.activeChat = cid; chat = getActiveChatObj();
+
+    // Step 6: Write new window memory file with shared layer state
+    writeMemoryFile(p.id, cid, null, 'context_handoff_inherited');
+    console.log('[cold-start] New window initialized with', inheritedMsgs.length, 'inherited messages');
   }
   const timeStr=nowTime();
-  chat.messages.push({role:'user',text,time:timeStr});
+  chat.messages.push({role:'user',text,time:timeStr,id:'msg_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8)});
   chat._messageCount = (chat._messageCount || 0) + 1;
 
   // EDA: detect user response to proactive message (回应衰减)
@@ -4239,72 +5365,84 @@ async function sendMessage(){
   }
 
   // ── Split architecture: static + dynamic as separate system messages ──
-  // messages[0] = static, cache-friendly (~1k chars English)
-  // messages[1] = dynamic context (time, weather, todos, memories, etc.)
-  // messages[2+] = conversation (token-aware truncated)
-  const apiMessages = [
-    { role: 'system', content: SYSTEM_PROMPT_STATIC },
-    { role: 'system', content: dynamicBlock }
-  ];
+  // Opt4: apiMessages built by 3-layer compression below
+  const apiMessages = [];
 
-  // ── Token-aware conversation truncation (10k threshold) ──
-  // Calculate current system prompt tokens
-  let totalTokens = estimateTokens(SYSTEM_PROMPT_STATIC) + estimateTokens(dynamicBlock);
+  // ── Opt4: 3-layer conversation compression ──
+  // Layer 1 (last 6 rounds): keep original messages
+  // Layer 2 (rounds 7-30): compress to summary, [星标] messages annotated
+  // Layer 3 (30+ rounds): discard (already in long-term memory)
+  const L1_ROUNDS = 6;
+  const L2_END = 30;
 
-  // Pre-scan: tag messages with token estimates and collect the last N messages
-  const candidateMsgs = [];
-  for (let i = chat.messages.length - 1; i >= 0; i--) {
-    const m = chat.messages[i];
-    if (m.role === 'system') continue;
-    const t = m._tokenEstimate || estimateTokens(m.text || '');
-    m._tokenEstimate = t;
-    candidateMsgs.unshift({ msg: m, tokens: t, idx: i });
-    totalTokens += t;
-    if (totalTokens > 12000 && candidateMsgs.length > 10) break; // scan enough
-  }
+  // Group messages into rounds
+  const allRounds = groupMessagesIntoRounds(chat.messages);
+  const totalRounds = allRounds.length;
 
-  // Truncate from earliest if over 10k
-  const TOKEN_LIMIT = 10000;
-  let truncated = false;
-  while (totalTokens > TOKEN_LIMIT && candidateMsgs.length > 2) {
-    // Find earliest non-starred, non-core-memory message to evict
-    let evictIdx = -1;
-    for (let i = 0; i < candidateMsgs.length; i++) {
-      const cm = candidateMsgs[i];
-      if (!cm.msg._starred && !cm.msg._isCoreMemory) {
-        evictIdx = i;
-        break;
+  // Layer 1: last L1_ROUNDS rounds → keep original
+  const l1Rounds = allRounds.slice(-L1_ROUNDS);
+  // Layer 2: rounds between L1_ROUNDS and L2_END (counting from end) → compress
+  const l2StartIdx = Math.max(0, totalRounds - L2_END);
+  const l2EndIdx = totalRounds - L1_ROUNDS;
+  const l2Rounds = allRounds.slice(l2StartIdx, l2EndIdx);
+
+  // Build starred content extraction for Layer 2
+  let l2StarredContents = [];
+  for (const round of l2Rounds) {
+    for (const msg of round.msgs) {
+      if (msg._starred && msg.role !== 'system') {
+        const roleLabel = msg.role === 'user' ? '用户' : 'AI';
+        l2StarredContents.push(`[星标]${roleLabel}: ${(msg.text||'').slice(0,60)}`);
       }
     }
-    if (evictIdx === -1) break; // all remaining are protected
-    const evicted = candidateMsgs.splice(evictIdx, 1)[0];
-    totalTokens -= evicted.tokens;
-    truncated = true;
-    // Queue evicted message for memory file write (event-triggered)
-    queueEvictedMessageWrite(evicted.msg);
   }
 
-  // ── Window handoff detection ──
-  let starredTokens = 0, coreTokens = 0;
-  for (const cm of candidateMsgs) {
-    if (cm.msg._starred) starredTokens += cm.tokens;
-    if (cm.msg._isCoreMemory) coreTokens += cm.tokens;
-  }
-  if ((starredTokens + coreTokens) > 8000) {
-    // Trigger window handoff: write handoff package, suggest new window
-    triggerWindowHandoff(chat, candidateMsgs);
+  // Build API messages: system prompts + layer summaries + layer 1
+  // Push system messages first
+  apiMessages.push({ role: 'system', content: SYSTEM_PROMPT_STATIC });
+  apiMessages.push({ role: 'system', content: dynamicBlock });
+
+  // Layer 2 summary injection (if any rounds in layer 2)
+  if (l2Rounds.length > 0 && chat._roundSummaries && chat._roundSummaries.length > 0) {
+    const l2Summary = chat._roundSummaries[chat._roundSummaries.length-1];
+    if (l2Summary && l2Summary.summary) {
+      let summaryBlock = '【较早对话摘要】' + l2Summary.summary;
+      if (l2StarredContents.length > 0) {
+        summaryBlock += ' | 星标内容: ' + l2StarredContents.join('; ');
+      }
+      apiMessages.push({ role: 'system', content: summaryBlock });
+    }
+  } else if (l2Rounds.length > 0 && l2Rounds.length >= 5) {
+    // Queue compression for next time
+    queueRoundCompression(chat, l2Rounds);
+    // For now, inject a brief indication
+    if (l2StarredContents.length > 0) {
+      apiMessages.push({ role: 'system', content: '【星标记忆】' + l2StarredContents.join('; ') });
+    }
+  } else if (l2StarredContents.length > 0) {
+    apiMessages.push({ role: 'system', content: '【星标记忆】' + l2StarredContents.join('; ') });
   }
 
-  if (truncated) {
-    console.log(`[token] Truncation applied: ${candidateMsgs.length} msgs remain, ~${totalTokens} tokens`);
+  // Layer 1: push original messages
+  for (const round of l1Rounds) {
+    for (const msg of round.msgs) {
+      if (msg.role === 'system') continue;
+      apiMessages.push({
+        role: msg.role === 'ai' || msg.role === 'assistant' ? 'assistant' : 'user',
+        content: msg.text || ''
+      });
+    }
   }
 
-  // Push conversation messages to API array
-  for (const cm of candidateMsgs) {
-    apiMessages.push({
-      role: cm.msg.role === 'ai' ? 'assistant' : cm.msg.role,
-      content: cm.msg.text
-    });
+  // Window handoff detection (if L1 grows too large)
+  let l1Tokens = 0;
+  for (const round of l1Rounds) {
+    for (const msg of round.msgs) {
+      if (msg.role !== 'system') l1Tokens += estimateTokens(msg.text||'');
+    }
+  }
+  if (l1Tokens > 6000) {
+    triggerWindowHandoff(chat, l1Rounds.flatMap(r => r.msgs.filter(m=>m.role!=='system').map(m=>({msg:m, tokens:estimateTokens(m.text||'')}))));
   }
 
   // Streaming call — accumulate silently, then split & display
@@ -5190,6 +6328,8 @@ async function init(){
   if (store.activeProject) syncProjectMemories(store.activeProject);
   // Phase 2: weekly memory file write check
   checkWeeklyMemoryWrite();
+  // v2.0: weekly auto-export check
+  checkWeeklyAutoExport();
   // Phase 3: reset daily token counter if date changed
   resetDailyTokensIfNeeded();
   // Phase 3: fetch weather on startup if toggle is ON
@@ -5198,6 +6338,7 @@ async function init(){
   setInterval(() => {
     if (store.activeProject) syncProjectMemories(store.activeProject);
     checkWeeklyMemoryWrite();
+    checkWeeklyAutoExport();
   }, 1800000);
   // Phase 3: refresh weather every 30 minutes
   setInterval(() => {
@@ -5216,23 +6357,18 @@ function checkWeeklyMemoryWrite() {
   const ms = store.memorySystem;
   if (!ms._lastWeeklyWrite) ms._lastWeeklyWrite = '';
   if (dayOfWeek === 0 && ms._lastWeeklyWrite !== today) {
-    // Write memory files for all project windows
+    // v2.0: Write v2.0 memory files for all project windows (uses current in-memory state)
     for (const proj of store.projects) {
       for (const chat of proj.chats) {
-        const starredMems = proj.memories.filter(m => m.starred).map(m => ({
-          id: m.id, timestamp: m.date, type: m.type || 'chat', content: m.content
-        }));
-        writeMemoryFile(proj.id, chat.id, {
-          starred_memories: starredMems,
-          core_emotional_memories: ms.coreMemories || [],
-          relational_patterns: { ...ms.relationalPortrait.patterns }
-        }, 'weekly');
+        writeMemoryFile(proj.id, chat.id, null, 'weekly');
       }
     }
     ms._lastWeeklyWrite = today;
     // Flush evicted messages to memory files
     flushEvictedMessages();
-    console.log('[weekly-write] Memory files written for all projects');
+    // Trigger derivation on weekly write
+    deriveRelationalInsights();
+    console.log('[weekly-write] v2.0 memory files written for all projects');
   }
 }
 
@@ -5245,16 +6381,21 @@ function flushEvictedMessages() {
   if (!chat) { ms._evictedMessages = []; return; }
 
   const existing = readMemoryFile(store.activeProject, chat.id) || {};
-  const starred = existing.starred_memories || [];
+  const userStarred = existing.userStarredMemories || [];
   for (const ev of ms._evictedMessages) {
-    starred.push({
-      id: 'ev' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      timestamp: ev.timestamp,
-      type: 'evicted_' + ev.role,
-      content: ev.content
+    userStarred.push({
+      id: 'ev_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      timestamp: ev.timestamp || new Date().toISOString(),
+      sourceChatId: ev.sourceChatId || store.activeChat,
+      sourceWindowId: ev.sourceChatId || store.activeChat,
+      sourceProjectId: ev.sourceProjectId || store.activeProject,
+      rawDialogue: [{ role: ev.role || 'system', text: ev.content || '', time: ev.timestamp || '', msgId: '' }],
+      summary: (ev.content || '').slice(0, 15),
+      starredMsgIds: [],
+      userNote: ''
     });
   }
-  writeMemoryFile(store.activeProject, chat.id, { ...existing, starred_memories: starred.slice(-200) }, 'eviction');
+  writeMemoryFile(store.activeProject, chat.id, { ...existing, userStarredMemories: userStarred.slice(-200) }, 'eviction');
   ms._evictedMessages = [];
 }
 
