@@ -90,6 +90,8 @@ body {
   padding: 0 20px; scroll-behavior: smooth; -webkit-overflow-scrolling: touch;
 }
 .main-scroll::-webkit-scrollbar { width: 0; }
+textarea { scrollbar-width: none; }
+textarea::-webkit-scrollbar { width: 0; display: none; }
 
 /* ===== Date & Greeting ===== */
 .date-block { padding: 10px 0 6px; }
@@ -292,8 +294,6 @@ body {
 @keyframes pulseStar { 0%,100% { transform: scale(1); } 50% { transform: scale(1.3); } }
 .chat-bubble.batch-selected { border: 2px solid #F5A623 !important; background: rgba(245,166,35,0.05); }
 /* Proactive message bubble (EDA) */
-.proactive-bubble { border-left: 3px solid var(--accent-soft); padding-left: 10px; }
-.proactive-bubble .proactive-label { font-family: var(--font-en); font-size: 9px; color: var(--accent-soft); letter-spacing: 0.04em; margin-bottom: 2px; text-transform: uppercase; }
 /* Desire drive bars */
 .desire-bar-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
 .desire-bar-label { font-family: var(--font-en); font-size: 10px; color: var(--text-light); width: 80px; flex-shrink: 0; text-align: right; letter-spacing: 0.03em; }
@@ -381,8 +381,8 @@ body {
   letter-spacing: 0.03em; animation: fadeIn 0.3s ease-out;
 }
 
-.chat-input-area { padding: 12px 20px calc(12px + var(--safe-bottom)); border-top: 1px solid var(--border-light); display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
-.chat-input { flex: 1; padding: 10px 16px; border-radius: 24px; border: 1px solid var(--border); background: var(--bg-card); font-family: var(--font-cn); font-size: 14px; color: var(--text); outline: none; transition: border-color 0.2s; }
+.chat-input-area { padding: 12px 20px calc(12px + var(--safe-bottom)); border-top: 1px solid var(--border-light); display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0; }
+.chat-input { flex: 1; padding: 10px 16px; border-radius: 24px; border: 1px solid var(--border); background: var(--bg-card); font-family: var(--font-cn); font-size: 14px; color: var(--text); outline: none; transition: border-color 0.2s; resize: none; overflow-y: auto; max-height: 98px; min-height: 40px; line-height: 1.4; }
 .chat-input:focus { border-color: var(--accent-soft); }
 .chat-input::placeholder { color: var(--text-lighter); }
 .chat-send { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--accent-soft); color: #fff; font-size: 18px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
@@ -453,7 +453,7 @@ body {
 .diary-card-mood-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .diary-card-mood-tag { font-size: 11px; color: var(--text-light); padding: 2px 10px; border-radius: 12px; background: var(--accent-pale); font-family: var(--font-en); letter-spacing: 0.03em; }
 .diary-card-time { font-family: var(--font-en); font-size: 11px; color: var(--text-lighter); }
-.diary-card-content { font-size: 14px; color: var(--text); line-height: 1.7; }
+.diary-card-content { font-size: 14px; color: var(--text); line-height: 1.7; white-space: pre-wrap; word-wrap: break-word; }
 .diary-card-by { font-family: var(--font-en); font-size: 11px; color: var(--text-lighter); margin-top: 10px; letter-spacing: 0.04em; }
 
 /* Diary reply area */
@@ -461,7 +461,7 @@ body {
 .diary-reply-item { padding: 10px 14px; border-radius: var(--radius-xs); margin-bottom: 8px; font-size: 13px; line-height: 1.5; }
 .diary-reply-item.ai-reply { background: var(--bg); }
 .diary-reply-item.user-reply { background: var(--accent-pale); }
-.diary-reply-content { color: var(--text); }
+.diary-reply-content { color: var(--text); white-space: pre-wrap; word-wrap: break-word; }
 .diary-reply-meta { font-family: var(--font-en); font-size: 10px; color: var(--text-lighter); margin-top: 4px; letter-spacing: 0.03em; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .diary-reply-source { font-size: 10px; color: var(--accent); cursor: pointer; letter-spacing: 0.03em; padding: 1px 6px; border-radius: 8px; background: var(--accent-pale); transition: all 0.2s; white-space: nowrap; }
 .diary-reply-source:active { opacity: 0.7; }
@@ -501,7 +501,7 @@ body {
 .modal-title { font-family: var(--font-en); font-size: 16px; margin-bottom: 16px; letter-spacing: 0.04em; }
 .modal-input { width: 100%; padding: 10px 14px; border-radius: var(--radius-xs); border: 1px solid var(--border); background: var(--bg); font-family: var(--font-cn); font-size: 14px; color: var(--text); outline: none; margin-bottom: 10px; }
 .modal-input:focus { border-color: var(--accent-soft); }
-.modal-textarea { resize: none; min-height: 80px; }
+.modal-textarea { resize: none; min-height: 80px; max-height: 180px; overflow-y: auto; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 .modal-btn { padding: 8px 20px; border-radius: 20px; border: none; font-family: var(--font-en); font-size: 13px; cursor: pointer; letter-spacing: 0.03em; transition: all 0.2s; }
 .modal-btn:active { transform: scale(0.96); }
@@ -615,7 +615,7 @@ body {
   </div>
   <div id="chatTypingArea"></div>
   <div class="chat-input-area">
-    <input class="chat-input" id="chatInput" placeholder="type a message..." onkeydown="if(event.key==='Enter')sendMessage()">
+    <textarea class="chat-input" id="chatInput" placeholder="type a message..." rows="1"></textarea>
     <button class="chat-send" onclick="sendMessage()">↑</button>
   </div>
 </div>
@@ -4797,13 +4797,10 @@ function renderChatMessages(){
     if (!m.id) m.id = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
     const msgId = m.id;
     const isUser=m.role==='user';
-    const isProactive = m._proactive;
     const isSelected = batchSelectMode && batchSelectedIds.includes(msgId);
     // v2.0: starred bubbles do NOT go gray — they just show a golden outer star
-    let bubbleCls = isProactive ? `chat-bubble ${m.role} proactive-bubble` : `chat-bubble ${m.role}`;
+    let bubbleCls = `chat-bubble ${m.role}`;
     if (isSelected) bubbleCls += ' batch-selected';
-
-    const proactiveLabel = isProactive ? `<div class="proactive-label">${m._desireType === 'todo' ? '⏰ reminder' : '💭 proactive'}</div>` : '';
 
     // v2.0: Star icon inline after timestamp — same position for user + AI
     const starOnceCls = m._starredOnce ? 'starred-once' : '';
@@ -4815,7 +4812,6 @@ function renderChatMessages(){
     html+=`<div class="chat-row ${m.role}">
       <div class="chat-avatar ${m.role}">${isUser?'MY':'✦'}</div>
       <div class="chat-bubble-wrap">
-        ${proactiveLabel}
         <div class="${bubbleCls}"
              onclick="handleBubbleClick(event,'${msgId}','${i}')"
              oncontextmenu="event.preventDefault();handleBubbleLongPress('${msgId}')"
@@ -4838,6 +4834,7 @@ function renderChatMessages(){
     html+=`<div id="bubbleActions_${i}" class="bubble-actions" style="display:none;justify-content:${isUser?'flex-end':'flex-start'};padding-left:${isUser?'0':'38px'};padding-right:${isUser?'38px':'0'};">
       <span onclick="event.stopPropagation();playTTS(${i})" title="语音朗读">🔊</span>
       <span onclick="event.stopPropagation();copyBubble(${i})" title="复制">📋</span>
+      <span onclick="event.stopPropagation();deleteBubble(${i})" title="删除">🗑</span>
     </div>`;
   });
   el.innerHTML=html;
@@ -5098,6 +5095,13 @@ function playTTS(idx){
 function copyBubble(idx){
   const chat=getActiveChatObj(); if(!chat||!chat.messages[idx])return;
   navigator.clipboard.writeText(chat.messages[idx].text).then(()=>toast('📋 已复制到剪贴板')).catch(()=>toast('复制失败'));
+}
+
+function deleteBubble(idx){
+  const chat=getActiveChatObj(); if(!chat||!chat.messages[idx])return;
+  chat.messages.splice(idx, 1);
+  renderChatMessages();
+  toast('🗑 已删除');
 }
 
 function starBubble(idx){
@@ -6317,6 +6321,20 @@ async function init(){
   await loadPresets();
   updateSettingsUI();
   renderAll();
+  // v2.1: chat input auto-resize + Enter/Shift+Enter handling
+  const chatInput = $('chatInput');
+  if (chatInput) {
+    chatInput.addEventListener('input', () => {
+      chatInput.style.height = 'auto';
+      chatInput.style.height = Math.min(chatInput.scrollHeight, 98) + 'px';
+    });
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+  }
   checkMissedDays();
   applyForgettingCurve();
   ensureColdStartPatterns();
@@ -6424,7 +6442,7 @@ function logTokenCall(windowId, actionType, inputTokens, outputTokens, cacheRead
   const total = (inputTokens || 0) + (outputTokens || 0);
   const now = new Date();
   const entry = {
-    timestamp: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`,
+    timestamp: `${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`,
     model: model || store.aiSettings.model || 'unknown',
     action_type: actionType,
     input_tokens: inputTokens || 0,
