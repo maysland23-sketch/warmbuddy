@@ -1040,23 +1040,8 @@ const store = {
     _pendingCoreMemories: [],
     _quietPresenceCount: 0,
     _evictedMessages: [],
-    // ── v2.0 new: Core Memory Layers ──
-    coreMemoryLayers: {
-      aiEmotionalMemories: [],
-      userStarredMemories: [],
-      diaryAndLitterbox: []
-    },
-    // ── v2.0 new: Derived insights ──
-    derivedRelationalPatterns: {
-      lastDerived: null,
-      triggerCount: 0,
-      patterns: []
-    },
-    personalityProfiles: {
-      lastDerived: null,
-      user: { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] },
-      ai: { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] }
-    },
+    // coreMemoryLayers moved to per-project (v2.1) — initialized in migrateStore()
+    // derivedRelationalPatterns + personalityProfiles moved to per-project (v2.1) — initialized in migrateStore()
     // ── v2.0 new: Derivation trigger counters ──
     _aemSinceLastDerive: 0,
     _usmSinceLastDerive: 0,
@@ -1067,18 +1052,7 @@ const store = {
   tokenDailyReset: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })(),
   // ==================== WINDOW HANDOFF ====================
   _pendingHandoff: null,
-  // ==================== DESIRE SYSTEM (EDA) ====================
-  desireSystem: {
-    drives: { resonance:0, exploration:0, possession:0, guardianship:0, intimacy:0, confirmation:0, devotion:0 },
-    driveHistory: [],
-    lastAction: null,
-    cooldownUntil: null,
-    lastPassiveCheck: new Date().toISOString(),
-    pendingActions: [],
-    actionHistory: [],
-    todoReminders: {},
-    quietPresenceStreak: 0
-  },
+  // desireSystem moved to per-project (v2.1) — initialized in migrateStore()
 };
 
 // ==================== PERSISTENCE ====================
@@ -1129,40 +1103,81 @@ function migrateStore() {
   if (ms._usmSinceLastDerive === undefined) ms._usmSinceLastDerive = 0;
   if (!ms._lastWeeklyWrite) ms._lastWeeklyWrite = '';
 
-  // ============ v2.0 new: coreMemoryLayers ============
-  if (!ms.coreMemoryLayers) {
-    ms.coreMemoryLayers = { aiEmotionalMemories: [], userStarredMemories: [], diaryAndLitterbox: [] };
-  }
-  const cml = ms.coreMemoryLayers;
-  if (!cml.aiEmotionalMemories) cml.aiEmotionalMemories = [];
-  if (!cml.userStarredMemories) cml.userStarredMemories = [];
-  if (!cml.diaryAndLitterbox) cml.diaryAndLitterbox = [];
+  // ============ v2.1: coreMemoryLayers — moved to per-project ============
+  const oldCML = getCoreMemoryLayers();  // legacy global (may exist from old localStorage)
+  for (const proj of store.projects) {
+    if (!proj.coreMemoryLayers) {
+      if (oldCML && proj === store.projects[0]) {
+        proj.coreMemoryLayers = oldCML;
+      } else {
+        proj.coreMemoryLayers = { aiEmotionalMemories: [], userStarredMemories: [], diaryAndLitterbox: [] };
+      }
+    }
+    const cml = proj.coreMemoryLayers;
+    if (!cml.aiEmotionalMemories) cml.aiEmotionalMemories = [];
+    if (!cml.userStarredMemories) cml.userStarredMemories = [];
+    if (!cml.diaryAndLitterbox) cml.diaryAndLitterbox = [];
 
-  // ============ v2.0 new: derivedRelationalPatterns ============
-  if (!ms.derivedRelationalPatterns) {
-    ms.derivedRelationalPatterns = { lastDerived: null, triggerCount: 0, patterns: [] };
+    // Legacy coreMemories migration (once): if global coreMemories exists, transfer to this project
+    if (!proj._coreMemoriesMigrated && cml.aiEmotionalMemories.length === 0 && ms.coreMemories && ms.coreMemories.length > 0) {
+      for (const cm of ms.coreMemories) {
+        cml.aiEmotionalMemories.unshift({
+          id: cm.id || ('aem_' + Math.random().toString(36).slice(2, 10)),
+          timestamp: cm.date || new Date().toISOString(),
+          affectFirst: cm.affect_first || { ai: { label: cm.affectLabel || 'neutral', intensity: cm.affectIntensity || 5 }, user: { label: 'neutral', intensity: 3 } },
+          eventSummary: cm.event_summary || cm.content || '',
+          relationalNote: cm.relational_note || '',
+          reflectionSummary: cm.reflectionSummary || '',
+          sourceChatId: cm.sourceChatId || '', sourceProjectId: proj.id,
+          evidenceMsgIds: cm.evidenceMsgIds || [], decayed: cm.decayed || false
+        });
+      }
+      proj._coreMemoriesMigrated = true;
+    }
   }
-  const drp = ms.derivedRelationalPatterns;
-  if (!drp.patterns) drp.patterns = [];
-  if (drp.triggerCount === undefined) drp.triggerCount = 0;
+  // Remove legacy global keys
+  if (getCoreMemoryLayers()) delete getCoreMemoryLayers();
+  if (!ms._coreMemories_migrated && ms.coreMemories && ms.coreMemories.length > 0) ms._coreMemories_migrated = true;
 
-  // ============ v2.0 new: personalityProfiles ============
-  if (!ms.personalityProfiles) {
-    ms.personalityProfiles = {
-      lastDerived: null,
-      user: { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] },
-      ai: { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] }
-    };
+  // ============ v2.1: derivedRelationalPatterns — moved to per-project ============
+  const oldDRP = ms.derivedRelationalPatterns;  // legacy global (may exist from old localStorage)
+  const oldPP = ms.personalityProfiles;          // legacy global (may exist from old localStorage)
+  for (const proj of store.projects) {
+    if (!proj.derivedRelationalPatterns) {
+      if (oldDRP && proj === store.projects[0]) {
+        proj.derivedRelationalPatterns = oldDRP;
+      } else {
+        proj.derivedRelationalPatterns = { lastDerived: null, triggerCount: 0, patterns: [] };
+      }
+    }
+    const drp = proj.derivedRelationalPatterns;
+    if (!drp.patterns) drp.patterns = [];
+    if (drp.triggerCount === undefined) drp.triggerCount = 0;
+
+    if (!proj.personalityProfiles) {
+      if (oldPP && proj === store.projects[0]) {
+        proj.personalityProfiles = oldPP;
+      } else {
+        proj.personalityProfiles = {
+          lastDerived: null,
+          user: { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] },
+          ai: { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] }
+        };
+      }
+    }
+    const pp = proj.personalityProfiles;
+    if (!pp.user) pp.user = { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] };
+    if (!pp.ai) pp.ai = { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] };
+    ['coreTraits','emotionalPatterns','growthMoments','hiddenInsecurities','evidenceIds'].forEach(k => {
+      if (!pp.user[k]) pp.user[k] = (k === 'communicationStyle' ? '' : []);
+    });
+    ['dominantEmotions','reactionPatterns','growthMoments','evidenceIds'].forEach(k => {
+      if (!pp.ai[k]) pp.ai[k] = [];
+    });
   }
-  const pp = ms.personalityProfiles;
-  if (!pp.user) pp.user = { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] };
-  if (!pp.ai) pp.ai = { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] };
-  ['coreTraits','emotionalPatterns','growthMoments','hiddenInsecurities','evidenceIds'].forEach(k => {
-    if (!pp.user[k]) pp.user[k] = (k === 'communicationStyle' ? '' : []);
-  });
-  ['dominantEmotions','reactionPatterns','growthMoments','evidenceIds'].forEach(k => {
-    if (!pp.ai[k]) pp.ai[k] = [];
-  });
+  // Remove legacy global keys
+  if (ms.derivedRelationalPatterns) delete ms.derivedRelationalPatterns;
+  if (ms.personalityProfiles) delete ms.personalityProfiles;
 
   // ============ v2.0: Migrate legacy coreMemories → aiEmotionalMemories (once) ============
   if (!ms._coreMemories_migrated && ms.coreMemories && ms.coreMemories.length > 0) {
@@ -1221,24 +1236,34 @@ function migrateStore() {
     }
   }
 
-  // ============ Desire system ============
-  if (!store.desireSystem) {
-    store.desireSystem = {
-      drives: { resonance:0, exploration:0, possession:0, guardianship:0, intimacy:0, confirmation:0, devotion:0 },
-      driveHistory: [], lastAction: null, cooldownUntil: null,
-      lastPassiveCheck: new Date().toISOString(), pendingActions: [], actionHistory: [],
-      todoReminders: {}, quietPresenceStreak: 0
-    };
+  // ============ Desire system (v2.1: moved to per-project) ============
+  // Migrate old global desireSystem data to the first project, then delete global key
+  for (const proj of store.projects) {
+    if (!proj.desireSystem) {
+      // If old global desireSystem exists, use it as seed for first project
+      if (store.desireSystem && proj === store.projects[0]) {
+        proj.desireSystem = store.desireSystem;
+      } else {
+        proj.desireSystem = {
+          drives: { resonance:0, exploration:0, possession:0, guardianship:0, intimacy:0, confirmation:0, devotion:0 },
+          driveHistory: [], lastAction: null, cooldownUntil: null,
+          lastPassiveCheck: new Date().toISOString(), pendingActions: [], actionHistory: [],
+          todoReminders: {}, quietPresenceStreak: 0
+        };
+      }
+    }
+    const ds = proj.desireSystem;
+    if (!ds.drives) ds.drives = { resonance:0, exploration:0, possession:0, guardianship:0, intimacy:0, confirmation:0, devotion:0 };
+    const driveKeys = ['resonance','exploration','possession','guardianship','intimacy','confirmation','devotion'];
+    for (const k of driveKeys) { if (ds.drives[k] === undefined) ds.drives[k] = 0; }
+    if (!ds.driveHistory) ds.driveHistory = [];
+    if (!ds.pendingActions) ds.pendingActions = [];
+    if (!ds.actionHistory) ds.actionHistory = [];
+    if (!ds.todoReminders) ds.todoReminders = {};
+    if (ds.quietPresenceStreak === undefined) ds.quietPresenceStreak = 0;
   }
-  const ds = store.desireSystem;
-  if (!ds.drives) ds.drives = { resonance:0, exploration:0, possession:0, guardianship:0, intimacy:0, confirmation:0, devotion:0 };
-  const driveKeys = ['resonance','exploration','possession','guardianship','intimacy','confirmation','devotion'];
-  for (const k of driveKeys) { if (ds.drives[k] === undefined) ds.drives[k] = 0; }
-  if (!ds.driveHistory) ds.driveHistory = [];
-  if (!ds.pendingActions) ds.pendingActions = [];
-  if (!ds.actionHistory) ds.actionHistory = [];
-  if (!ds.todoReminders) ds.todoReminders = {};
-  if (ds.quietPresenceStreak === undefined) ds.quietPresenceStreak = 0;
+  // Remove legacy global key
+  if (store.desireSystem) delete store.desireSystem;
 
   // ============ Extend project memories with fields ============
   for (const proj of store.projects) {
@@ -1262,11 +1287,11 @@ function migrateStore() {
   }
 
   // v2.0: Migrate existing starred proj.memories → userStarredMemories
-  const existingUSMIds = new Set(cml.userStarredMemories.map(u => u.id));
   for (const proj of store.projects) {
+    const cml = proj.coreMemoryLayers;
+    const existingUSMIds = new Set(cml.userStarredMemories.map(u => u.id));
     for (const mem of proj.memories) {
       if (!mem.starred) continue;
-      // Check if already has a corresponding userStarredMemory (by content match)
       const alreadyExists = cml.userStarredMemories.some(u =>
         (u.summary || '') === (mem.content || '').slice(0, 15) ||
         u.starredMsgIds.some(sid => sid === mem.sourceChatId + '_' + mem.id)
@@ -1319,7 +1344,7 @@ function applyForgettingCurve() {
   ms.lastMaintenance = today;
 
   // EDA: natural drive decay (daily -10%)
-  const ds = store.desireSystem;
+  const ds = getDesireSystem(); if (!ds) return;
   if (ds && ds.drives) {
     for (const k of Object.keys(ds.drives)) {
       ds.drives[k] = Math.max(0, Math.floor(ds.drives[k] * 0.9));
@@ -1365,7 +1390,7 @@ function queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat) {
 
 function queueQuietPresenceCoreMemory(chat) {
   const ms = store.memorySystem;
-  const cml = ms.coreMemoryLayers;
+  const cml = getCoreMemoryLayers();
   const proj = getActiveProject();
 
   // Create v2.0 AI emotional memory entry (synthetic, no LLM)
@@ -1479,7 +1504,7 @@ AI回应: ${item.aiResponse}`;
     if (jsonStr.startsWith('[')) {
       const coreMems = JSON.parse(jsonStr);
       const ms = store.memorySystem;
-      const cml = ms.coreMemoryLayers;
+      const cml = getCoreMemoryLayers();
       const proj = getActiveProject();
 
       for (let i = 0; i < coreMems.length; i++) {
@@ -2086,7 +2111,7 @@ function checkDeriveInsightsTrigger(source) {
   } else if (source === 'usm') {
     ms._usmSinceLastDerive = (ms._usmSinceLastDerive || 0) + 1;
   }
-  ms.derivedRelationalPatterns.triggerCount = (ms.derivedRelationalPatterns.triggerCount || 0) + 1;
+  getDerivedPatterns().triggerCount = (getDerivedPatterns().triggerCount || 0) + 1;
 
   if (ms._aemSinceLastDerive >= 5 || ms._usmSinceLastDerive >= 3) {
     deriveRelationalInsights();
@@ -2096,7 +2121,7 @@ function checkDeriveInsightsTrigger(source) {
 async function deriveRelationalInsights() {
   if (!store.apiKey) return;
   const ms = store.memorySystem;
-  const cml = ms.coreMemoryLayers;
+  const cml = getCoreMemoryLayers();
 
   // Check if we have enough data
   const totalAEM = cml.aiEmotionalMemories.length;
@@ -2104,11 +2129,11 @@ async function deriveRelationalInsights() {
   if (totalAEM + totalUSM < 3) return; // need at least 3 items
 
   // Determine if incremental or full
-  const isIncremental = ms.derivedRelationalPatterns.lastDerived !== null;
+  const isIncremental = getDerivedPatterns().lastDerived !== null;
   const allItems = [];
 
   // Take items since last derivation (or all if first run)
-  const lastDerived = ms.derivedRelationalPatterns.lastDerived;
+  const lastDerived = getDerivedPatterns().lastDerived;
   for (const aem of cml.aiEmotionalMemories) {
     if (!isIncremental || aem.timestamp > lastDerived) {
       allItems.push({
@@ -2148,9 +2173,9 @@ async function deriveRelationalInsights() {
     `[${item.type}] ${item.summary}${item.aiLabel ? ' | AI: ' + item.aiLabel : ''}${item.userLabel ? ' | 用户: ' + item.userLabel : ''}`
   ).join('\n');
 
-  const currentPatterns = ms.derivedRelationalPatterns.patterns || [];
-  const currentUser = ms.personalityProfiles.user || {};
-  const currentAI = ms.personalityProfiles.ai || {};
+  const currentPatterns = getDerivedPatterns().patterns || [];
+  const currentUser = getPersonalityProfiles().user || {};
+  const currentAI = getPersonalityProfiles().ai || {};
   const incrementalNote = isIncremental
     ? '\n\n以下是当前的归纳结果（请在已有基础上更新，不要完全重写）：\n当前相处模式: ' + JSON.stringify(currentPatterns.slice(0, 3)) + '\n当前用户档案: ' + JSON.stringify({ coreTraits: currentUser.coreTraits, emotionalPatterns: currentUser.emotionalPatterns })
     : '';
@@ -2219,49 +2244,49 @@ async function deriveRelationalInsights() {
       }));
       // Merge: update existing or add new
       for (const np of newPatterns) {
-        const existing = ms.derivedRelationalPatterns.patterns.find(p => p.patternName === np.patternName);
+        const existing = getDerivedPatterns().patterns.find(p => p.patternName === np.patternName);
         if (existing) {
           existing.description = np.description;
           existing.responseStrategy = np.responseStrategy;
           existing.frequency = (existing.frequency || 1) + 1;
           existing.lastSeen = ts;
         } else {
-          ms.derivedRelationalPatterns.patterns.push(np);
+          getDerivedPatterns().patterns.push(np);
         }
       }
       // Cap at 10 patterns
-      if (ms.derivedRelationalPatterns.patterns.length > 10) {
-        ms.derivedRelationalPatterns.patterns = ms.derivedRelationalPatterns.patterns.slice(-10);
+      if (getDerivedPatterns().patterns.length > 10) {
+        getDerivedPatterns().patterns = getDerivedPatterns().patterns.slice(-10);
       }
     }
 
     // Update user profile
     if (result.userProfile) {
       const up = result.userProfile;
-      ms.personalityProfiles.user.coreTraits = up.coreTraits || ms.personalityProfiles.user.coreTraits;
-      ms.personalityProfiles.user.communicationStyle = up.communicationStyle || ms.personalityProfiles.user.communicationStyle;
-      ms.personalityProfiles.user.emotionalPatterns = up.emotionalPatterns || ms.personalityProfiles.user.emotionalPatterns;
-      ms.personalityProfiles.user.growthMoments = up.growthMoments || ms.personalityProfiles.user.growthMoments;
-      ms.personalityProfiles.user.hiddenInsecurities = up.hiddenInsecurities || ms.personalityProfiles.user.hiddenInsecurities;
+      getPersonalityProfiles().user.coreTraits = up.coreTraits || getPersonalityProfiles().user.coreTraits;
+      getPersonalityProfiles().user.communicationStyle = up.communicationStyle || getPersonalityProfiles().user.communicationStyle;
+      getPersonalityProfiles().user.emotionalPatterns = up.emotionalPatterns || getPersonalityProfiles().user.emotionalPatterns;
+      getPersonalityProfiles().user.growthMoments = up.growthMoments || getPersonalityProfiles().user.growthMoments;
+      getPersonalityProfiles().user.hiddenInsecurities = up.hiddenInsecurities || getPersonalityProfiles().user.hiddenInsecurities;
     }
 
     // Update AI profile
     if (result.aiProfile) {
       const ap = result.aiProfile;
-      ms.personalityProfiles.ai.dominantEmotions = ap.dominantEmotions || ms.personalityProfiles.ai.dominantEmotions;
-      ms.personalityProfiles.ai.reactionPatterns = ap.reactionPatterns || ms.personalityProfiles.ai.reactionPatterns;
-      ms.personalityProfiles.ai.growthMoments = ap.growthMoments || ms.personalityProfiles.ai.growthMoments;
+      getPersonalityProfiles().ai.dominantEmotions = ap.dominantEmotions || getPersonalityProfiles().ai.dominantEmotions;
+      getPersonalityProfiles().ai.reactionPatterns = ap.reactionPatterns || getPersonalityProfiles().ai.reactionPatterns;
+      getPersonalityProfiles().ai.growthMoments = ap.growthMoments || getPersonalityProfiles().ai.growthMoments;
     }
 
-    ms.derivedRelationalPatterns.lastDerived = new Date().toISOString();
-    ms.personalityProfiles.lastDerived = new Date().toISOString();
+    getDerivedPatterns().lastDerived = new Date().toISOString();
+    getPersonalityProfiles().lastDerived = new Date().toISOString();
     ms._aemSinceLastDerive = 0;
     ms._usmSinceLastDerive = 0;
 
     // Write memory file with new insights
     writeMemoryFile(store.activeProject, store.activeChat, null, 'insights_derived');
     saveStore();
-    console.log('[derive] Insights updated: ' + (ms.derivedRelationalPatterns.patterns.length) + ' patterns');
+    console.log('[derive] Insights updated: ' + (getDerivedPatterns().patterns.length) + ' patterns');
   } catch (e) {
     console.log('[derive] Error:', e.message);
   }
@@ -2381,7 +2406,7 @@ function updateDesireDrives(reflection) {
   if (!reflection) return;
   const aiLabel = reflection.ai_affect_label;
   const intensity = reflection.ai_affect_intensity || 5;
-  const ds = store.desireSystem;
+  const ds = getDesireSystem(); if (!ds) return;
 
   // Check global cooldown
   if (ds.cooldownUntil) {
@@ -2442,7 +2467,7 @@ function updateDesireDrives(reflection) {
 }
 
 function checkPassiveDrives() {
-  const ds = store.desireSystem;
+  const ds = getDesireSystem(); if (!ds) return;
   const now = new Date();
   const lastCheck = ds.lastPassiveCheck ? new Date(ds.lastPassiveCheck) : now;
   const hoursPassed = (now - lastCheck) / (1000 * 60 * 60);
@@ -2484,7 +2509,7 @@ function checkPassiveDrives() {
 }
 
 function checkDesireThresholds() {
-  const ds = store.desireSystem;
+  const ds = getDesireSystem(); if (!ds) return;
 
   // Check global cooldown
   if (ds.cooldownUntil) {
@@ -2501,7 +2526,7 @@ function checkDesireThresholds() {
 }
 
 function queueDesireAction(driveType, driveValue) {
-  const ds = store.desireSystem;
+  const ds = getDesireSystem(); if (!ds) return;
   const config = DESIRE_CONFIG[driveType];
   if (!config) return;
 
@@ -2528,7 +2553,7 @@ function getDesireTone(driveValue, threshold) {
 
 // ==================== DESIRE ACTION EXECUTOR (EDA-3) ====================
 async function executePendingDesireActions() {
-  const ds = store.desireSystem;
+  const ds = getDesireSystem(); if (!ds) return;
   if (!ds.pendingActions || ds.pendingActions.length === 0) return;
   if (!store.apiKey) return;
   const action = ds.pendingActions.shift();
@@ -2537,7 +2562,7 @@ async function executePendingDesireActions() {
 }
 
 async function executeDesireAction(action) {
-  const ds = store.desireSystem;
+  const ds = getDesireSystem();
   const config = DESIRE_CONFIG[action.driveType];
   if (!config) return;
   const tone = getDesireTone(action.driveValue, config.threshold);
@@ -2570,7 +2595,8 @@ async function executeDesireAction(action) {
 }
 
 function applyDesireDecay(driveType) {
-  store.desireSystem.drives[driveType] = Math.floor(store.desireSystem.drives[driveType] * 0.2);
+  const ds = getDesireSystem(); if (!ds) return;
+  ds.drives[driveType] = Math.floor(ds.drives[driveType] * 0.2);
 }
 
 async function generateProactiveMessage(driveType, driveValue, tone) {
@@ -2601,8 +2627,11 @@ async function generateProactiveMessage(driveType, driveValue, tone) {
 function insertProactiveMessage(content, action) {
   let chat = getActiveChatObj();
   if (!chat) {
+    // Prefer the active project's most recent window, then fall back to all projects
+    const activeProj = getActiveProject();
     let latestChat = null, latestDate = '';
-    for (const p of store.projects) {
+    const searchProjects = activeProj ? [activeProj, ...store.projects.filter(p => p.id !== activeProj.id)] : store.projects;
+    for (const p of searchProjects) {
       for (const c of p.chats) {
         if (c.lastConversationDate && c.lastConversationDate > latestDate) {
           latestDate = c.lastConversationDate; latestChat = c;
@@ -2724,7 +2753,7 @@ function checkTodoReminders() {
   const currentMinute = now.getMinutes();
   const currentTime = `${String(currentHour).padStart(2,'0')}:${String(currentMinute).padStart(2,'0')}`;
   const today = fmtDate().iso;
-  const ds = store.desireSystem;
+  const ds = getDesireSystem(); if (!ds) return;
 
   for (const todo of store.todos) {
     if (todo.done) continue;
@@ -2810,8 +2839,8 @@ function getDynamicCtxFingerprint() {
     c?.sharedMemoryIds?.join(',') || '',
     store.todos.filter(t => !t.done).map(t => t.id + t.text).join(','),
     store.diaries?.length || 0,
-    ms.derivedRelationalPatterns?.lastDerived || '',
-    ms.personalityProfiles?.lastDerived || '',
+    getDerivedPatterns()?.lastDerived || '',
+    getPersonalityProfiles()?.lastDerived || '',
     c?._pendingRetrievalBlock ? 'rb' : '',
     Math.floor((c?._messageCount || 0) / 3),
   ].join('|');
@@ -2842,6 +2871,10 @@ function greet() {
 function nowTime() { const d=new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
 function generateMsgId() { return 'msg_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
 function getAIName() { return store.aiName || 'warmbuddy'; }
+function getDesireSystem() { const p = getActiveProject(); return p ? p.desireSystem : null; }
+function getDerivedPatterns() { const p = getActiveProject(); return p ? p.derivedRelationalPatterns : null; }
+function getPersonalityProfiles() { const p = getActiveProject(); return p ? p.personalityProfiles : null; }
+function getCoreMemoryLayers() { const p = getActiveProject(); return p ? p.coreMemoryLayers : null; }
 function escapeHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function weekLabel(d) { d=d||new Date(); const y=d.getFullYear(); const j1=new Date(y,0,1); const w=Math.ceil(((d-j1)/86400000+j1.getDay()+1)/7); return `${y}-W${String(w).padStart(2,'0')}`; }
 function toast(m) { const t=$('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2000); }
@@ -2999,7 +3032,7 @@ function renderMemoryPanelBody(){
       `).join('')}
     </div>`;
   } else if (currentMemoryTab === 'desires') {
-    const ds = store.desireSystem;
+    const ds = getDesireSystem(); if (!ds) { b.innerHTML = '<div class="empty-state">no active project.</div>'; return; }
     const drives = ds.drives || {};
     const colors = { resonance:'#C4877B', exploration:'#8A9BB5', possession:'#9B7BB5', guardianship:'#7BB59B', intimacy:'#D4A09A', confirmation:'#6B8A9B', devotion:'#B5A07B' };
     const entries = Object.entries(DESIRE_CONFIG);
@@ -3031,7 +3064,7 @@ function renderMemoryPanelBody(){
       </div>`).join('')}
     </div>`;
   } else if (currentMemoryTab === 'core') {
-    const cml = store.memorySystem.coreMemoryLayers;
+    const cml = getCoreMemoryLayers();
     const aems = cml.aiEmotionalMemories || [];
     const chat = getActiveChatObj();
     b.innerHTML = '<div style="padding:4px;">' +
@@ -3060,7 +3093,7 @@ function renderMemoryPanelBody(){
       }).join('') +
       // v2.0: Derived patterns summary
       (() => {
-        const drp = store.memorySystem.derivedRelationalPatterns;
+        const drp = getDerivedPatterns();
         if (!drp || !drp.patterns || drp.patterns.length === 0) return '';
         return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">' +
           '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">DERIVED PATTERNS (' + drp.patterns.length + ')</div>' +
@@ -3129,7 +3162,7 @@ function triggerExport(chatId, exportType) {
     String(now.getSeconds()).padStart(2,'0') + tzOffset;
 
   const ms = store.memorySystem;
-  const cml = ms.coreMemoryLayers;
+  const cml = getCoreMemoryLayers();
 
   const exportData = {
     exportMeta: {
@@ -3144,8 +3177,8 @@ function triggerExport(chatId, exportType) {
     aiEmotionalMemories: cml.aiEmotionalMemories || [],
     userStarredMemories: cml.userStarredMemories || [],
     diaryAndLitterbox: cml.diaryAndLitterbox || [],
-    derivedRelationalPatterns: ms.derivedRelationalPatterns || {},
-    personalityProfiles: ms.personalityProfiles || {}
+    derivedRelationalPatterns: getDerivedPatterns() || {},
+    personalityProfiles: getPersonalityProfiles() || {}
   };
 
   const jsonStr = JSON.stringify(exportData, null, 2);
@@ -3175,7 +3208,7 @@ function downloadExport(cid, wk) {
   const chat = getActiveChatObj(); if (!chat) return;
   // Always build fresh export data from current store, never serve stale snapshot
   const ms = store.memorySystem;
-  const cml = ms.coreMemoryLayers;
+  const cml = getCoreMemoryLayers();
   const now = new Date();
   const tzOffset = '+08:00';
   const exportDateTime = now.getFullYear() + '-' +
@@ -3198,8 +3231,8 @@ function downloadExport(cid, wk) {
     aiEmotionalMemories: cml.aiEmotionalMemories || [],
     userStarredMemories: cml.userStarredMemories || [],
     diaryAndLitterbox: cml.diaryAndLitterbox || [],
-    derivedRelationalPatterns: ms.derivedRelationalPatterns || {},
-    personalityProfiles: ms.personalityProfiles || {}
+    derivedRelationalPatterns: getDerivedPatterns() || {},
+    personalityProfiles: getPersonalityProfiles() || {}
   };
 
   const jsonStr = JSON.stringify(exportData, null, 2);
@@ -3248,7 +3281,7 @@ function handleMemoryImport(event) {
 
 function importMemoriesJSON(data) {
   const isV2 = data.schemaVersion === '2.0' || data.exportMeta;
-  const cml = store.memorySystem.coreMemoryLayers;
+  const cml = getCoreMemoryLayers();
   const ms = store.memorySystem;
   let aemCount = 0, usmCount = 0, dlbCount = 0;
 
@@ -3285,18 +3318,22 @@ function importMemoriesJSON(data) {
     }
 
     // Optionally import insights
-    if (data.derivedRelationalPatterns && data.derivedRelationalPatterns.patterns) {
-      if (!ms.derivedRelationalPatterns.lastDerived ||
-          (data.derivedRelationalPatterns.lastDerived > ms.derivedRelationalPatterns.lastDerived)) {
-        ms.derivedRelationalPatterns = data.derivedRelationalPatterns;
+    const proj = getActiveProject();
+    if (proj) {
+      if (data.derivedRelationalPatterns && data.derivedRelationalPatterns.patterns) {
+        if (!proj.derivedRelationalPatterns.lastDerived ||
+            (data.derivedRelationalPatterns.lastDerived > proj.derivedRelationalPatterns.lastDerived)) {
+          proj.derivedRelationalPatterns = data.derivedRelationalPatterns;
+        }
+      }
+      if (data.personalityProfiles && data.personalityProfiles.lastDerived) {
+        if (!proj.personalityProfiles.lastDerived ||
+            (data.personalityProfiles.lastDerived > proj.personalityProfiles.lastDerived)) {
+          proj.personalityProfiles = data.personalityProfiles;
+        }
       }
     }
-    if (data.personalityProfiles && data.personalityProfiles.lastDerived) {
-      if (!ms.personalityProfiles.lastDerived ||
-          (data.personalityProfiles.lastDerived > ms.personalityProfiles.lastDerived)) {
-        ms.personalityProfiles = data.personalityProfiles;
-      }
-    }
+  }
 
     const total = aemCount + usmCount + dlbCount;
     if (total === 0) { toast('No new memories to import (all duplicates)'); return; }
@@ -3305,7 +3342,6 @@ function importMemoriesJSON(data) {
     saveStore();
     renderMemoryPanelBody();
     return;
-  }
 
   // ── Legacy v1 format fallback ──
   let memories = [];
@@ -3409,16 +3445,33 @@ function closeModal() { $('modalOverlay').classList.remove('show'); }
 
 // ==================== PROVIDER PRESETS ====================
 async function loadPresets() {
+  // Offline fallback presets in case the remote server is unreachable
+  const fallbackPresets = [
+    { id: 'deepseek-openai', label: 'DeepSeek (OpenAI 格式)', endpoint: 'https://api.deepseek.com/v1/chat/completions', provider: 'deepseek', format: 'openai', models: ['deepseek-chat','deepseek-v4-pro','deepseek-v4-flash','deepseek-reasoner'] },
+    { id: 'anthropic', label: 'Anthropic 原生', endpoint: 'https://api.anthropic.com/v1/messages', provider: 'anthropic', format: 'anthropic', models: ['claude-sonnet-4-6','claude-opus-4-8','claude-haiku-4-5'] },
+    { id: 'openai', label: 'OpenAI', endpoint: 'https://api.openai.com/v1/chat/completions', provider: 'openai', format: 'openai', models: ['gpt-4o','gpt-4o-mini','gpt-4-turbo'] }
+  ];
   try {
-    const resp = await fetch(BACKEND_URL + '/api/presets');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(BACKEND_URL + '/api/presets', { signal: controller.signal });
+    clearTimeout(timeout);
     const data = await resp.json();
-    store.providerPresets = data.presets || [];
-    // If no endpoint configured, set default preset
-    if (!store.selectedPreset && store.providerPresets.length > 0) {
-      store.selectedPreset = store.providerPresets[0].id;
-      store.apiEndpoint = store.providerPresets[0].endpoint;
+    store.providerPresets = data.presets && data.presets.length > 0 ? data.presets : fallbackPresets;
+    if (data.models) {
+      for (const m of data.models) {
+        if (!store.availableModels.find(x => x.id === m.id)) store.availableModels.push(m);
+      }
     }
-  } catch (e) { console.error('Failed to load presets:', e); }
+  } catch (e) {
+    console.warn('[presets] Remote unavailable, using offline fallback:', e.message);
+    store.providerPresets = fallbackPresets;
+  }
+  // Apply default preset if none configured
+  if (!store.selectedPreset && store.providerPresets.length > 0) {
+    store.selectedPreset = store.providerPresets[0].id;
+    store.apiEndpoint = store.providerPresets[0].endpoint;
+  }
 }
 
 function selectPreset(presetId) {
@@ -3982,7 +4035,7 @@ async function triggerLitterBox(userText, aiResponse) {
 // ── v2.0: Sync diary/litterbox to coreMemoryLayers ──
 async function syncToDiaryLitterboxLayer(type, rawContent) {
   if (!rawContent) return;
-  const cml = store.memorySystem.coreMemoryLayers;
+  const cml = getCoreMemoryLayers();
   const id = 'dlb_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
   // Generate brief LLM summary
   let summary = (rawContent || '').slice(0, 10);
@@ -4193,7 +4246,7 @@ function readMemoryFile(projectId, windowId) {
 function writeMemoryFile(projectId, windowId, data, trigger) {
   if (!projectId || !windowId) return;
   const ms = store.memorySystem;
-  const cml = ms.coreMemoryLayers;
+  const cml = getCoreMemoryLayers();
   const existing = readMemoryFile(projectId, windowId);
   const ts = new Date().toISOString();
 
@@ -4215,8 +4268,8 @@ function writeMemoryFile(projectId, windowId, data, trigger) {
     diaryAndLitterbox: (data && data.diaryAndLitterbox) || cml.diaryAndLitterbox || [],
 
     // Derived insights
-    derivedRelationalPatterns: (data && data.derivedRelationalPatterns) || ms.derivedRelationalPatterns || { lastDerived: null, triggerCount: 0, patterns: [] },
-    personalityProfiles: (data && data.personalityProfiles) || ms.personalityProfiles || { lastDerived: null, user: {}, ai: {} },
+    derivedRelationalPatterns: (data && data.derivedRelationalPatterns) || getDerivedPatterns() || { lastDerived: null, triggerCount: 0, patterns: [] },
+    personalityProfiles: (data && data.personalityProfiles) || getPersonalityProfiles() || { lastDerived: null, user: {}, ai: {} },
 
     // Legacy compat
     pattern_change_log: (existing && existing.pattern_change_log) || []
@@ -4260,7 +4313,7 @@ function diffPatterns(oldPatterns, newPatterns) {
 function syncProjectMemories(projectId) {
   if (!projectId) return;
   const ms = store.memorySystem;
-  const cml = ms.coreMemoryLayers;
+  const cml = getCoreMemoryLayers();
 
   const mergedAEM = [];
   const mergedUSM = [];
@@ -4321,8 +4374,11 @@ function syncProjectMemories(projectId) {
   cml.userStarredMemories = mergedUSM.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
   cml.diaryAndLitterbox = mergedDLB.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
 
-  if (latestDRP) ms.derivedRelationalPatterns = latestDRP;
-  if (latestPP) ms.personalityProfiles = latestPP;
+  const proj = getActiveProject();
+  if (proj) {
+    if (latestDRP) proj.derivedRelationalPatterns = latestDRP;
+    if (latestPP) proj.personalityProfiles = latestPP;
+  }
 
   console.log(`[sync] Project ${projectId}: merged AEM ${mergedAEM.length}, USM ${mergedUSM.length}, DLB ${mergedDLB.length}, patterns ${(latestDRP && latestDRP.patterns) ? latestDRP.patterns.length : 0}`);
   return { mergedAEM, mergedUSM, mergedDLB };
@@ -4496,7 +4552,7 @@ function buildDynamicContextBlock() {
     }
 
     // v2.0: Derived Relational Patterns (top 2)
-    const drp = store.memorySystem.derivedRelationalPatterns;
+    const drp = getDerivedPatterns();
     if (drp && drp.patterns && drp.patterns.length > 0) {
       const topPatterns = drp.patterns.sort((a,b)=>(b.frequency||0)-(a.frequency||0)).slice(0,2);
       parts.push('【核心相处模式】' + topPatterns.map(p => p.patternName+'：'+(p.description||'').slice(0,40)).join(' | '));
@@ -4505,14 +4561,14 @@ function buildDynamicContextBlock() {
 
   // ═══ First-msg or recall only: personality profiles ═══
   if (isFirstMsg || hasRecall) {
-    const up = store.memorySystem.personalityProfiles?.user;
+    const up = getPersonalityProfiles()?.user;
     if (up && up.coreTraits && up.coreTraits.length > 0) {
       const pp = [];
       if (up.coreTraits.length>0) pp.push('特质：'+up.coreTraits.slice(0,3).join('·'));
       if (up.emotionalPatterns&&up.emotionalPatterns.length>0) pp.push('情绪：'+up.emotionalPatterns.slice(0,2).join('·'));
       if (pp.length>0) parts.push('【用户人格档案】'+pp.join(' | '));
     }
-    const ap = store.memorySystem.personalityProfiles?.ai;
+    const ap = getPersonalityProfiles()?.ai;
     if (ap && ap.dominantEmotions && ap.dominantEmotions.length > 0) {
       const ai = [];
       if (ap.dominantEmotions.length>0) ai.push('主导：'+ap.dominantEmotions.slice(0,2).join('·'));
@@ -5340,7 +5396,7 @@ async function createUserStarredMemory(selectedMsgIds) {
     userNote: ''
   };
 
-  store.memorySystem.coreMemoryLayers.userStarredMemories.unshift(usm);
+  getCoreMemoryLayers().userStarredMemories.unshift(usm);
 
   // Also add to project memories for backward compat
   proj.memories.push({
@@ -5430,7 +5486,7 @@ function starBubble(idx){
   if(!chat.sharedMemoryIds.includes(memId))chat.sharedMemoryIds.push(memId);
 
   // v2: also write to coreMemoryLayers.userStarredMemories
-  const cml = store.memorySystem.coreMemoryLayers;
+  const cml = getCoreMemoryLayers();
   const usmId = 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
   const dialogueText = (msg.role === 'user' ? '用户' : 'AI') + ': ' + (msg.text || '').slice(0, 100);
   cml.userStarredMemories.unshift({
@@ -5484,7 +5540,7 @@ function splitSentences(text) {
  * Display sentences one by one as separate chat messages with typing delays.
  * Each sentence becomes its own bubble, simulating a natural chat rhythm.
  */
-async function displaySentences(sentences, chat, startTime) {
+async function displaySentences(sentences, chat, startTime, replyTo) {
   const typingArea = $('chatTypingArea');
   const messagesEl = $('chatMessages');
 
@@ -5498,7 +5554,9 @@ async function displaySentences(sentences, chat, startTime) {
     typingArea.innerHTML = '';
 
     // Push this sentence as a separate message
-    chat.messages.push({ role: 'ai', text: sentences[i], time: startTime, id: generateMsgId() });
+    const msg = { role: 'ai', text: sentences[i], time: startTime, id: generateMsgId() };
+    if (i === 0 && replyTo) msg.replyTo = replyTo;
+    chat.messages.push(msg);
     renderChatMessages();
 
     // Scroll to bottom
@@ -5912,7 +5970,7 @@ ${recentMsgIds}` });
     // AI used [[BUBBLE]] — each segment is its own bubble
     await displayAIBubbles(parsedBubbles, chat, bubbleTime);
   } else if (parsedBubbles.length === 1) {
-    // Single bubble — apply sentence splitting, attach replyTo to first sentence
+    // Single bubble — apply sentence splitting with staggered display
     const replyTo = parsedBubbles[0].replyTo;
     const text = parsedBubbles[0].text;
     const sentences = splitSentences(text);
@@ -5922,13 +5980,9 @@ ${recentMsgIds}` });
       chat.messages.push(msg);
       renderChatMessages();
     } else {
-      // Attach replyTo to first sentence only
-      for (let i = 0; i < sentences.length; i++) {
-        const msg = {role:'ai',text:sentences[i],time:bubbleTime,id:generateMsgId()};
-        if (i === 0 && replyTo) msg.replyTo = replyTo;
-        chat.messages.push(msg);
-      }
-      renderChatMessages();
+      // Inject replyTo into first sentence, then use staggered display
+      if (replyTo) sentences[0] = sentences[0]; // unchanged — replyTo attached via pre-mark
+      await displaySentences(sentences, chat, bubbleTime, replyTo);
     }
   } else {
     // Fallback: empty or unexpected
@@ -6277,7 +6331,7 @@ async function sendMessage(){
   // EDA: detect user response to proactive message (回应衰减)
   const lastMsg = chat.messages.length >= 2 ? chat.messages[chat.messages.length - 2] : null;
   if (lastMsg && lastMsg._proactive) {
-    const ds = store.desireSystem;
+    const ds = getDesireSystem(); if (!ds) return;
     if (lastMsg._desireType === 'guardianship') ds.drives.guardianship = Math.max(0, ds.drives.guardianship - 20);
     if (lastMsg._desireType === 'confirmation') ds.drives.confirmation = Math.max(0, ds.drives.confirmation - 30);
     console.log('[eda] User responded to proactive message, applied response decay');
@@ -6933,7 +6987,7 @@ async function sendPushNotification(title, body, opts = {}) {
 
 async function init(){
   loadStore();
-  await loadPresets();
+  loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
   updateSettingsUI();
   renderAll();
   // v2.1: chat input auto-resize + Enter/Shift+Enter handling
