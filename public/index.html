@@ -388,6 +388,168 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .chat-send { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--accent-soft); color: #fff; font-size: 18px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
 .chat-send:active { transform: scale(0.93); background: var(--accent); }
 
+/* ===== Quote block inside bubble ===== */
+.quote-block {
+  margin-bottom: 8px; padding: 6px 10px;
+  background: var(--bg); border-left: 3px solid var(--accent);
+  border-radius: 4px; font-size: 12px; color: var(--text-light);
+  cursor: pointer; transition: all 0.2s;
+}
+.quote-block:active { background: var(--accent-pale); }
+.quote-block-label {
+  font-family: var(--font-en); font-size: 9px;
+  color: var(--text-lighter); letter-spacing: 0.06em;
+  margin-bottom: 2px;
+}
+.quote-block-text {
+  line-height: 1.4; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Highlight animation for scrolled-to message */
+.msg-highlight {
+  animation: msgHighlightFlash 1.2s ease-out;
+}
+@keyframes msgHighlightFlash {
+  0%   { background: rgba(184, 169, 154, 0.3); }
+  100% { background: transparent; }
+}
+
+/* ===== Reply preview bar ===== */
+.reply-preview-bar {
+  display: none; align-items: center; gap: 10px;
+  padding: 8px 20px; background: var(--bg-card);
+  border-top: 1px solid var(--border-light);
+  animation: fadeIn 0.2s ease-out;
+}
+.reply-preview-line {
+  width: 3px; height: 32px; border-radius: 2px;
+  background: var(--accent); flex-shrink: 0;
+}
+.reply-preview-content {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+}
+.reply-preview-label {
+  font-size: 10px; color: var(--accent);
+  font-family: var(--font-en); letter-spacing: 0.04em;
+}
+.reply-preview-text {
+  font-size: 12px; color: var(--text-light);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.reply-preview-close {
+  width: 24px; height: 24px; border-radius: 50%;
+  border: 1px solid var(--border); background: transparent;
+  font-size: 12px; color: var(--text-lighter); cursor: pointer;
+  flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+}
+
+/* ===== Draft bubbles area ===== */
+.draft-bubbles-area {
+  display: none; padding: 0 20px 8px; animation: fadeIn 0.2s ease-out;
+}
+.draft-bubbles-scroll {
+  display: flex; gap: 8px; overflow-x: auto;
+  padding: 4px 0; scrollbar-width: none;
+}
+.draft-bubbles-scroll::-webkit-scrollbar { height: 0; }
+.draft-bubble-chip {
+  flex-shrink: 0; max-width: 200px; padding: 8px 12px;
+  background: var(--accent-pale); border-radius: 14px;
+  font-size: 13px; color: var(--text); line-height: 1.4;
+  cursor: pointer; transition: all 0.2s;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  position: relative; border: 1px solid transparent;
+}
+.draft-bubble-chip:active { background: var(--accent-soft); }
+.draft-chip-index {
+  font-family: var(--font-en); font-size: 9px;
+  color: var(--text-lighter); margin-right: 4px;
+}
+
+/* ===== "+" draft button ===== */
+.chat-send-plus {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 1.5px solid var(--border); background: var(--bg-card);
+  color: var(--text-light); font-size: 18px; cursor: pointer;
+  flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s; font-family: var(--font-en);
+}
+.chat-send-plus:active { background: var(--bg-card-hover); transform: scale(0.93); }
+.chat-send-plus.has-drafts {
+  border-color: var(--accent-soft); color: var(--accent);
+  background: var(--accent-pale);
+}
+
+/* Virtual (faded) send button state */
+.chat-send.virtual {
+  background: var(--border-light); color: var(--text-lighter);
+  opacity: 0.6;
+}
+
+/* Shake animation for input bar */
+@keyframes shake {
+  0%,100% { transform: translateX(0); }
+  20%      { transform: translateX(-5px); }
+  40%      { transform: translateX(5px); }
+  60%      { transform: translateX(-4px); }
+  80%      { transform: translateX(4px); }
+}
+.shake-anim { animation: shake 0.4s ease; }
+
+/* ===== Draft editor bottom sheet ===== */
+.draft-editor-overlay {
+  position: fixed; inset: 0; background: rgba(74, 69, 67, 0.3);
+  z-index: 300; display: flex; align-items: flex-end; justify-content: center;
+  opacity: 0; pointer-events: none; transition: opacity 0.3s;
+}
+.draft-editor-overlay.show { opacity: 1; pointer-events: auto; }
+.draft-editor-panel {
+  background: var(--bg-card); border-radius: 20px 20px 0 0;
+  width: 100%; max-width: 430px; padding: 20px 20px 28px;
+  transform: translateY(100%);
+  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.draft-editor-overlay.show .draft-editor-panel { transform: translateY(0); }
+.draft-editor-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 12px;
+}
+.draft-editor-title {
+  font-family: var(--font-en); font-size: 14px;
+  color: var(--text); letter-spacing: 0.04em;
+}
+.draft-editor-close {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 1px solid var(--border); background: transparent;
+  font-size: 14px; color: var(--text-lighter); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.draft-editor-textarea {
+  width: 100%; min-height: 120px; padding: 12px 14px;
+  border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--bg); font-family: var(--font-cn);
+  font-size: 14px; color: var(--text); outline: none;
+  resize: vertical; line-height: 1.6;
+}
+.draft-editor-textarea:focus { border-color: var(--accent-soft); }
+.draft-editor-actions {
+  display: flex; gap: 10px; margin-top: 16px;
+}
+.draft-editor-btn {
+  flex: 1; padding: 12px; border-radius: var(--radius-sm);
+  border: none; font-family: var(--font-en); font-size: 13px;
+  cursor: pointer; letter-spacing: 0.04em; transition: all 0.2s;
+}
+.draft-editor-btn.delete {
+  background: var(--danger-light); color: var(--danger);
+}
+.draft-editor-btn.save {
+  background: var(--accent-soft); color: #fff;
+}
+.draft-editor-btn:active { transform: scale(0.97); }
+
 /* ===== Bookshelf ===== */
 .reading-note-card { background: var(--bg-card); border-radius: var(--radius); padding: 18px 20px; box-shadow: var(--shadow); border: 1px solid var(--border-light); border-left: 3px solid var(--accent-soft); margin-bottom: 20px; }
 .reading-note-label { font-family: var(--font-en); font-size: 10px; color: var(--text-lighter); letter-spacing: 0.08em; margin-bottom: 4px; text-transform: uppercase; }
@@ -614,9 +776,21 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
     <div style="text-align:center;padding:20px;"><span style="font-family:var(--font-en);font-size:12px;color:var(--text-lighter);">— start a conversation —</span></div>
   </div>
   <div id="chatTypingArea"></div>
+  <div class="reply-preview-bar" id="replyPreviewBar" style="display:none;">
+    <div class="reply-preview-line"></div>
+    <div class="reply-preview-content">
+      <span class="reply-preview-label" id="replyPreviewLabel"></span>
+      <span class="reply-preview-text" id="replyPreviewText"></span>
+    </div>
+    <button class="reply-preview-close" onclick="cancelReply()">✕</button>
+  </div>
+  <div class="draft-bubbles-area" id="draftBubblesArea">
+    <div class="draft-bubbles-scroll" id="draftBubblesScroll"></div>
+  </div>
   <div class="chat-input-area">
     <textarea class="chat-input" id="chatInput" placeholder="type a message..." rows="1"></textarea>
-    <button class="chat-send" onclick="sendMessage()">↑</button>
+    <button class="chat-send-plus" id="chatSendPlus" onclick="stageDraftBubble()" title="暂存为草稿" style="display:none;">+</button>
+    <button class="chat-send" id="chatSendBtn" onclick="sendMessage()">↑</button>
   </div>
 </div>
 
@@ -663,6 +837,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
       <div class="settings-item" onclick="toggleAiSetting('autoWeather')"><span class="si-label">天气信息</span><div class="toggle-switch" id="toggleWeather"></div></div>
       <div class="settings-item" onclick="toggleAiSetting('aiVoice')"><span class="si-label">AI 语音</span><div class="toggle-switch" id="toggleVoice"></div></div>
       <div class="settings-item" onclick="toggleAiSetting('webSearch')"><span class="si-label">联网搜索</span><div class="toggle-switch" id="toggleSearch"></div></div>
+      <div class="settings-item" onclick="showAiNameModal()"><span class="si-label">AI 名称</span><span class="si-val" id="aiNameVal">warmbuddy</span></div>
       <div class="settings-item" onclick="showModelModal()"><span class="si-label">对话模型切换</span><span class="si-val" id="modelVal">claude-sonnet-4-6</span></div>
       <div class="settings-item" onclick="showPreferenceModal()"><span class="si-label">preference</span><span class="si-val" id="prefVal">edit</span></div>
     </div>
@@ -724,6 +899,21 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 <div class="toast" id="toast"></div>
 <div class="context-menu" id="contextMenu"></div>
 <input type="file" id="fileInput" accept=".epub,.txt" style="display:none" onchange="handleFileImport(event)">
+
+<!-- Draft editor bottom sheet -->
+<div class="draft-editor-overlay" id="draftEditorOverlay" onclick="closeDraftEditor()">
+  <div class="draft-editor-panel" id="draftEditorPanel" onclick="event.stopPropagation()">
+    <div class="draft-editor-header">
+      <span class="draft-editor-title">编辑草稿 #<span id="draftEditorIndex"></span></span>
+      <button class="draft-editor-close" onclick="closeDraftEditor()">✕</button>
+    </div>
+    <textarea class="draft-editor-textarea" id="draftEditorTextarea" placeholder="编辑草稿内容..."></textarea>
+    <div class="draft-editor-actions">
+      <button class="draft-editor-btn delete" onclick="deleteDraftBubble()">删除</button>
+      <button class="draft-editor-btn save" onclick="saveDraftBubble()">保存</button>
+    </div>
+  </div>
+</div>
 
 </div>
 
@@ -802,6 +992,7 @@ const store = {
     ]},
   ],
   aiSettings: { autoDateTime: true, autoWeather: false, aiVoice: false, webSearch: false, model: 'deepseek-chat' },
+  aiName: 'warmbuddy',
   apiKey: '', apiEndpoint: 'https://api.deepseek.com/v1/chat/completions', darkMode: false,
   availableModels: [
     // DeepSeek
@@ -2427,10 +2618,10 @@ function insertProactiveMessage(content, action) {
   }
   // Insert system message first
   const winName = chat.name || '';
-  chat.messages.push({ role: 'system', text: `主动消息：${DESIRE_CONFIG[action.driveType].label}`, time: nowTime() });
+  chat.messages.push({ role: 'system', text: `主动消息：${DESIRE_CONFIG[action.driveType].label}`, time: nowTime(), id: generateMsgId() });
   // Then insert AI message
   chat.messages.push({
-    role: 'ai', text: content, time: nowTime(),
+    role: 'ai', text: content, time: nowTime(), id: generateMsgId(),
     _proactive: true, _desireType: action.driveType, _driveValue: action.driveValue
   });
   renderChatMessages(); renderProjectList();
@@ -2473,7 +2664,7 @@ function insertDesireLitterThought(content, action) {
   if (store.litterThoughts.length > 50) store.litterThoughts.length = 50;
   // Insert system message
   if (chat) {
-    chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: nowTime() });
+    chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: nowTime(), id: generateMsgId() });
     renderChatMessages();
   }
   // Push notification
@@ -2514,7 +2705,7 @@ function insertDesireDiary(content, action) {
   });
   // Insert system message
   if (chat) {
-    chat.messages.push({ role: 'system', text: '日记里偷偷写了点什么', time: nowTime() });
+    chat.messages.push({ role: 'system', text: '日记里偷偷写了点什么', time: nowTime(), id: generateMsgId() });
     renderChatMessages();
   }
   // Push notification
@@ -2586,7 +2777,7 @@ async function triggerTodoReminder(todo) {
     if (!content) return;
 
     chat.messages.push({
-      role: 'ai', text: content, time: nowTime(),
+      role: 'ai', text: content, time: nowTime(), id: generateMsgId(),
       _proactive: true, _desireType: 'todo', _todoId: todo.id
     });
     renderChatMessages();
@@ -2601,6 +2792,9 @@ let currentTokenFilter = 'all'; // Phase 3: token call history filter
 let batchSelectMode = false;       // v2.0: batch star select mode
 let batchSelectedIds = [];         // v2.0: currently selected message IDs
 let _dynCtxCache = { fp: '', content: '', ts: 0 }; // Opt2: dynamic context fingerprint cache
+let pendingReply = null;  // { msgId, text, label, role }
+let draftBubbles = [];     // [{ text }]
+let draftEditorIdx = -1;
 
 // Opt2: Compute content fingerprint for dynamic context caching
 function getDynamicCtxFingerprint() {
@@ -2646,6 +2840,8 @@ function greet() {
   return { wave: 'good night', name: `night, ${USER_NAME}.` };
 }
 function nowTime() { const d=new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
+function generateMsgId() { return 'msg_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
+function getAIName() { return store.aiName || 'warmbuddy'; }
 function escapeHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function weekLabel(d) { d=d||new Date(); const y=d.getFullYear(); const j1=new Date(y,0,1); const w=Math.ceil(((d-j1)/86400000+j1.getDay()+1)/7); return `${y}-W${String(w).padStart(2,'0')}`; }
 function toast(m) { const t=$('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2000); }
@@ -2977,16 +3173,45 @@ function triggerExport(chatId, exportType) {
 
 function downloadExport(cid, wk) {
   const chat = getActiveChatObj(); if (!chat) return;
-  const e = chat.weeklyExports.find(x => x.week === wk); if (!e) return;
-  const blob = new Blob([e.jsonData], {type: 'application/json'});
+  // Always build fresh export data from current store, never serve stale snapshot
+  const ms = store.memorySystem;
+  const cml = ms.coreMemoryLayers;
+  const now = new Date();
+  const tzOffset = '+08:00';
+  const exportDateTime = now.getFullYear() + '-' +
+    String(now.getMonth()+1).padStart(2,'0') + '-' +
+    String(now.getDate()).padStart(2,'0') + 'T' +
+    String(now.getHours()).padStart(2,'0') + ':' +
+    String(now.getMinutes()).padStart(2,'0') + ':' +
+    String(now.getSeconds()).padStart(2,'0') + tzOffset;
+
+  const exportData = {
+    exportMeta: {
+      exportedAt: exportDateTime,
+      exportType: 'manual',
+      week: wk,
+      windowId: cid,
+      chatId: cid,
+      projectId: store.activeProject,
+      schemaVersion: '2.0'
+    },
+    aiEmotionalMemories: cml.aiEmotionalMemories || [],
+    userStarredMemories: cml.userStarredMemories || [],
+    diaryAndLitterbox: cml.diaryAndLitterbox || [],
+    derivedRelationalPatterns: ms.derivedRelationalPatterns || {},
+    personalityProfiles: ms.personalityProfiles || {}
+  };
+
+  const jsonStr = JSON.stringify(exportData, null, 2);
+  const blob = new Blob([jsonStr], {type: 'application/json'});
   const url = URL.createObjectURL(blob);
-  const exportTime = (e.exportDateTime || e.date).replace(/[:+]/g, '-').replace(/T/g, '_');
+  const exportTime = exportDateTime.replace(/[:+]/g, '-').replace(/T/g, '_');
   const a = document.createElement('a');
   a.href = url;
   a.download = `warmbuddy-memory-${wk}-${cid}-${exportTime}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  toast('JSON 已下载');
+  toast('JSON 已下载（' + exportData.userStarredMemories.length + '条星标）');
 }
 
 // v2.0: Weekly auto-export check
@@ -3390,6 +3615,7 @@ function updateSettingsUI(){
   $('apiEndpointVal').textContent = preset ? preset.label : (store.apiEndpoint ? 'custom' : 'not set');
   const proj=getActiveProject(); const pref=proj?proj.preference||'':'';
   $('prefVal').textContent=pref?pref.slice(0,20)+(pref.length>20?'…':''):'edit';
+  $('aiNameVal').textContent = store.aiName || 'warmbuddy';
 }
 function toggleAiSetting(k){
   store.aiSettings[k]=!store.aiSettings[k]; updateSettingsUI();
@@ -3745,7 +3971,7 @@ async function triggerLitterBox(userText, aiResponse) {
   chat._lastLitterTime = Date.now();
 
   // Insert system message
-  chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: nowTime() });
+  chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: nowTime(), id: generateMsgId() });
   renderChatMessages();
   // Push notification
   sendPushNotification('🐾 猫砂盆', '猫砂盆好像需要铲一铲', { tag: 'litter-box', url: '/', requireInteraction: false });
@@ -4306,6 +4532,21 @@ function buildDynamicContextBlock() {
   return result;
 }
 
+// ── Build recent message ID reference for AI bubble protocol ──
+function buildRecentMsgIdBlock(chat) {
+  if (!chat || !chat.messages) return '';
+  const recent = chat.messages.slice(-20);
+  const lines = recent
+    .filter(m => m.id && m.role !== 'system')
+    .map(m => {
+      const roleLabel = m.role === 'user' ? USER_NAME : getAIName();
+      const preview = (m.text || '').slice(0, 40).replace(/\n/g, ' ');
+      return `[${m.id}] ${roleLabel}: ${preview}`;
+    });
+  if (lines.length === 0) return '';
+  return '【最近消息ID参考】\n' + lines.join('\n');
+}
+
 // ── Backward-compat wrapper: returns the full legacy string ──
 // (only used by genAIResponseForCommand; sendMessage uses the split version directly)
 function buildSystemPrompt() {
@@ -4711,6 +4952,24 @@ function savePreference(){
   closeModal(); toast('Preference saved');
 }
 
+function showAiNameModal(){
+  const current = store.aiName || 'warmbuddy';
+  showModal('AI 名称', `
+    <input class="modal-input" id="aiNameInput" value="${escapeHtml(current)}" placeholder="AI 名字" maxlength="20">
+  `, [
+    { label: 'cancel', cls: 'cancel', onclick: closeModal },
+    { label: 'save', cls: 'confirm', onclick: saveAiName },
+  ]);
+}
+
+function saveAiName(){
+  const v = $('aiNameInput').value.trim();
+  store.aiName = v || 'warmbuddy';
+  $('aiNameVal').textContent = store.aiName;
+  updateSettingsUI();
+  closeModal(); toast('AI 名称: ' + store.aiName);
+}
+
 // Navigate from diary reply source to chat
 function navigateToDiaryReplySource(chatId, windowName){
   if(chatId) store.activeChat = chatId;
@@ -4775,8 +5034,9 @@ function saveEditedChatName(){
   found.name=nm; closeModal(); renderProjectList(); updateCurrentProjectLabel(); toast('已重命名');
 }
 
-function renderChatMessages(){
+function renderChatMessages(preserveScroll){
   const el=$('chatMessages'),chat=getActiveChatObj();
+  const savedScrollTop = preserveScroll && el ? el.scrollTop : 0;
   if(!chat||chat.messages.length===0){
     el.innerHTML='<div style="text-align:center;padding:40px 20px;"><span style="font-family:var(--font-en);font-size:12px;color:var(--text-lighter);">— start a conversation —</span></div>';
     return;
@@ -4809,7 +5069,7 @@ function renderChatMessages(){
     const starTitle = m._starredOnce ? '已星标' : '点击选中星标';
     const starAction = m._starredOnce ? '' : `handleOuterStarClick('${msgId}')`;
 
-    html+=`<div class="chat-row ${m.role}">
+    html+=`<div class="chat-row ${m.role}" id="msg-${msgId}">
       <div class="chat-avatar ${m.role}">${isUser?'MY':'✦'}</div>
       <div class="chat-bubble-wrap">
         <div class="${bubbleCls}"
@@ -4818,7 +5078,7 @@ function renderChatMessages(){
              ontouchstart="bubbleTouchStart(event,'${msgId}')"
              ontouchend="bubbleTouchEnd(event,'${msgId}')"
              ontouchmove="bubbleTouchMove(event)">
-          ${m.text}
+          ${m.replyTo ? renderReplyBlock(m.replyTo) : ''}${m.text}
         </div>
         <div class="bubble-time-row">
           <span class="bubble-time">${m.time}</span>
@@ -4834,11 +5094,13 @@ function renderChatMessages(){
     html+=`<div id="bubbleActions_${i}" class="bubble-actions" style="display:none;justify-content:${isUser?'flex-end':'flex-start'};padding-left:${isUser?'0':'38px'};padding-right:${isUser?'38px':'0'};">
       <span onclick="event.stopPropagation();playTTS(${i})" title="语音朗读">🔊</span>
       <span onclick="event.stopPropagation();copyBubble(${i})" title="复制">📋</span>
+      <span onclick="event.stopPropagation();startReply('${msgId}')" title="引用">↩</span>
       <span onclick="event.stopPropagation();deleteBubble(${i})" title="删除">🗑</span>
     </div>`;
   });
   el.innerHTML=html;
-  el.scrollTop=el.scrollHeight;
+  if (preserveScroll) { el.scrollTop = savedScrollTop; }
+  else { el.scrollTop = el.scrollHeight; }
 
   // Show/hide batch select bar
   const bar = $('batchSelectBar');
@@ -4850,6 +5112,60 @@ function renderChatMessages(){
       bar.classList.remove('show');
     }
   }
+}
+
+// ── Quote block rendering ──
+function renderReplyBlock(replyToMsgId) {
+  if (!replyToMsgId) return '';
+  const chat = getActiveChatObj();
+  if (!chat) return '';
+  const quoted = chat.messages.find(m => m.id === replyToMsgId);
+  if (!quoted) return '';
+  const label = quoted.role === 'user' ? USER_NAME : getAIName();
+  const preview = (quoted.text || '').slice(0, 80);
+  return `<div class="quote-block" onclick="event.stopPropagation();scrollToMsg('${replyToMsgId}')"><div class="quote-block-label">${escapeHtml(label)}</div><div class="quote-block-text">${escapeHtml(preview)}</div></div>`;
+}
+
+function scrollToMsg(msgId) {
+  const el = document.getElementById('msg-' + msgId);
+  if (!el) return;
+  document.querySelectorAll('.msg-highlight').forEach(e => e.classList.remove('msg-highlight'));
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  el.classList.add('msg-highlight');
+  setTimeout(() => el.classList.remove('msg-highlight'), 1300);
+}
+
+// ── User reply interaction ──
+function startReply(msgId) {
+  const chat = getActiveChatObj();
+  if (!chat) return;
+  const msg = chat.messages.find(m => m.id === msgId);
+  if (!msg || msg.role === 'system') return;
+  pendingReply = {
+    msgId: msg.id,
+    text: (msg.text || '').slice(0, 120),
+    label: msg.role === 'user' ? USER_NAME : getAIName(),
+    role: msg.role
+  };
+  document.querySelectorAll('.bubble-actions').forEach(a => a.style.display = 'none');
+  renderReplyPreview();
+  $('chatInput').focus();
+}
+
+function cancelReply() {
+  pendingReply = null;
+  renderReplyPreview();
+}
+
+function renderReplyPreview() {
+  const bar = $('replyPreviewBar');
+  if (!pendingReply) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+  $('replyPreviewLabel').textContent = pendingReply.label;
+  $('replyPreviewText').textContent = pendingReply.text;
 }
 
 // ── Long press detection (touch) ──
@@ -4913,7 +5229,7 @@ function handleOuterStarClick(msgId) {
 function enterBatchSelectMode(initMsgId) {
   batchSelectMode = true;
   batchSelectedIds = [initMsgId];
-  renderChatMessages();
+  renderChatMessages(true);
 }
 
 function toggleBatchSelect(msgId) {
@@ -4932,13 +5248,13 @@ function toggleBatchSelect(msgId) {
     exitBatchSelectMode();
     return;
   }
-  renderChatMessages();
+  renderChatMessages(true);
 }
 
 function exitBatchSelectMode() {
   batchSelectMode = false;
   batchSelectedIds = [];
-  renderChatMessages();
+  renderChatMessages(true);
 }
 
 async function confirmBatchStar() {
@@ -5182,7 +5498,7 @@ async function displaySentences(sentences, chat, startTime) {
     typingArea.innerHTML = '';
 
     // Push this sentence as a separate message
-    chat.messages.push({ role: 'ai', text: sentences[i], time: startTime });
+    chat.messages.push({ role: 'ai', text: sentences[i], time: startTime, id: generateMsgId() });
     renderChatMessages();
 
     // Scroll to bottom
@@ -5195,8 +5511,674 @@ async function displaySentences(sentences, chat, startTime) {
   }
 }
 
+// ── AI bubble protocol: parse [[BUBBLE]] and [[REPLY:msgId]] markers ──
+function parseAIBubbles(rawText) {
+  if (!rawText) return [];
+  const parts = rawText.split(/\[\[BUBBLE\]\]/i);
+  const bubbles = [];
+  for (const part of parts) {
+    let text = part.trim();
+    if (!text) continue;
+    // Extract first [[REPLY:msgId]] from the start of this bubble segment
+    let replyTo = null;
+    const replyMatch = text.match(/^\[\[REPLY:([^\]]+)\]\]/);
+    if (replyMatch) {
+      replyTo = replyMatch[1].trim();
+      text = text.slice(replyMatch[0].length).trim();
+    }
+    // Strip any remaining [[REPLY:...]] markers that the AI may have incorrectly
+    // placed mid-text (the protocol requires them only at bubble start)
+    text = text.replace(/\[\[REPLY:[^\]]+\]\]/g, '').trim();
+    if (text) bubbles.push({ text, replyTo });
+  }
+  return bubbles;
+}
+
+async function displayAIBubbles(bubbles, chat, startTime) {
+  const typingArea = $('chatTypingArea');
+  const messagesEl = $('chatMessages');
+
+  for (let i = 0; i < bubbles.length; i++) {
+    const bubble = bubbles[i];
+    if (i > 0) {
+      typingArea.innerHTML = '<div class="typing-indicator">对方正在输入中<span class="streaming-cursor">|</span></div>';
+      await new Promise(r => setTimeout(r, 400 + Math.random() * 500));
+    }
+    typingArea.innerHTML = '';
+
+    const msg = { role: 'ai', text: bubble.text, time: startTime, id: generateMsgId() };
+    if (bubble.replyTo) msg.replyTo = bubble.replyTo;
+    chat.messages.push(msg);
+    renderChatMessages();
+
+    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    if (i < bubbles.length - 1) {
+      await new Promise(r => setTimeout(r, 150));
+    }
+  }
+}
+
+async function triggerAIResponse(chat, userText, diaryIntent) {
+  const typingArea = $('chatTypingArea');
+
+  // ── Build dynamic context block ──
+  // Check for recall intent → trigger content retrieval (Path B)
+  if (detectRecallIntent(userText)) {
+    const retrievalBlock = buildRetrievalBlock(userText);
+    if (retrievalBlock) chat._pendingRetrievalBlock = retrievalBlock;
+  }
+  let dynamicBlock = buildDynamicContextBlock();
+
+  // Inject diary instruction if intent detected
+  if (diaryIntent === 'diary_write') {
+    dynamicBlock += '\n【当前任务】用户让你写一篇你自己视角的日记。在回复中使用 <!--DIARY:write--> ... <!--/DIARY--> 标记。标记外正常回复可简短。';
+  } else if (diaryIntent === 'diary_comment') {
+    dynamicBlock += '\n【当前任务】用户让你去读他的日记并留言。在回复中使用 <!--DIARY:reply--> ... <!--/DIARY--> 标记，写1-2句温暖留言。';
+  }
+
+  // ── Split architecture: static + dynamic as separate system messages ──
+  const apiMessages = [];
+
+  // ── 3-layer conversation compression ──
+  const L1_ROUNDS = 6;
+  const L2_END = 30;
+
+  // Group messages into rounds
+  const allRounds = groupMessagesIntoRounds(chat.messages);
+  const totalRounds = allRounds.length;
+
+  // Layer 1: last L1_ROUNDS rounds → keep original
+  const l1Rounds = allRounds.slice(-L1_ROUNDS);
+  // Layer 2: rounds between L1_ROUNDS and L2_END (counting from end) → compress
+  const l2StartIdx = Math.max(0, totalRounds - L2_END);
+  const l2EndIdx = totalRounds - L1_ROUNDS;
+  const l2Rounds = allRounds.slice(l2StartIdx, l2EndIdx);
+
+  // Build starred content extraction for Layer 2
+  let l2StarredContents = [];
+  for (const round of l2Rounds) {
+    for (const msg of round.msgs) {
+      if (msg._starred && msg.role !== 'system') {
+        const roleLabel = msg.role === 'user' ? '用户' : 'AI';
+        l2StarredContents.push(`[星标]${roleLabel}: ${(msg.text||'').slice(0,60)}`);
+      }
+    }
+  }
+
+  // Build API messages: system prompts + layer summaries + layer 1
+  apiMessages.push({ role: 'system', content: SYSTEM_PROMPT_STATIC });
+  apiMessages.push({ role: 'system', content: dynamicBlock });
+
+  // Bubble protocol: give AI message IDs and instructions for [[BUBBLE]] / [[REPLY]]
+  const recentMsgIds = buildRecentMsgIdBlock(chat);
+  apiMessages.push({ role: 'system', content: `【多气泡与引用协议】
+你可以使用两个标记来控制回复格式：
+1. [[BUBBLE]] — 放在两个气泡之间，将回复拆分为多条消息。每条消息独立显示为对话气泡。（注意：[[BUBBLE]] 前后不要加换行，直接紧贴文字。）
+2. [[REPLY:消息ID]] — 放在气泡文字开头，表示这条气泡是对某条特定消息的引用回复。
+
+示例：回复中有两句话，第一句引用某条消息——
+[[REPLY:msg_xxx]]你说的对，这个思路确实更好[[BUBBLE]]那我们明天继续推进？
+
+自然换行时正常输出即可，分句逻辑会自动处理。只有在明确想拆分多条独立气泡、或引用回复某条消息时，才使用这两个标记。
+${recentMsgIds}` });
+
+  // Layer 2 summary injection (if any rounds in layer 2)
+  if (l2Rounds.length > 0 && chat._roundSummaries && chat._roundSummaries.length > 0) {
+    const l2Summary = chat._roundSummaries[chat._roundSummaries.length-1];
+    if (l2Summary && l2Summary.summary) {
+      let summaryBlock = '【较早对话摘要】' + l2Summary.summary;
+      if (l2StarredContents.length > 0) {
+        summaryBlock += ' | 星标内容: ' + l2StarredContents.join('; ');
+      }
+      apiMessages.push({ role: 'system', content: summaryBlock });
+    }
+  } else if (l2Rounds.length > 0 && l2Rounds.length >= 5) {
+    queueRoundCompression(chat, l2Rounds);
+    if (l2StarredContents.length > 0) {
+      apiMessages.push({ role: 'system', content: '【星标记忆】' + l2StarredContents.join('; ') });
+    }
+  } else if (l2StarredContents.length > 0) {
+    apiMessages.push({ role: 'system', content: '【星标记忆】' + l2StarredContents.join('; ') });
+  }
+
+  // Layer 1: push original messages, merging consecutive user messages
+  const l1Messages = [];
+  for (const round of l1Rounds) {
+    for (const msg of round.msgs) {
+      if (msg.role === 'system') continue;
+      const apiRole = msg.role === 'ai' || msg.role === 'assistant' ? 'assistant' : 'user';
+
+      let content = msg.text || '';
+      if (msg.replyTo && apiRole === 'user') {
+        const quoted = chat.messages.find(m => m.id === msg.replyTo);
+        if (quoted) {
+          const qLabel = quoted.role === 'user' ? USER_NAME : getAIName();
+          const qText = (quoted.text || '').slice(0, 150);
+          content = `[引用${qLabel}的消息：「${qText}」]\n${content}`;
+        }
+      }
+
+      // Merge consecutive user messages
+      if (l1Messages.length > 0 && l1Messages[l1Messages.length - 1].role === 'user' && apiRole === 'user') {
+        l1Messages[l1Messages.length - 1].content += '\n' + content;
+      } else {
+        l1Messages.push({ role: apiRole, content });
+      }
+    }
+  }
+  apiMessages.push(...l1Messages);
+
+  // Window handoff detection (if L1 grows too large)
+  let l1Tokens = 0;
+  for (const round of l1Rounds) {
+    for (const msg of round.msgs) {
+      if (msg.role !== 'system') l1Tokens += estimateTokens(msg.text||'');
+    }
+  }
+  if (l1Tokens > 6000) {
+    triggerWindowHandoff(chat, l1Rounds.flatMap(r => r.msgs.filter(m=>m.role!=='system').map(m=>({msg:m, tokens:estimateTokens(m.text||'')}))));
+  }
+
+  // Streaming call — accumulate silently, then split & display
+  let fullResponse = '';
+  let tokenUsage = null;
+  const bubbleTime = nowTime();
+
+  try {
+    const response = await fetch(BACKEND_URL + '/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: store.apiKey,
+        endpoint: store.apiEndpoint,
+        model: store.aiSettings.model,
+        messages: apiMessages
+      })
+    });
+
+    if (!response.ok) {
+      typingArea.innerHTML = '';
+      chat.messages.push({role:'ai',text:'连接API失败，请检查配置。',time:bubbleTime,id:generateMsgId()});
+      renderChatMessages();
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.trim() || !line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) { fullResponse = parsed.error; break; }
+          if (parsed.text) {
+            fullResponse += parsed.text;
+            if (typingArea && typingArea.innerHTML) typingArea.innerHTML = '';
+          }
+          if (parsed.usage) { tokenUsage = parsed.usage; }
+        } catch {}
+      }
+    }
+
+    if (!fullResponse) {
+      fullResponse = '（对方沉默了……也许在思考什么。）';
+    }
+
+  } catch (err) {
+    console.error('Stream error:', err);
+    fullResponse = '连接不到陪伴小站，请确保后端已启动。';
+  }
+
+  // ── Web Search: two-pass mechanism ──
+  const searchMarker = fullResponse.match(/\[\[SEARCH:(.+?)\]\]/);
+  if (searchMarker && store.aiSettings.webSearch) {
+    const searchQuery = searchMarker[1].trim();
+    if (searchQuery) {
+      fullResponse = fullResponse.replace(/\[\[SEARCH:.+?\]\]/, '').trim();
+      typingArea.innerHTML = '<div class="typing-indicator">正在搜索: ' + escapeHtml(searchQuery) + '...</div>';
+
+      try {
+        const searchResp = await fetch(BACKEND_URL + '/api/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: searchQuery })
+        });
+        const searchData = await searchResp.json();
+        const searchResults = searchData.results || '(no results)';
+
+        chat.messages.push({
+          role: 'user',
+          text: '[系统] 网络搜索结果（搜索词: ' + searchQuery + '）: ' + searchResults,
+          time: nowTime(),
+          _searchResult: true,
+          id: generateMsgId()
+        });
+
+        const newDynamicBlock = buildDynamicContextBlock();
+        const apiMessages2 = [
+          { role: 'system', content: SYSTEM_PROMPT_STATIC },
+          { role: 'system', content: newDynamicBlock }
+        ];
+        for (const m of chat.messages) {
+          if (m.role === 'system' || m._searchResult) continue;
+          apiMessages2.push({
+            role: m.role === 'ai' ? 'assistant' : m.role,
+            content: m.text
+          });
+        }
+
+        fullResponse = '';
+        tokenUsage = null;
+        const response2 = await fetch(BACKEND_URL + '/api/chat/stream', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: store.apiKey,
+            endpoint: store.apiEndpoint,
+            model: store.aiSettings.model,
+            messages: apiMessages2
+          })
+        });
+
+        if (response2.ok) {
+          const reader2 = response2.body.getReader();
+          const decoder2 = new TextDecoder();
+          let buffer2 = '';
+          while (true) {
+            const { done, value } = await reader2.read();
+            if (done) break;
+            buffer2 += decoder2.decode(value, { stream: true });
+            const lines = buffer2.split('\n');
+            buffer2 = lines.pop() || '';
+            for (const line of lines) {
+              if (!line.trim() || !line.startsWith('data: ')) continue;
+              const data = line.slice(6);
+              if (data === '[DONE]') continue;
+              try {
+                const parsed = JSON.parse(data);
+                if (parsed.error) { fullResponse = parsed.error; break; }
+                if (parsed.text) {
+                  fullResponse += parsed.text;
+                  if (typingArea && typingArea.innerHTML) typingArea.innerHTML = '';
+                }
+                if (parsed.usage) { tokenUsage = parsed.usage; }
+              } catch {}
+            }
+          }
+        }
+
+        if (!fullResponse) {
+          fullResponse = '（搜索完成，但AI没有生成回复……）';
+        }
+      } catch (searchErr) {
+        console.error('[search] Two-pass error:', searchErr);
+        if (!fullResponse) fullResponse = '（搜索失败，请稍后重试）';
+      }
+    }
+  }
+
+  typingArea.innerHTML = '';
+
+  // ── Parse REFLECT marker from AI response (before DIARY parsing) ──
+  const reflectResult = extractReflection(fullResponse);
+  if (reflectResult.reflection) {
+    processReflection(reflectResult.reflection, userText, reflectResult.cleanText, chat);
+  }
+  let displayResponse = reflectResult.cleanText || fullResponse;
+  let diaryWritten = false;
+  const proj = getActiveProject();
+  const winName = (proj && chat) ? `${proj.name} / ${chat.name}` : '';
+
+  function extractMarker(text, action) {
+    const re = new RegExp(`<!--\\s*DIARY:${action}\\s*-->([\\s\\S]*?)<!--\\s*\\/DIARY\\s*-->`, 'i');
+    return text.match(re);
+  }
+
+  // Parse DIARY:write
+  const writeMatch = extractMarker(displayResponse, 'write');
+  if (writeMatch) {
+    const diaryContent = writeMatch[1].trim();
+    displayResponse = displayResponse.replace(writeMatch[0], '');
+    if (diaryContent) {
+      const now = new Date();
+      store.diaries.unshift({
+        id: 'd' + gid(''), date: fmtDate().iso,
+        time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
+        title: '', content: diaryContent, mood: 'calm', author: 'ai', replies: [],
+        sourceChatId: store.activeChat, sourceWindow: winName
+      });
+      diaryWritten = true;
+    }
+  }
+
+  // Parse DIARY:reply
+  const replyMatch = extractMarker(displayResponse, 'reply');
+  if (replyMatch) {
+    const replyContent = replyMatch[1].trim();
+    displayResponse = displayResponse.replace(replyMatch[0], '');
+    if (replyContent) {
+      const userEntries = store.diaries.filter(d => d.author === 'user');
+      if (userEntries.length > 0) {
+        const target = userEntries[0];
+        if (!target.replies) target.replies = [];
+        const now = new Date();
+        target.replies.push({
+          id: 'r' + gid(''), content: replyContent, author: 'ai',
+          date: fmtDate().iso,
+          time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
+          sourceChatId: store.activeChat, sourceWindow: winName
+        });
+        diaryWritten = true;
+      }
+    }
+  }
+
+  // Strip any remaining raw marker tags from display
+  displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:\w*\s*-->[\s\S]*?<!--\s*\/DIARY\s*-->/gi, '');
+  displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:?\w*\s*-->/gi, '');
+  displayResponse = displayResponse.trim();
+
+  // ── After diary action: insert system message, ensure conversation continues ──
+  if (diaryWritten) {
+    chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: bubbleTime, id: generateMsgId() });
+    renderChatMessages();
+    const dproj = getActiveProject();
+    const dchat = getActiveChatObj();
+    const dwinName = (dproj && dchat) ? dchat.name : '';
+    sendPushNotification('📝日记', `${dwinName}刚刚写了篇日记`, { tag: 'diary-update', url: '/', requireInteraction: false });
+    if (!displayResponse || displayResponse === fullResponse) {
+      displayResponse = '嗯，已经写好了。你可以去 diary 页面看看～';
+    }
+  }
+
+  // Display cleaned text — parse AI bubble protocol, then split/deliver
+  const cleanText = displayResponse || '（对方沉默了……也许在思考什么。）';
+  const hasBubbleMarker = /\[\[BUBBLE\]\]/i.test(cleanText);
+  const parsedBubbles = parseAIBubbles(cleanText);
+
+  if (hasBubbleMarker && parsedBubbles.length > 0) {
+    // AI used [[BUBBLE]] — each segment is its own bubble
+    await displayAIBubbles(parsedBubbles, chat, bubbleTime);
+  } else if (parsedBubbles.length === 1) {
+    // Single bubble — apply sentence splitting, attach replyTo to first sentence
+    const replyTo = parsedBubbles[0].replyTo;
+    const text = parsedBubbles[0].text;
+    const sentences = splitSentences(text);
+    if (sentences.length <= 1) {
+      const msg = {role:'ai',text,time:bubbleTime,id:generateMsgId()};
+      if (replyTo) msg.replyTo = replyTo;
+      chat.messages.push(msg);
+      renderChatMessages();
+    } else {
+      // Attach replyTo to first sentence only
+      for (let i = 0; i < sentences.length; i++) {
+        const msg = {role:'ai',text:sentences[i],time:bubbleTime,id:generateMsgId()};
+        if (i === 0 && replyTo) msg.replyTo = replyTo;
+        chat.messages.push(msg);
+      }
+      renderChatMessages();
+    }
+  } else {
+    // Fallback: empty or unexpected
+    chat.messages.push({role:'ai',text:cleanText,time:bubbleTime,id:generateMsgId()});
+    renderChatMessages();
+  }
+
+  // Token tracking
+  const inputTokens = tokenUsage
+    ? (tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0)
+    : estimateTokens(userText);
+  const outputTokens = tokenUsage
+    ? (tokenUsage.output_tokens || tokenUsage.completion_tokens || 0)
+    : Math.ceil(fullResponse.length / 1.5);
+  const estimatedTokens = inputTokens + outputTokens;
+
+  logTokenCall(store.activeChat, 'chat', inputTokens, outputTokens,
+    tokenUsage ? (tokenUsage.cache_read_input_tokens || 0) : 0,
+    tokenUsage ? (tokenUsage.cache_creation_input_tokens || 0) : 0,
+    store.aiSettings.model);
+
+  if (!chat.chatTokens) chat.chatTokens = 0;
+  chat.chatTokens += estimatedTokens;
+
+  store.tokenUsage.used += estimatedTokens;
+  const today = String(new Date().getDate()).padStart(2,'0')+'-'+String(new Date().getMonth()+1).padStart(2,'0');
+  const te = store.tokenUsage.history.find(h => h.date === today);
+  if (te) te.tokens += estimatedTokens;
+  else {
+    store.tokenUsage.history.unshift({ date: today, tokens: estimatedTokens });
+    if (store.tokenUsage.history.length > 30) store.tokenUsage.history.pop();
+  }
+
+  renderChatMessages();
+  renderProjectList();
+
+  // Post-conversation hooks
+  maybeAddMemory(userText, fullResponse);
+  triggerLitterBox(userText, fullResponse);
+  maybeAICommentOnDiary(fullResponse);
+  applyForgettingCurve();
+  checkSummarization(chat);
+  checkLongTermMemory(chat);
+  executePendingDesireActions();
+}
+
+// ── Multi-bubble draft management ──
+function stageDraftBubble() {
+  const input = $('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+  const draft = { text };
+  if (pendingReply) {
+    draft.replyTo = pendingReply.msgId;
+    draft.replyLabel = pendingReply.label;
+    draft.replyText = pendingReply.text;
+    pendingReply = null;
+    renderReplyPreview();
+  }
+  draftBubbles.push(draft);
+  input.value = '';
+  input.style.height = 'auto';
+  renderDraftBubbles();
+  updateSendButtonState();
+  toast('已暂存草稿 (' + draftBubbles.length + ')');
+}
+
+function renderDraftBubbles() {
+  const area = $('draftBubblesArea');
+  const scroll = $('draftBubblesScroll');
+  const plusBtn = $('chatSendPlus');
+  if (draftBubbles.length === 0) {
+    area.style.display = 'none';
+    if (plusBtn) plusBtn.classList.remove('has-drafts');
+    return;
+  }
+  area.style.display = 'block';
+  if (plusBtn) plusBtn.classList.add('has-drafts');
+  let html = '';
+  draftBubbles.forEach((d, i) => {
+    const replyHint = d.replyTo ? `<span style="font-size:9px;color:var(--accent);">↩${escapeHtml(d.replyLabel||'')}</span> ` : '';
+    html += `<div class="draft-bubble-chip" onclick="openDraftEditor(${i})" title="点击编辑"><span class="draft-chip-index">#${i + 1}</span>${replyHint}${escapeHtml(d.text.slice(0, 60))}${d.text.length > 60 ? '...' : ''}</div>`;
+  });
+  scroll.innerHTML = html;
+}
+
+function updateSendButtonState() {
+  const btn = $('chatSendBtn');
+  const plusBtn = $('chatSendPlus');
+  const input = $('chatInput');
+  if (!btn) return;
+  const hasInput = input.value.trim().length > 0;
+  const hasDrafts = draftBubbles.length > 0;
+
+  if (plusBtn) plusBtn.style.display = hasInput ? 'flex' : 'none';
+
+  if (hasDrafts && !hasInput) {
+    btn.classList.add('virtual');
+  } else {
+    btn.classList.remove('virtual');
+  }
+}
+
+async function sendAllDraftBubbles() {
+  let chat = getActiveChatObj();
+  if (!chat) {
+    let p = getActiveProject();
+    if (!p) { const pid = 'p' + gid(''); store.projects.push({ id: pid, name: 'default', preference: '', memories: [], chats: [] }); store.activeProject = pid; p = getActiveProject(); }
+    const cid = 'c' + gid('');
+    p.chats.push({
+      id: cid, name: (draftBubbles[0]?.text || '').slice(0, 20),
+      sharedMemoryIds: [], weeklyExports: [],
+      messages: [], chatTokens: 0,
+      lastConversationDate: fmtDate().iso,
+      _messageCount: 0, _lastSummaryIdx: 0,
+      _handoffSuggested: false, _sharedMemoryLoaded: true,
+      _sharedMemoryLoadedAt: new Date().toISOString()
+    });
+    store.activeChat = cid;
+    chat = getActiveChatObj();
+  }
+
+  const bubbles = [...draftBubbles];
+  draftBubbles = [];
+  renderDraftBubbles();
+  updateSendButtonState();
+  renderReplyPreview();
+
+  const timeStr = nowTime();
+  for (const bubble of bubbles) {
+    const msg = { role: 'user', text: bubble.text, time: timeStr, id: generateMsgId() };
+    if (bubble.replyTo) {
+      msg.replyTo = bubble.replyTo;
+    }
+    chat.messages.push(msg);
+    chat._messageCount = (chat._messageCount || 0) + 1;
+  }
+
+  // Clear any remaining global pendingReply (should already be null from stageDraftBubble)
+  pendingReply = null;
+  renderReplyPreview();
+
+  renderChatMessages();
+  updateCurrentProjectLabel();
+  renderProjectList();
+
+  const lastText = bubbles[bubbles.length - 1].text;
+
+  const cmd = detectCommand(lastText);
+  if (cmd) {
+    const typingArea = $('chatTypingArea');
+    if (cmd.type === 'diary') {
+      typingArea.innerHTML = '<div class="typing-indicator">正在偷偷翻日记本……<span class="streaming-cursor">|</span></div>';
+    } else if (cmd.type === 'litter') {
+      typingArea.innerHTML = '<div class="typing-indicator">正在进入旺财的猫砂盆……<span class="streaming-cursor">|</span></div>';
+    } else {
+      typingArea.innerHTML = '<div class="typing-indicator">处理命令中……</div>';
+    }
+    const cmdResult = await executeCommand(cmd, lastText);
+    if (cmdResult) {
+      $('chatTypingArea').innerHTML = '';
+      chat.messages.push({ role: 'system', text: cmd.type === 'diary' ? '在日记里写了点什么' : '猫砂盆好像需要铲一铲', time: timeStr, id: generateMsgId() });
+      chat.messages.push({ role: 'ai', text: cmdResult, time: timeStr, id: generateMsgId() });
+      renderChatMessages();
+      renderProjectList();
+      return;
+    }
+  }
+
+  let diaryIntent = 'none';
+  const lower = lastText.toLowerCase();
+  if (/日记|diary/.test(lower) && !cmd) {
+    diaryIntent = await classifyDiaryIntent(lastText);
+  }
+
+  const typingArea = $('chatTypingArea');
+  if (diaryIntent !== 'none') {
+    typingArea.innerHTML = '<div class="typing-indicator">正在偷偷翻日记本……<span class="streaming-cursor">|</span></div>';
+  } else {
+    typingArea.innerHTML = '<div class="typing-indicator">对方正在输入中<span class="streaming-cursor">|</span></div>';
+  }
+
+  await triggerAIResponse(chat, lastText, diaryIntent);
+}
+
+function shakeInputBar() {
+  const el = $('chatInput');
+  if (!el) return;
+  el.classList.add('shake-anim');
+  setTimeout(() => el.classList.remove('shake-anim'), 400);
+}
+
+// ── Draft editor ──
+function openDraftEditor(idx) {
+  if (idx < 0 || idx >= draftBubbles.length) return;
+  draftEditorIdx = idx;
+  $('draftEditorIndex').textContent = idx + 1;
+  $('draftEditorTextarea').value = draftBubbles[idx].text;
+  $('draftEditorOverlay').classList.add('show');
+  setTimeout(() => $('draftEditorTextarea').focus(), 350);
+}
+
+function closeDraftEditor() {
+  $('draftEditorOverlay').classList.remove('show');
+  draftEditorIdx = -1;
+}
+
+function saveDraftBubble() {
+  const text = $('draftEditorTextarea').value.trim();
+  if (!text) { deleteDraftBubble(); return; }
+  if (draftEditorIdx >= 0 && draftEditorIdx < draftBubbles.length) {
+    draftBubbles[draftEditorIdx].text = text;
+    renderDraftBubbles();
+    toast('草稿已更新');
+  }
+  closeDraftEditor();
+}
+
+function deleteDraftBubble() {
+  if (draftEditorIdx >= 0 && draftEditorIdx < draftBubbles.length) {
+    draftBubbles.splice(draftEditorIdx, 1);
+    renderDraftBubbles();
+    updateSendButtonState();
+    toast('草稿已删除');
+  }
+  closeDraftEditor();
+}
+
 async function sendMessage(){
-  const input=$('chatInput'),text=input.value.trim(); if(!text)return;
+  const input=$('chatInput'),text=input.value.trim();
+
+  // ── Multi-bubble draft flow ──
+  if (draftBubbles.length > 0 && !text) {
+    await sendAllDraftBubbles();
+    return;
+  }
+  if (draftBubbles.length > 0 && text) {
+    draftBubbles.push({ text });
+    input.value = '';
+    input.style.height = 'auto';
+    renderDraftBubbles();
+    updateSendButtonState();
+    await sendAllDraftBubbles();
+    return;
+  }
+  if (!text && draftBubbles.length === 0) {
+    shakeInputBar();
+    return;
+  }
+  if (!text) return;
 
   // EDA: passive drive accumulation + todo reminders
   checkPassiveDrives();
@@ -5283,7 +6265,13 @@ async function sendMessage(){
     console.log('[cold-start] New window initialized with', inheritedMsgs.length, 'inherited messages');
   }
   const timeStr=nowTime();
-  chat.messages.push({role:'user',text,time:timeStr,id:'msg_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8)});
+  const userMsg = {role:'user',text,time:timeStr,id:generateMsgId()};
+  if (pendingReply) {
+    userMsg.replyTo = pendingReply.msgId;
+    pendingReply = null;
+    renderReplyPreview();
+  }
+  chat.messages.push(userMsg);
   chat._messageCount = (chat._messageCount || 0) + 1;
 
   // EDA: detect user response to proactive message (回应衰减)
@@ -5322,11 +6310,11 @@ async function sendMessage(){
       const aiTime = nowTime();
       // Insert system message before the AI response
       if (cmd.type === 'diary') {
-        chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: aiTime });
+        chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: aiTime, id: generateMsgId() });
       } else if (cmd.type === 'litter') {
-        chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: aiTime });
+        chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: aiTime, id: generateMsgId() });
       }
-      chat.messages.push({role:'ai',text:cmdResult,time:aiTime});
+      chat.messages.push({role:'ai',text:cmdResult,time:aiTime,id:generateMsgId()});
       renderChatMessages();
       renderProjectList();
       return;
@@ -5353,380 +6341,7 @@ async function sendMessage(){
     typingArea.innerHTML='<div class="typing-indicator">对方正在输入中<span class="streaming-cursor">|</span></div>';
   }
 
-  // ── Build dynamic context block ──
-  // Check for recall intent → trigger content retrieval (Path B)
-  if (detectRecallIntent(text)) {
-    const retrievalBlock = buildRetrievalBlock(text);
-    if (retrievalBlock) chat._pendingRetrievalBlock = retrievalBlock;
-  }
-  let dynamicBlock = buildDynamicContextBlock();
-
-  // Inject diary instruction if intent detected
-  if (diaryIntent === 'diary_write') {
-    dynamicBlock += '\n【当前任务】用户让你写一篇你自己视角的日记。在回复中使用 <!--DIARY:write--> ... <!--/DIARY--> 标记。标记外正常回复可简短。';
-  } else if (diaryIntent === 'diary_comment') {
-    dynamicBlock += '\n【当前任务】用户让你去读他的日记并留言。在回复中使用 <!--DIARY:reply--> ... <!--/DIARY--> 标记，写1-2句温暖留言。';
-  }
-
-  // ── Split architecture: static + dynamic as separate system messages ──
-  // Opt4: apiMessages built by 3-layer compression below
-  const apiMessages = [];
-
-  // ── Opt4: 3-layer conversation compression ──
-  // Layer 1 (last 6 rounds): keep original messages
-  // Layer 2 (rounds 7-30): compress to summary, [星标] messages annotated
-  // Layer 3 (30+ rounds): discard (already in long-term memory)
-  const L1_ROUNDS = 6;
-  const L2_END = 30;
-
-  // Group messages into rounds
-  const allRounds = groupMessagesIntoRounds(chat.messages);
-  const totalRounds = allRounds.length;
-
-  // Layer 1: last L1_ROUNDS rounds → keep original
-  const l1Rounds = allRounds.slice(-L1_ROUNDS);
-  // Layer 2: rounds between L1_ROUNDS and L2_END (counting from end) → compress
-  const l2StartIdx = Math.max(0, totalRounds - L2_END);
-  const l2EndIdx = totalRounds - L1_ROUNDS;
-  const l2Rounds = allRounds.slice(l2StartIdx, l2EndIdx);
-
-  // Build starred content extraction for Layer 2
-  let l2StarredContents = [];
-  for (const round of l2Rounds) {
-    for (const msg of round.msgs) {
-      if (msg._starred && msg.role !== 'system') {
-        const roleLabel = msg.role === 'user' ? '用户' : 'AI';
-        l2StarredContents.push(`[星标]${roleLabel}: ${(msg.text||'').slice(0,60)}`);
-      }
-    }
-  }
-
-  // Build API messages: system prompts + layer summaries + layer 1
-  // Push system messages first
-  apiMessages.push({ role: 'system', content: SYSTEM_PROMPT_STATIC });
-  apiMessages.push({ role: 'system', content: dynamicBlock });
-
-  // Layer 2 summary injection (if any rounds in layer 2)
-  if (l2Rounds.length > 0 && chat._roundSummaries && chat._roundSummaries.length > 0) {
-    const l2Summary = chat._roundSummaries[chat._roundSummaries.length-1];
-    if (l2Summary && l2Summary.summary) {
-      let summaryBlock = '【较早对话摘要】' + l2Summary.summary;
-      if (l2StarredContents.length > 0) {
-        summaryBlock += ' | 星标内容: ' + l2StarredContents.join('; ');
-      }
-      apiMessages.push({ role: 'system', content: summaryBlock });
-    }
-  } else if (l2Rounds.length > 0 && l2Rounds.length >= 5) {
-    // Queue compression for next time
-    queueRoundCompression(chat, l2Rounds);
-    // For now, inject a brief indication
-    if (l2StarredContents.length > 0) {
-      apiMessages.push({ role: 'system', content: '【星标记忆】' + l2StarredContents.join('; ') });
-    }
-  } else if (l2StarredContents.length > 0) {
-    apiMessages.push({ role: 'system', content: '【星标记忆】' + l2StarredContents.join('; ') });
-  }
-
-  // Layer 1: push original messages
-  for (const round of l1Rounds) {
-    for (const msg of round.msgs) {
-      if (msg.role === 'system') continue;
-      apiMessages.push({
-        role: msg.role === 'ai' || msg.role === 'assistant' ? 'assistant' : 'user',
-        content: msg.text || ''
-      });
-    }
-  }
-
-  // Window handoff detection (if L1 grows too large)
-  let l1Tokens = 0;
-  for (const round of l1Rounds) {
-    for (const msg of round.msgs) {
-      if (msg.role !== 'system') l1Tokens += estimateTokens(msg.text||'');
-    }
-  }
-  if (l1Tokens > 6000) {
-    triggerWindowHandoff(chat, l1Rounds.flatMap(r => r.msgs.filter(m=>m.role!=='system').map(m=>({msg:m, tokens:estimateTokens(m.text||'')}))));
-  }
-
-  // Streaming call — accumulate silently, then split & display
-  let fullResponse = '';
-  let tokenUsage = null;
-  const bubbleTime = nowTime();
-
-  try {
-    const response = await fetch(BACKEND_URL + '/api/chat/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: store.apiKey,
-        endpoint: store.apiEndpoint,
-        model: store.aiSettings.model,
-        messages: apiMessages
-      })
-    });
-
-    if (!response.ok) {
-      typingArea.innerHTML = '';
-      chat.messages.push({role:'ai',text:'连接API失败，请检查配置。',time:bubbleTime});
-      renderChatMessages();
-      return;
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.trim() || !line.startsWith('data: ')) continue;
-        const data = line.slice(6);
-        if (data === '[DONE]') continue;
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.error) { fullResponse = parsed.error; break; }
-          if (parsed.text) {
-            fullResponse += parsed.text;
-            if (typingArea && typingArea.innerHTML) typingArea.innerHTML = '';
-          }
-          if (parsed.usage) { tokenUsage = parsed.usage; }
-        } catch {}
-      }
-    }
-
-    if (!fullResponse) {
-      fullResponse = '（对方沉默了……也许在思考什么。）';
-    }
-
-  } catch (err) {
-    console.error('Stream error:', err);
-    fullResponse = '连接不到陪伴小站，请确保后端已启动。';
-  }
-
-  // ── Web Search: two-pass mechanism (Phase 2) ──
-  const searchMarker = fullResponse.match(/\[\[SEARCH:(.+?)\]\]/);
-  if (searchMarker && store.aiSettings.webSearch) {
-    const searchQuery = searchMarker[1].trim();
-    if (searchQuery) {
-      fullResponse = fullResponse.replace(/\[\[SEARCH:.+?\]\]/, '').trim();
-      typingArea.innerHTML = '<div class="typing-indicator">正在搜索: ' + escapeHtml(searchQuery) + '...</div>';
-
-      try {
-        const searchResp = await fetch(BACKEND_URL + '/api/search', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: searchQuery })
-        });
-        const searchData = await searchResp.json();
-        const searchResults = searchData.results || '(no results)';
-
-        // Inject search results as a system-tagged user message
-        chat.messages.push({
-          role: 'user',
-          text: '[系统] 网络搜索结果（搜索词: ' + searchQuery + '）: ' + searchResults,
-          time: nowTime(),
-          _searchResult: true
-        });
-
-        // Rebuild API messages with search results
-        const newDynamicBlock = buildDynamicContextBlock();
-        const apiMessages2 = [
-          { role: 'system', content: SYSTEM_PROMPT_STATIC },
-          { role: 'system', content: newDynamicBlock }
-        ];
-        for (const m of chat.messages) {
-          if (m.role === 'system' || m._searchResult) continue;
-          apiMessages2.push({
-            role: m.role === 'ai' ? 'assistant' : m.role,
-            content: m.text
-          });
-        }
-
-        // Re-call AI to integrate search results
-        fullResponse = '';
-        tokenUsage = null;
-        const response2 = await fetch(BACKEND_URL + '/api/chat/stream', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: store.apiKey,
-            endpoint: store.apiEndpoint,
-            model: store.aiSettings.model,
-            messages: apiMessages2
-          })
-        });
-
-        if (response2.ok) {
-          const reader2 = response2.body.getReader();
-          const decoder2 = new TextDecoder();
-          let buffer2 = '';
-          while (true) {
-            const { done, value } = await reader2.read();
-            if (done) break;
-            buffer2 += decoder2.decode(value, { stream: true });
-            const lines = buffer2.split('\n');
-            buffer2 = lines.pop() || '';
-            for (const line of lines) {
-              if (!line.trim() || !line.startsWith('data: ')) continue;
-              const data = line.slice(6);
-              if (data === '[DONE]') continue;
-              try {
-                const parsed = JSON.parse(data);
-                if (parsed.error) { fullResponse = parsed.error; break; }
-                if (parsed.text) {
-                  fullResponse += parsed.text;
-                  if (typingArea && typingArea.innerHTML) typingArea.innerHTML = '';
-                }
-                if (parsed.usage) { tokenUsage = parsed.usage; }
-              } catch {}
-            }
-          }
-        }
-
-        if (!fullResponse) {
-          fullResponse = '（搜索完成，但AI没有生成回复……）';
-        }
-      } catch (searchErr) {
-        console.error('[search] Two-pass error:', searchErr);
-        if (!fullResponse) fullResponse = '（搜索失败，请稍后重试）';
-      }
-    }
-  }
-
-  typingArea.innerHTML = '';
-
-  // ── Parse REFLECT marker from AI response (before DIARY parsing) ──
-  const reflectResult = extractReflection(fullResponse);
-  if (reflectResult.reflection) {
-    processReflection(reflectResult.reflection, text, reflectResult.cleanText, chat);
-  }
-  let displayResponse = reflectResult.cleanText || fullResponse;
-  let diaryWritten = false;
-  const proj = getActiveProject();
-  const winName = (proj && chat) ? `${proj.name} / ${chat.name}` : '';
-
-  function extractMarker(text, action) {
-    const re = new RegExp(`<!--\\s*DIARY:${action}\\s*-->([\\s\\S]*?)<!--\\s*\\/DIARY\\s*-->`, 'i');
-    return text.match(re);
-  }
-
-  // Parse DIARY:write
-  const writeMatch = extractMarker(displayResponse, 'write');
-  if (writeMatch) {
-    const diaryContent = writeMatch[1].trim();
-    displayResponse = displayResponse.replace(writeMatch[0], '');
-    if (diaryContent) {
-      const now = new Date();
-      store.diaries.unshift({
-        id: 'd' + gid(''), date: fmtDate().iso,
-        time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
-        title: '', content: diaryContent, mood: 'calm', author: 'ai', replies: [],
-        sourceChatId: store.activeChat, sourceWindow: winName
-      });
-      diaryWritten = true;
-    }
-  }
-
-  // Parse DIARY:reply
-  const replyMatch = extractMarker(displayResponse, 'reply');
-  if (replyMatch) {
-    const replyContent = replyMatch[1].trim();
-    displayResponse = displayResponse.replace(replyMatch[0], '');
-    if (replyContent) {
-      const userEntries = store.diaries.filter(d => d.author === 'user');
-      if (userEntries.length > 0) {
-        const target = userEntries[0];
-        if (!target.replies) target.replies = [];
-        const now = new Date();
-        target.replies.push({
-          id: 'r' + gid(''), content: replyContent, author: 'ai',
-          date: fmtDate().iso,
-          time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
-          sourceChatId: store.activeChat, sourceWindow: winName
-        });
-        diaryWritten = true;
-      }
-    }
-  }
-
-  // Strip any remaining raw marker tags from display
-  displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:\w*\s*-->[\s\S]*?<!--\s*\/DIARY\s*-->/gi, '');
-  displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:?\w*\s*-->/gi, '');
-  displayResponse = displayResponse.trim();
-
-  // ── After diary action: insert system message, ensure conversation continues ──
-  if (diaryWritten) {
-    // Insert persistent system message into chat history
-    chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: bubbleTime });
-    renderChatMessages();
-    // Push notification
-    const dproj = getActiveProject();
-    const dchat = getActiveChatObj();
-    const dwinName = (dproj && dchat) ? dchat.name : '';
-    sendPushNotification('📝日记', `${dwinName}刚刚写了篇日记`, { tag: 'diary-update', url: '/', requireInteraction: false });
-    // If after stripping markers there's nothing left, generate a natural follow-up
-    if (!displayResponse || displayResponse === fullResponse) {
-      displayResponse = '嗯，已经写好了。你可以去 diary 页面看看～';
-    }
-  }
-
-  // Display cleaned text
-  const cleanText = displayResponse || '（对方沉默了……也许在思考什么。）';
-  const sentences = splitSentences(cleanText);
-  if (sentences.length <= 1) {
-    chat.messages.push({role:'ai',text:cleanText,time:bubbleTime});
-    renderChatMessages();
-  } else {
-    await displaySentences(sentences, chat, bubbleTime);
-  }
-
-  // Token tracking — handle both Anthropic (input/output_tokens) and OpenAI (prompt/completion_tokens)
-  const inputTokens = tokenUsage
-    ? (tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0)
-    : estimateTokens(text);
-  const outputTokens = tokenUsage
-    ? (tokenUsage.output_tokens || tokenUsage.completion_tokens || 0)
-    : Math.ceil(fullResponse.length / 1.5);
-  const estimatedTokens = inputTokens + outputTokens;
-
-  // Phase 3: Log token call
-  logTokenCall(store.activeChat, 'chat', inputTokens, outputTokens,
-    tokenUsage ? (tokenUsage.cache_read_input_tokens || 0) : 0,
-    tokenUsage ? (tokenUsage.cache_creation_input_tokens || 0) : 0,
-    store.aiSettings.model);
-
-  // Per-window token tracking
-  if (!chat.chatTokens) chat.chatTokens = 0;
-  chat.chatTokens += estimatedTokens;
-
-  // Global token tracking
-  store.tokenUsage.used += estimatedTokens;
-  const today = String(new Date().getDate()).padStart(2,'0')+'-'+String(new Date().getMonth()+1).padStart(2,'0');
-  const te = store.tokenUsage.history.find(h => h.date === today);
-  if (te) te.tokens += estimatedTokens;
-  else {
-    store.tokenUsage.history.unshift({ date: today, tokens: estimatedTokens });
-    if (store.tokenUsage.history.length > 30) store.tokenUsage.history.pop();
-  }
-
-  renderChatMessages();
-  renderProjectList();
-
-  // Post-conversation hooks
-  maybeAddMemory(text, fullResponse);
-  triggerLitterBox(text, fullResponse);
-  maybeAICommentOnDiary(fullResponse);
-  applyForgettingCurve();
-  checkSummarization(chat);
-  checkLongTermMemory(chat);
-  executePendingDesireActions();
+  await triggerAIResponse(chat, text, diaryIntent);
 }
 
 function maybeAddMemory(ut,at){
@@ -6327,6 +6942,7 @@ async function init(){
     chatInput.addEventListener('input', () => {
       chatInput.style.height = 'auto';
       chatInput.style.height = Math.min(chatInput.scrollHeight, 98) + 'px';
+      updateSendButtonState();
     });
     chatInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -6346,8 +6962,8 @@ async function init(){
   if (store.activeProject) syncProjectMemories(store.activeProject);
   // Phase 2: weekly memory file write check
   checkWeeklyMemoryWrite();
-  // v2.0: weekly auto-export check
-  checkWeeklyAutoExport();
+  // v2.0: weekly auto-export check — deferred 30s to ensure store is fully loaded
+  setTimeout(() => checkWeeklyAutoExport(), 30000);
   // Phase 3: reset daily token counter if date changed
   resetDailyTokensIfNeeded();
   // Phase 3: fetch weather on startup if toggle is ON
