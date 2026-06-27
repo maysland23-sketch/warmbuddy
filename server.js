@@ -2,6 +2,13 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const webpush = require('web-push');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+
+// Proxy for outbound API calls (set HTTPS_PROXY in .env, e.g. http://127.0.0.1:7897)
+const OUTBOUND_PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
+if (OUTBOUND_PROXY) {
+  console.log('[proxy] Outbound proxy:', OUTBOUND_PROXY);
+}
 
 const app = express();
 app.use(cors());
@@ -204,6 +211,88 @@ function resolveModel(model, userEndpoint) {
 // ==================== API HELPERS ====================
 
 /**
+ * Safe fetch wrapper — uses native https module for openrouter.ai domains
+ * to work around a Node.js undici bug where the Authorization header is
+ * silently dropped for certain hosts (HTTP/2 ALPN negotiation issue).
+ * All other domains use the standard global fetch().
+ *
+ * @param {string} url - Full URL to fetch
+ * @param {object} opts - { method, headers, body?, stream? }
+ *   stream: if true, returns a response with body.getReader() for SSE streaming
+ * @returns {Promise<{ok:boolean, status:number, text:()=>Promise<string>, json:()=>Promise<any>, body?:{getReader:fn}}>}
+ */
+async function safeFetch(url, opts = {}) {
+  if (!url.toLowerCase().includes('openrouter')) {
+    return fetch(url, opts);
+  }
+
+  // Native https for OpenRouter — undici drops Authorization header
+  const https = require('https');
+  const u = new URL(url);
+  const { method = 'GET', headers = {}, body, stream } = opts;
+
+  console.log(`[safe-fetch] Native HTTPS ${method} ${u.hostname}${u.pathname} stream=${!!stream}`);
+
+  return new Promise((resolve, reject) => {
+    const reqOpts = {
+      hostname: u.hostname,
+      path: u.pathname + u.search,
+      method,
+      headers: { ...headers, 'User-Agent': 'WarmBuddy/1.0' }
+    };
+    // Route through proxy if configured
+    if (OUTBOUND_PROXY) {
+      reqOpts.agent = new HttpsProxyAgent(OUTBOUND_PROXY);
+    }
+    const req = https.request(reqOpts, (resp) => {
+      const respHeaders = {};
+      for (const [k, v] of Object.entries(resp.headers)) {
+        respHeaders[k] = Array.isArray(v) ? v.join(', ') : v;
+      }
+
+      if (stream) {
+        // Streaming mode: build a ReadableStream from the native response
+        const rs = new ReadableStream({
+          start(controller) {
+            resp.on('data', chunk => controller.enqueue(chunk));
+            resp.on('end', () => controller.close());
+            resp.on('error', err => controller.error(err));
+          },
+          cancel() { resp.destroy(); }
+        });
+        resolve({
+          ok: resp.statusCode >= 200 && resp.statusCode < 300,
+          status: resp.statusCode,
+          headers: new Map(Object.entries(respHeaders)),
+          body: rs  // has getReader() natively
+        });
+      } else {
+        // Non-streaming: buffer entire body
+        const chunks = [];
+        resp.on('data', chunk => chunks.push(chunk));
+        resp.on('end', () => {
+          const rawBody = Buffer.concat(chunks).toString('utf-8');
+          resolve({
+            ok: resp.statusCode >= 200 && resp.statusCode < 300,
+            status: resp.statusCode,
+            headers: new Map(Object.entries(respHeaders)),
+            text: () => Promise.resolve(rawBody),
+            json: () => Promise.resolve(JSON.parse(rawBody))
+          });
+        });
+      }
+    });
+
+    req.on('error', (err) => reject(err));
+
+    if (body) {
+      req.write(body);
+    }
+    req.end();
+  });
+}
+
+/**
  * Detect API format from endpoint URL.
  * Uses PATH structure first (most reliable), then domain fallback.
  */
@@ -228,16 +317,28 @@ function detectProvider(endpoint) {
  */
 function getAuthHeaders(provider, endpoint, apiKey) {
   const host = (endpoint || '').toLowerCase();
+  const key = (apiKey || '').trim();
+
   // DeepSeek-hosted APIs always use Bearer auth
   if (host.includes('deepseek')) {
-    return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+    return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` };
   }
   // Standard Anthropic auth
   if (provider === 'anthropic') {
-    return { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
+    return { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' };
   }
-  // Standard OpenAI-compatible auth
-  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+  // OpenRouter uses Bearer auth + recommended headers
+  if (host.includes('openrouter') || provider === 'openrouter') {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${key}`,
+      'HTTP-Referer': 'https://warmbuddy.vercel.app',
+      'X-Title': 'WarmBuddy'
+    };
+    return headers;
+  }
+  // Standard OpenAI-compatible auth (GLM, OpenAI, etc.)
+  return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` };
 }
 
 /**
@@ -365,7 +466,8 @@ function extractResponseContent(provider, data) {
  * Tests connectivity to the LLM API and returns available models
  */
 app.post('/api/test-connection', async (req, res) => {
-  const { apiKey, endpoint, model: preferredModel } = req.body;
+  const b = req.body || {};
+  const { apiKey, endpoint, model: preferredModel } = b;
   if (!apiKey) return res.status(400).json({ error: 'Missing API key' });
 
   // Resolve model to determine format + endpoint for the test call
@@ -386,8 +488,45 @@ app.post('/api/test-connection', async (req, res) => {
     testBody.max_tokens = 10;
 
     const headers = getAuthHeaders(resolved.provider, resolved.endpoint, apiKey);
+    // Debug: log headers (mask API key)
+    const debugHeaders = {};
+    for (const [k, v] of Object.entries(headers)) {
+      debugHeaders[k] = (k === 'Authorization' || k === 'x-api-key')
+        ? v.slice(0, 15) + '...[masked]'
+        : v;
+    }
+    console.log(`[test-conn] request headers:`, JSON.stringify(debugHeaders));
+    console.log(`[test-conn] request body model:`, testBody.model);
 
-    const response = await fetch(fetchUrl, {
+    // === OpenRouter: pre-check auth with /api/v1/auth/key ===
+    if (fetchUrl.includes('openrouter') || resolved.provider === 'openrouter') {
+      const key = (apiKey || '').trim();
+      console.log(`[test-conn] OpenRouter auth pre-check (safeFetch)`);
+      try {
+        const authResp = await safeFetch('https://openrouter.ai/api/v1/auth/key', {
+          headers: { 'Authorization': `Bearer ${key}` }
+        });
+        const authText = await authResp.text();
+        console.log(`[test-conn] Auth check status: ${authResp.status}`);
+        if (!authResp.ok) {
+          let authErr = authText;
+          try { const ej = JSON.parse(authText); authErr = ej.error?.message || ej.error?.code || authText; } catch {}
+          return res.json({
+            success: false, provider: resolved.provider, format,
+            message: `OpenRouter auth failed (${authResp.status}): ${authErr}`
+          });
+        }
+        console.log(`[test-conn] OpenRouter auth OK ✓`);
+      } catch (authErr) {
+        console.error(`[test-conn] Auth check error:`, authErr.message);
+        return res.json({
+          success: false, provider: resolved.provider, format,
+          message: `OpenRouter auth check error: ${authErr.message}`
+        });
+      }
+    }
+
+    const response = await safeFetch(fetchUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify(testBody)
@@ -397,6 +536,10 @@ app.post('/api/test-connection', async (req, res) => {
       const errText = await response.text();
       let errMsg = errText;
       try { const ej = JSON.parse(errText); errMsg = ej.error?.message || ej.error?.code || errText; } catch {}
+      // Detailed debug for auth failures
+      console.error(`[test-conn] UPSTREAM ERROR: status=${response.status}`);
+      console.error(`[test-conn] Raw body (first 500 chars):`, errText.slice(0, 500));
+      console.error(`[test-conn] Resolved: provider=${resolved.provider} format=${format} fetchUrl=${fetchUrl}`);
       return res.json({
         success: false,
         provider: resolved.provider,
@@ -455,6 +598,8 @@ async function fetchAvailableModels(provider, endpoint, apiKey) {
     modelsUrl = 'https://api.deepseek.com/v1/models';
   } else if (host.includes('openai')) {
     modelsUrl = 'https://api.openai.com/v1/models';
+  } else if (host.includes('openrouter')) {
+    modelsUrl = 'https://openrouter.ai/api/v1/models';
   } else if (host.includes('anthropic') || host.includes('claude')) {
     modelsUrl = 'https://api.anthropic.com/v1/models?limit=50';
   } else if (provider === 'anthropic') {
@@ -469,7 +614,7 @@ async function fetchAvailableModels(provider, endpoint, apiKey) {
 
   const headers = getAuthHeaders(provider, endpoint, apiKey);
 
-  const resp = await fetch(modelsUrl, { headers });
+  const resp = await safeFetch(modelsUrl, { headers });
   if (!resp.ok) throw new Error(`Models fetch failed: ${resp.status}`);
 
   const data = await resp.json();
@@ -531,13 +676,16 @@ function getDefaultModels(format, provider) {
  * Fetch available models from the provider
  */
 app.post('/api/models', async (req, res) => {
-  const { apiKey, endpoint } = req.body;
+  const b = req.body || {};
+  const { apiKey, endpoint } = b;
   if (!apiKey) return res.status(400).json({ error: 'Missing API key' });
 
   const format = detectProvider(endpoint);
   const host = (endpoint || '').toLowerCase();
   let provider = format;
   if (host.includes('deepseek')) provider = 'deepseek';
+  else if (host.includes('openrouter')) provider = 'openrouter';
+  else if (host.includes('bigmodel')) provider = 'glm';
   else if (host.includes('anthropic')) provider = 'anthropic';
   else if (host.includes('openai')) provider = 'openai';
 
@@ -614,39 +762,41 @@ app.get('/api/presets', (req, res) => {
  * Response: SSE stream
  */
 app.post('/api/chat/stream', async (req, res) => {
-  const { apiKey, endpoint, model, messages } = req.body;
-
-  if (!apiKey) return res.status(400).json({ error: 'Missing API key' });
-  if (!messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error: 'Missing messages' });
-  }
-
-  // Resolve model → provider + format + endpoint
-  const resolved = resolveModel(model, endpoint);
-  const format = resolved.format;
-  const fetchUrl = resolved.endpoint;
-
-  console.log(`[chat/stream] model=${model} format=${format} provider=${resolved.provider} endpoint=${fetchUrl}`);
-
-  // Set up SSE headers (Express 5 compatible way)
-  res.status(200);
-  res.set({
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no'
-  });
-  res.flushHeaders();
-
-  const headers = getAuthHeaders(resolved.provider, resolved.endpoint, apiKey);
-
-  const body = buildRequestBody(format, model, messages, true);
-
   try {
-    const response = await fetch(fetchUrl, {
+    // Null-safety: req.body may be undefined if body-parser skipped
+    const body = req.body || {};
+    const { apiKey, endpoint, model, messages } = body;
+
+    if (!apiKey) return res.status(400).json({ error: 'Missing API key' });
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Missing messages' });
+    }
+
+    // Resolve model → provider + format + endpoint
+    const resolved = resolveModel(model, endpoint);
+    const format = resolved.format;
+    const fetchUrl = resolved.endpoint;
+
+    console.log(`[chat/stream] model=${model} format=${format} provider=${resolved.provider} endpoint=${fetchUrl}`);
+
+    // Set up SSE headers (Express 5 compatible way)
+    res.status(200);
+    res.set({
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+    res.flushHeaders();
+
+    const headers = getAuthHeaders(resolved.provider, resolved.endpoint, apiKey);
+    const requestBody = buildRequestBody(format, model, messages, true);
+
+    const response = await safeFetch(fetchUrl, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body)
+      body: JSON.stringify(requestBody),
+      stream: true
     });
 
     console.log(`[chat/stream] upstream status=${response.status}`);
@@ -775,7 +925,7 @@ app.post('/api/chat/stream', async (req, res) => {
       console.log(`[chat/stream] No stream chunks found, attempting non-streaming fallback`);
       const nonStreamBody = buildRequestBody(format, model, messages, false);
       try {
-        const fallbackResp = await fetch(fetchUrl, {
+        const fallbackResp = await safeFetch(fetchUrl, {
           method: 'POST',
           headers,
           body: JSON.stringify(nonStreamBody)
@@ -808,10 +958,19 @@ app.post('/api/chat/stream', async (req, res) => {
     res.end();
   } catch (err) {
     console.error('[chat/stream] error:', err.message);
-    try {
-      res.write(`data: ${JSON.stringify({ error: `Stream error: ${err.message}` })}\n\n`);
-      res.end();
-    } catch {}
+    if (res.headersSent) {
+      // SSE stream already started — send error in SSE format
+      try {
+        res.write(`data: ${JSON.stringify({ error: `Stream error: ${err.message}` })}\n\n`);
+        res.write(`data: [DONE]\n\n`);
+        res.end();
+      } catch {}
+    } else {
+      // Headers not sent yet — send as regular JSON error
+      try {
+        res.status(500).json({ error: `Stream error: ${err.message}` });
+      } catch {}
+    }
   }
 });
 
@@ -820,28 +979,31 @@ app.post('/api/chat/stream', async (req, res) => {
  * Body: { apiKey, endpoint, model, messages }
  */
 app.post('/api/chat', async (req, res) => {
-  const { apiKey, endpoint, model, messages } = req.body;
-
-  if (!messages || !Array.isArray(messages)) {
-    return res.status(400).json({ error: 'Missing messages' });
-  }
-
-  const apiKeyFinal = apiKey || process.env.DEEPSEEK_API_KEY;
-
-  // Resolve model → provider + format + endpoint
-  const resolved = resolveModel(model, endpoint);
-  const format = resolved.format;
-  const fetchUrl = resolved.endpoint;
-
-  const headers = getAuthHeaders(resolved.provider, resolved.endpoint, apiKeyFinal);
-
-  const body = buildRequestBody(format, model, messages, false);
-
   try {
-    const response = await fetch(fetchUrl, {
+    // Null-safety: req.body may be undefined if body-parser skipped
+    const body = req.body || {};
+    const { apiKey, endpoint, model, messages } = body;
+
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Missing messages' });
+    }
+
+    if (!apiKey) {
+      return res.status(400).json({ error: 'Missing API key — please configure your API key in Settings' });
+    }
+
+    // Resolve model → provider + format + endpoint
+    const resolved = resolveModel(model, endpoint);
+    const format = resolved.format;
+    const fetchUrl = resolved.endpoint;
+
+    const headers = getAuthHeaders(resolved.provider, resolved.endpoint, apiKey);
+    const requestBody = buildRequestBody(format, model, messages, false);
+
+    const response = await safeFetch(fetchUrl, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body)
+      body: JSON.stringify(requestBody)
     });
 
     if (!response.ok) {
@@ -875,7 +1037,7 @@ app.post('/api/chat', async (req, res) => {
 const SEARCH_API_KEY = (process.env.SEARCH_API_KEY || '').trim();
 
 app.post('/api/search', async (req, res) => {
-  const { query } = req.body;
+  const { query } = (req.body || {});
   if (!query || !query.trim()) {
     return res.status(400).json({ error: 'Missing search query' });
   }
@@ -941,7 +1103,7 @@ app.post('/api/search', async (req, res) => {
 const WEATHER_API_KEY = (process.env.WEATHER_API_KEY || '').trim();
 
 app.post('/api/weather', async (req, res) => {
-  const { lat, lon } = req.body;
+  const { lat, lon } = (req.body || {});
   if (lat == null || lon == null) {
     return res.status(400).json({ error: 'Missing lat/lon' });
   }
@@ -1031,7 +1193,7 @@ app.get('/api/push/vapid-status', (req, res) => {
  * Stores the subscription (single-user: overwrites previous)
  */
 app.post('/api/push/subscribe', (req, res) => {
-  const { subscription } = req.body;
+  const { subscription } = (req.body || {});
   if (!subscription || !subscription.endpoint) {
     return res.status(400).json({ error: 'Invalid subscription' });
   }
@@ -1082,13 +1244,38 @@ app.post('/api/push/send', async (req, res) => {
   }
 });
 
+// ==================== 404 HANDLER FOR API ROUTES ====================
+// Return JSON for unmatched API paths instead of default HTML/text response
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: `Route not found: ${req.method} ${req.path}`,
+    code: 'NOT_FOUND'
+  });
+});
+
+// ==================== GLOBAL ERROR HANDLER ====================
+// Express 5 default error handler may return HTML — force JSON for all errors
+app.use((err, req, res, next) => {
+  console.error('[error] Caught error:', err.message);
+  console.error('[error] Stack:', err.stack);
+  // Ensure we haven't already sent headers (e.g. SSE streaming)
+  if (res.headersSent) {
+    return next(err);
+  }
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    error: err.message || 'Internal server error',
+    code: err.code || 'UNKNOWN'
+  });
+});
+
 const PORT = process.env.PORT || 3000;
 
-// Vercel: export the Express app as a serverless function
-if (process.env.VERCEL) {
-  module.exports = app;
-} else {
-  // Local: start the HTTP server
+// Always export the Express app (for Vercel serverless and local testing)
+module.exports = app;
+
+// Start the HTTP server only when running locally (not on Vercel)
+if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`✅ 后端已启动：http://localhost:${PORT}`);
     console.log(`   Chat stream: POST /api/chat/stream`);
