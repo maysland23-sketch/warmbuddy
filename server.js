@@ -151,6 +151,19 @@ const MODEL_REGISTRY = {
   'gpt-4o':            { provider:'openai',   format:'openai',   label:'GPT-4o',                endpoint:'https://api.openai.com/v1/chat/completions' },
   'gpt-4o-mini':       { provider:'openai',   format:'openai',   label:'GPT-4o Mini',           endpoint:'https://api.openai.com/v1/chat/completions' },
   'gpt-4-turbo':       { provider:'openai',   format:'openai',   label:'GPT-4 Turbo',           endpoint:'https://api.openai.com/v1/chat/completions' },
+
+  // ── OpenRouter (OpenAI-compatible format) ──
+  'openai/gpt-4o':              { provider:'openrouter', format:'openai', label:'GPT-4o (OpenRouter)',              endpoint:'https://openrouter.ai/api/v1/chat/completions' },
+  'anthropic/claude-sonnet-4-6':{ provider:'openrouter', format:'openai', label:'Claude Sonnet 4.6 (OpenRouter)',   endpoint:'https://openrouter.ai/api/v1/chat/completions' },
+  'google/gemini-2.5-pro':      { provider:'openrouter', format:'openai', label:'Gemini 2.5 Pro (OpenRouter)',      endpoint:'https://openrouter.ai/api/v1/chat/completions' },
+  'deepseek/deepseek-chat':     { provider:'openrouter', format:'openai', label:'DeepSeek Chat (OpenRouter)',       endpoint:'https://openrouter.ai/api/v1/chat/completions' },
+  'meta-llama/llama-4-maverick':{ provider:'openrouter', format:'openai', label:'Llama 4 Maverick (OpenRouter)',    endpoint:'https://openrouter.ai/api/v1/chat/completions' },
+
+  // ── ZhipuAI GLM (OpenAI-compatible format) ──
+  'glm-4-plus':  { provider:'glm', format:'openai', label:'GLM-4 Plus',  endpoint:'https://open.bigmodel.cn/api/paas/v4/chat/completions' },
+  'glm-4-flash': { provider:'glm', format:'openai', label:'GLM-4 Flash', endpoint:'https://open.bigmodel.cn/api/paas/v4/chat/completions' },
+  'glm-4':       { provider:'glm', format:'openai', label:'GLM-4',       endpoint:'https://open.bigmodel.cn/api/paas/v4/chat/completions' },
+  'glm-4-air':   { provider:'glm', format:'openai', label:'GLM-4 Air',   endpoint:'https://open.bigmodel.cn/api/paas/v4/chat/completions' },
 };
 
 // Runtime cache for models fetched dynamically from APIs
@@ -572,6 +585,18 @@ app.get('/api/presets', (req, res) => {
       endpoint: 'https://api.openai.com/v1/chat/completions',
       provider: 'openai', format: 'openai',
       models: Object.keys(MODEL_REGISTRY).filter(k => MODEL_REGISTRY[k].provider === 'openai')
+    },
+    {
+      id: 'openrouter', label: 'OpenRouter',
+      endpoint: 'https://openrouter.ai/api/v1/chat/completions',
+      provider: 'openrouter', format: 'openai',
+      models: Object.keys(MODEL_REGISTRY).filter(k => MODEL_REGISTRY[k].provider === 'openrouter')
+    },
+    {
+      id: 'glm', label: '智谱 GLM',
+      endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+      provider: 'glm', format: 'openai',
+      models: Object.keys(MODEL_REGISTRY).filter(k => MODEL_REGISTRY[k].provider === 'glm')
     }
   ];
 

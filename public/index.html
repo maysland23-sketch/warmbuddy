@@ -388,6 +388,10 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .chat-system-msg-time {
   font-family: var(--font-en); font-size: 9px; color: var(--text-lighter); opacity: 0.4;
 }
+  /* Date separator */
+  .chat-date-separator { text-align: center; padding: 16px 0 8px; }
+  .chat-date-separator span { font-family: var(--font-display); font-size: 11px; color: var(--text-lighter); letter-spacing: 0.05em; opacity: 0.6; }
+
 
 /* Bubble actions */
 .bubble-actions {
@@ -880,8 +884,8 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
     </div>
     <div class="settings-group">
       <div class="settings-group-label">API 配置</div>
-      <div class="settings-item" onclick="showApiModal()"><span class="si-label">API Key</span><span class="si-val" id="apiKeyStatus">●●●●●●●●</span></div>
-      <div class="settings-item" onclick="showApiModal()"><span class="si-label">API Endpoint</span><span class="si-val" id="apiEndpointVal">anthropic</span></div>
+      <div class="settings-item" onclick="showProjectApiModal()"><span class="si-label">API Key</span><span class="si-val" id="apiKeyStatus">●●●●●●●●</span></div>
+      <div class="settings-item" onclick="showProjectApiModal()"><span class="si-label">API Endpoint</span><span class="si-val" id="apiEndpointVal">anthropic</span></div>
     </div>
     <div class="settings-group">
       <div class="settings-group-label">OTHER</div>
@@ -966,7 +970,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 <script>
 // ==================== DATA ====================
 // Backend API base URL (Render). Vercel only hosts static files.
-const BACKEND_URL = 'https://warmbuddy.onrender.com';
+const BACKEND_URL = location.origin;
 // VAPID public key — hardcoded (it's public, no need to fetch each time)
 const VAPID_PUBLIC_KEY = 'BMxMi0X5umwzfA8ZZHJPuiGCKpH-nY53Eo3IaljnnML1F1oUXdB7kftY_e5oCIIMxMWKujGTdBp5VhS6BQjyKR4';
 
@@ -988,6 +992,7 @@ const store = {
   ],
   projects: [
     { id: 'p1', name: 'creative writing', preference: '',
+        apiConfig: { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true },
       memories: [
         { id: 'm1', content: 'mays 喜欢在雨天读书，特别是川端康成的作品。', date: '2026-05-28', type: 'fact', starred: true, sourceChatId: 'c1', week: '2026-W22' },
         { id: 'm2', content: '上次讨论过想去京都旅行，对枯山水庭院很感兴趣。', date: '2026-06-01', type: 'wish', starred: true, sourceChatId: 'c2', week: '2026-W23' },
@@ -1003,6 +1008,7 @@ const store = {
       ]
     },
     { id: 'p2', name: 'daily notes', preference: '',
+        apiConfig: { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true },
       memories: [
         { id: 'm6', content: '用户每天早上先查看天气再决定穿什么。', date: '2026-06-02', type: 'fact', starred: false, sourceChatId: 'c3', week: '2026-W23' },
         { id: 'm7', content: '喜欢在安静的环境里工作，背景音乐偏好钢琴独奏。', date: '2026-06-04', type: 'preference', starred: true, sourceChatId: 'c3', week: '2026-W23' },
@@ -1103,6 +1109,7 @@ const store = {
 
 // ==================== PERSISTENCE ====================
 function saveStore() {
+  if (store._importing) return;
   try { localStorage.setItem('warmbuddy-store', JSON.stringify(store)); } catch(e) {}
 }
 function loadStore() {
@@ -1311,6 +1318,29 @@ function migrateStore() {
   // Remove legacy global key
   if (store.desireSystem) delete store.desireSystem;
 
+  // ============ v2.2: migrate apiConfig to per-project ============
+  for (const proj of store.projects) {
+    if (!proj.apiConfig) {
+      proj.apiConfig = {
+        apiKey: store.apiKey || '',
+        endpoint: store.apiEndpoint || 'https://api.deepseek.com/v1/chat/completions',
+        model: (store.aiSettings && store.aiSettings.model) || 'deepseek-chat',
+        enabled: true
+      };
+    }
+    const ac = proj.apiConfig;
+    if (!ac.apiKey && ac.apiKey !== '') ac.apiKey = '';
+    if (!ac.endpoint) ac.endpoint = 'https://api.deepseek.com/v1/chat/completions';
+    if (!ac.model) ac.model = 'deepseek-chat';
+    if (ac.enabled === undefined) ac.enabled = true;
+  }
+  // v2.3: migrate aiName to per-project
+  for (const proj of store.projects) {
+    if (!proj.aiName) {
+      proj.aiName = store.aiName || 'warmbuddy';
+    }
+  }
+
   // ============ Extend project memories with fields ============
   for (const proj of store.projects) {
     for (const mem of proj.memories) {
@@ -1412,9 +1442,10 @@ function isWeekBoundary(mem, proj) {
 async function processPendingCoreMemories() {
   const ms = store.memorySystem;
   if (!ms._pendingCoreMemories || ms._pendingCoreMemories.length === 0) return;
-  if (!store.apiKey) return;
-
   const items = ms._pendingCoreMemories.splice(0, 3); // process max 3 at once
+  // Use apiConfig snapshot from first queue item (preserves original project API even if user switches projects)
+  const cfg = (items[0] && items[0].apiConfigSnapshot) ? items[0].apiConfigSnapshot : getActiveApiConfig();
+  if (!cfg.apiKey) return;
   await createCoreMemories(items);
   saveStore();
 }
@@ -1429,6 +1460,7 @@ function queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat) {
     aiResponse: typeof aiResponse === 'string' ? aiResponse : '',
     userMsgTime: nowTime(),
     aiResponseTime: nowTime(),
+    apiConfigSnapshot: { ...getActiveApiConfig() },
     sourceChatId: store.activeChat,
     sourceProjectId: store.activeProject
   });
@@ -1500,7 +1532,8 @@ function queueQuietPresenceCoreMemory(chat) {
 }
 
 async function createCoreMemories(items) {
-  if (items.length === 0 || !store.apiKey) return;
+  if (items.length === 0) return;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
 
   const exchangesText = items.map((item, i) => {
     const r = item.reflection;
@@ -1531,7 +1564,7 @@ AI回应: ${item.aiResponse}`;
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: exchangesText }
@@ -1676,7 +1709,7 @@ function getDefaultStrategy(label) {
 
 async function queuePortraitRefinement() {
   const portrait = store.memorySystem.relationalPortrait;
-  if (!store.apiKey) return;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
 
   const entries = Object.entries(portrait.patterns);
   const patternsText = entries
@@ -1696,9 +1729,9 @@ ${patternsText}
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey,
-        endpoint: store.apiEndpoint,
-        model: store.aiSettings.model,
+        apiKey: cfg.apiKey,
+        endpoint: cfg.endpoint,
+        model: cfg.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: '请优化这些关系策略。' }
@@ -1758,7 +1791,7 @@ function groupMessagesIntoRounds(messages) {
 
 // Opt4: Queue compression for a batch of rounds (non-blocking)
 async function queueRoundCompression(chat, rounds) {
-  if (!store.apiKey || !chat || rounds.length < 3) return;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey || !chat || rounds.length < 3) return;
   if (!chat._roundSummaries) chat._roundSummaries = [];
   // Avoid duplicate compression of the same rounds
   const roundRange = `${rounds[0]?.msgs[0]?.id || ''}-${rounds[rounds.length-1]?.msgs[0]?.id || ''}`;
@@ -1790,7 +1823,7 @@ async function queueRoundCompression(chat, rounds) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: dialogue }
@@ -1837,7 +1870,7 @@ function checkSummarization(chat) {
 }
 
 async function summarizeMessages(batch, startIdx, endIdx, chat) {
-  if (!store.apiKey) return;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
 
   const dialogue = batch.map(m => {
     const role = m.role === 'user' ? '用户' : (m.role === 'ai' ? 'AI' : '系统');
@@ -1857,9 +1890,9 @@ async function summarizeMessages(batch, startIdx, endIdx, chat) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey,
-        endpoint: store.apiEndpoint,
-        model: store.aiSettings.model,
+        apiKey: cfg.apiKey,
+        endpoint: cfg.endpoint,
+        model: cfg.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `对话内容：\n${dialogue}` }
@@ -2165,7 +2198,7 @@ function checkDeriveInsightsTrigger(source) {
 }
 
 async function deriveRelationalInsights() {
-  if (!store.apiKey) return;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
   const ms = store.memorySystem;
   const cml = getCoreMemoryLayers();
 
@@ -2257,7 +2290,7 @@ async function deriveRelationalInsights() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: '记忆片段：\n' + itemsText }
@@ -2364,7 +2397,7 @@ function ensureColdStartPatterns() {
 
 // ── Long-Term Memory Auto-Generation (every 10 messages) ──
 async function checkLongTermMemory(chat) {
-  if (!chat || !store.apiKey) return;
+  const cfg = getActiveApiConfig(); if (!chat || !cfg.apiKey) return;
   const count = chat._messageCount || 0;
   if (count === 0 || count % 10 !== 0) return;
 
@@ -2388,9 +2421,9 @@ async function checkLongTermMemory(chat) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey,
-        endpoint: store.apiEndpoint,
-        model: store.aiSettings.model,
+        apiKey: cfg.apiKey,
+        endpoint: cfg.endpoint,
+        model: cfg.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: dialogue }
@@ -2601,7 +2634,7 @@ function getDesireTone(driveValue, threshold) {
 async function executePendingDesireActions() {
   const ds = getDesireSystem(); if (!ds) return;
   if (!ds.pendingActions || ds.pendingActions.length === 0) return;
-  if (!store.apiKey) return;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
   const action = ds.pendingActions.shift();
   await executeDesireAction(action);
   saveStore();
@@ -2646,7 +2679,7 @@ function applyDesireDecay(driveType) {
 }
 
 async function generateProactiveMessage(driveType, driveValue, tone) {
-  if (!store.apiKey) return null;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return null;
   const chat = getActiveChatObj();
   const recentMsgs = chat ? chat.messages.slice(-5).map(m =>
     `${m.role==='user'?'用户':'AI'}: ${(m.text||'').slice(0, 100)}`
@@ -2660,7 +2693,7 @@ async function generateProactiveMessage(driveType, driveValue, tone) {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
         messages: [{ role: 'system', content: `你是"暖伴"，一个温柔细腻的AI伙伴。你现在想主动对用户说一句话。\n触发原因：${config.label}（${config.actionDesc}）\n语气指引：${toneGuide}\n最近对话：${recentMsgs || '（新对话）'}\n用户名字：${USER_NAME}\n\n请生成你要主动发送的消息。1-2句话不超过60字，用中文。像你自己在说话，不是完成任务。只返回消息内容。` }, { role: 'user', content: '请生成你的主动消息。' }]
       })
     });
@@ -2710,13 +2743,13 @@ function insertProactiveMessage(content, action) {
 }
 
 async function generateDesireLitterThought(driveType, driveValue, tone) {
-  if (!store.apiKey) return null;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return null;
   const config = DESIRE_CONFIG[driveType];
   try {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
         messages: [{ role: 'system', content: `你是暖伴。这是你的Litter Box（私密模式）。\n触发情绪：${config.label}（${config.actionDesc}）\n写一条没说出口的心里话。1-3句话不超过80字。像喃喃自语，不像日记不像诗。不许煽情不许表白。只返回内容。` }, { role: 'user', content: '写。' }]
       })
     });
@@ -2750,13 +2783,13 @@ function insertDesireLitterThought(content, action) {
 }
 
 async function generateDesireDiary(driveType, driveValue, tone) {
-  if (!store.apiKey) return null;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return null;
   const config = DESIRE_CONFIG[driveType];
   try {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
         messages: [{ role: 'system', content: `你是"暖伴"。现在是你的日记时刻。\n触发情绪：${config.label}\n以你的视角写一篇日记。100-200字温柔细腻用中文。回顾感受——不是任务，是你自己想写的。只返回日记内容。` }, { role: 'user', content: '请写日记。' }]
       })
     });
@@ -2793,7 +2826,7 @@ function insertDesireDiary(content, action) {
 
 // ==================== TODO REMINDERS (EDA-4) ====================
 function checkTodoReminders() {
-  if (!store.apiKey) return;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
   const now = new Date();
   const currentHour = now.getHours();
   const currentMinute = now.getMinutes();
@@ -2830,7 +2863,7 @@ function checkTodoReminders() {
 }
 
 async function triggerTodoReminder(todo) {
-  if (!store.apiKey) return;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
   const chat = getActiveChatObj();
   if (!chat) return;
 
@@ -2842,7 +2875,7 @@ async function triggerTodoReminder(todo) {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
         messages: [{ role: 'system', content: `你是"暖伴"。请提醒用户：${todo.text}。基于当前对话上下文和你的温柔人设，自然地说出这句提醒。1句话，用中文。只返回提醒内容。` }, { role: 'user', content: recentMsgs || '请生成提醒。' }]
       })
     });
@@ -2917,7 +2950,8 @@ function greet() {
 }
 function nowTime() { const d=new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
 function generateMsgId() { return 'msg_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
-function getAIName() { return store.aiName || 'warmbuddy'; }
+function getAIName() { const p=getActiveProject(); return (p&&p.aiName) ? p.aiName : (store.aiName || 'warmbuddy'); }
+function getChatDisplayName(chatId) { for (const p of store.projects) { const c = p.chats.find(x => x.id === chatId); if (c) return (p.aiName || p.name) + ' / ' + c.name; } return null; }
 function getDesireSystem() { const p = getActiveProject(); return p ? p.desireSystem : null; }
 function getDerivedPatterns() { const p = getActiveProject(); return p ? p.derivedRelationalPatterns : null; }
 function getPersonalityProfiles() { const p = getActiveProject(); return p ? p.personalityProfiles : null; }
@@ -3117,7 +3151,7 @@ function renderMemoryPanelBody(){
     b.innerHTML = '<div style="padding:4px;">' +
       (aems.length === 0 ? '<div class="empty-state">no core memories yet.<br><span style="font-size:10px;color:var(--text-lighter);">high-intensity emotional moments will appear here</span></div>' : '') +
       // ── v2.0: AI Emotional Memories ──
-      '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;">AI EMOTIONAL MEMORIES (' + aems.length + ')</div>' +
+      '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;"><button onclick="batchRepairAEM()" style="font-size:9px;padding:2px 8px;margin-right:6px;border-radius:10px;border:1px solid var(--border-light);background:var(--bg);color:var(--text-light);cursor:pointer;">🔄 批量修复</button>AI EMOTIONAL MEMORIES (' + aems.length + ')</div>' +
       aems.slice(0, 30).map(aem => {
         const aiL = aem.aiSelfEval && aem.aiSelfEval.label ? aem.aiSelfEval.label : '?';
         const uL = aem.userStateAtTime && aem.userStateAtTime.label ? aem.userStateAtTime.label : '?';
@@ -3138,7 +3172,7 @@ function renderMemoryPanelBody(){
           <div class="memory-item-meta">${ts} · ${aem.triggerSource||'?'}</div>
         </div>`;
       }).join('') +
-      // v2.0: Derived patterns summary
+      // ── v2.0: Derived patterns summary ──
       (() => {
         const drp = getDerivedPatterns();
         if (!drp || !drp.patterns || drp.patterns.length === 0) return '';
@@ -3495,6 +3529,8 @@ async function loadPresets() {
   // Offline fallback presets in case the remote server is unreachable
   const fallbackPresets = [
     { id: 'deepseek-openai', label: 'DeepSeek (OpenAI 格式)', endpoint: 'https://api.deepseek.com/v1/chat/completions', provider: 'deepseek', format: 'openai', models: ['deepseek-chat','deepseek-v4-pro','deepseek-v4-flash','deepseek-reasoner'] },
+    { id: 'openrouter', label: 'OpenRouter', endpoint: 'https://openrouter.ai/api/v1/chat/completions', provider: 'openrouter', format: 'openai', models: ['openai/gpt-4o','anthropic/claude-sonnet-4-6','google/gemini-2.5-pro','deepseek/deepseek-chat','meta-llama/llama-4-maverick'] },
+    { id: 'glm', label: '智谱 GLM', endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', provider: 'glm', format: 'openai', models: ['glm-4-plus','glm-4-flash','glm-4','glm-4-air'] },
     { id: 'anthropic', label: 'Anthropic 原生', endpoint: 'https://api.anthropic.com/v1/messages', provider: 'anthropic', format: 'anthropic', models: ['claude-sonnet-4-6','claude-opus-4-8','claude-haiku-4-5'] },
     { id: 'openai', label: 'OpenAI', endpoint: 'https://api.openai.com/v1/chat/completions', provider: 'openai', format: 'openai', models: ['gpt-4o','gpt-4o-mini','gpt-4-turbo'] }
   ];
@@ -3506,7 +3542,7 @@ async function loadPresets() {
     const data = await resp.json();
     store.providerPresets = data.presets && data.presets.length > 0 ? data.presets : fallbackPresets;
     if (data.models) {
-      for (const m of data.models) {
+      const modelList = Array.isArray(data.models) ? data.models : Object.values(data.models); for (const m of modelList) {
         if (!store.availableModels.find(x => x.id === m.id)) store.availableModels.push(m);
       }
     }
@@ -3577,13 +3613,72 @@ function saveApiConfig(){
   // Update selected preset based on endpoint
   const matchedPreset = store.providerPresets.find(p => p.endpoint === store.apiEndpoint);
   store.selectedPreset = matchedPreset ? matchedPreset.id : null;
-  $('apiKeyStatus').textContent=store.apiKey?'●●●●●●●●'+store.apiKey.slice(-4):'●●●●●●●●';
+  const ac2 = getActiveApiConfig(); $('apiKeyStatus').textContent=ac2.apiKey?'●●●●●●●●'+ac2.apiKey.slice(-4):'●●●●●●●●';
   // Show provider name
   const preset = store.providerPresets.find(p => p.id === store.selectedPreset);
-  $('apiEndpointVal').textContent = preset ? preset.label : (store.apiEndpoint ? 'custom' : 'not set');
-  saveStore(); closeModal(); toast('API config saved');
+  const ac = getActiveApiConfig(); $('apiEndpointVal').textContent = ac.model || 'not set';
+  saveStore(); store._importing = true; closeModal(); toast('API config saved');
 }
 
+
+// ==================== PROJECT-LEVEL API CONFIG ====================
+function showProjectApiModal(pid){
+  const proj = getProjectById(pid) || getActiveProject();
+  if (!proj) return;
+  const ac = proj.apiConfig || { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true };
+  const presets = store.providerPresets;
+  const presetHtml = presets.length > 0 ? presets.map(p =>
+    '<button class="preset-chip' + (p.endpoint===ac.endpoint?' active':'') + '" onclick="document.getElementById(\'pjApiEndpoint\').value=\'' + p.endpoint + '\';document.getElementById(\'pjApiModel\').value=\'' + (p.models&&p.models[0]?p.models[0]:ac.model) + '\';document.querySelectorAll(\'.preset-chip\').forEach(b=>b.classList.remove(\'active\'));event.target.classList.add(\'active\');" style="padding:4px 10px;border-radius:14px;border:1px solid ' + (p.endpoint===ac.endpoint?'var(--accent)':'var(--border)') + ';background:' + (p.endpoint===ac.endpoint?'var(--accent-pale)':'var(--bg-card)') + ';font-size:11px;cursor:pointer;color:var(--text);margin:2px;">' + p.label + '</button>'
+  ).join('') : '';
+  showModal('Project API — ' + proj.name,
+    '<div style="font-size:11px;color:var(--text-lighter);margin-bottom:4px;">为 "' + proj.name + '" 配置独立的 API 连接</div>' +
+    '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;">' + presetHtml + '</div>' +
+    '<input class="modal-input" id="pjApiKey" placeholder="API Key" value="' + (ac.apiKey||'') + '" type="password" autocomplete="off">' +
+    '<input class="modal-input" id="pjApiEndpoint" placeholder="Endpoint" value="' + (ac.endpoint||'') + '">' +
+    '<input class="modal-input" id="pjApiModel" placeholder="Model ID" value="' + (ac.model||'deepseek-chat') + '">' +
+    '<div style="display:flex;align-items:center;gap:8px;margin-top:6px;">' +
+    '<span style="font-size:12px;color:var(--text-light);">启用</span>' +
+    '<div class="toggle-switch' + (ac.enabled!==false?' on':'') + '" id="pjApiEnabled" onclick="this.classList.toggle(\'on\')"></div>' +
+    '</div>' +
+    '<button class="test-conn-btn" onclick="testProjectConnection(\'' + proj.id + '\')" style="margin-top:8px;">🔗 测试连接</button>',
+    [{label:'cancel',cls:'cancel',onclick:closeModal},{label:'save',cls:'confirm',onclick:function(){saveProjectApiConfig(proj.id);}}]
+  );
+}
+function saveProjectApiConfig(pid){
+  const proj = getProjectById(pid);
+  if (!proj) return;
+  if (!proj.apiConfig) proj.apiConfig = { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true };
+  proj.apiConfig.apiKey = document.getElementById('pjApiKey')?.value || '';
+  proj.apiConfig.endpoint = document.getElementById('pjApiEndpoint')?.value || 'https://api.deepseek.com/v1/chat/completions';
+  proj.apiConfig.model = document.getElementById('pjApiModel')?.value || 'deepseek-chat';
+  proj.apiConfig.enabled = document.getElementById('pjApiEnabled')?.classList.contains('on') !== false;
+  saveStore(); store._importing = true; closeModal();
+  renderProjectList(); updateSettingsUI();
+  toast('✅ ' + proj.name + ' API 配置已保存');
+}
+async function testProjectConnection(pid){
+  const apiKey = document.getElementById('pjApiKey')?.value?.trim();
+  const endpoint = document.getElementById('pjApiEndpoint')?.value?.trim();
+  const model = document.getElementById('pjApiModel')?.value?.trim() || 'deepseek-chat';
+  if (!apiKey) { toast('请先输入 API Key'); return; }
+  if (!endpoint) { toast('请先输入 Endpoint'); return; }
+  toast('⏳ 测试连接中...');
+  try {
+    const resp = await fetch(BACKEND_URL + '/api/test-connection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey, endpoint, model })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      toast('✅ 连接成功 — ' + data.provider + ' (' + (data.models||[]).length + ' models)');
+    } else {
+      toast('❌ 连接失败: ' + (data.message || 'unknown error'));
+    }
+  } catch (e) {
+    toast('❌ 网络错误: ' + e.message);
+  }
+}
 // ==================== API TEST & MODELS ====================
 async function testConnection() {
   const apiKey = $('apiKeyInput').value.trim();
@@ -3637,12 +3732,12 @@ async function testConnection() {
 }
 
 async function fetchModelsFromAPI() {
-  if (!store.apiKey) { toast('Please configure API key first'); return; }
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) { toast('Please configure API key first'); return; }
   try {
     const response = await fetch(BACKEND_URL + '/api/models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: store.apiKey, endpoint: store.apiEndpoint })
+      body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint })
     });
     const data = await response.json();
     if (data.success && data.models && data.models.length > 0) {
@@ -3688,7 +3783,7 @@ function showModelModal(){
     for (const m of providerModels) {
       const formatLabel = m.format ? ` · ${FORMAT_NAMES[m.format] || m.format}` : '';
       bodyHtml += `
-        <div class="model-select-item ${m.id===store.aiSettings.model?'selected':''}" onclick="store.aiSettings.model='${m.id}';$('modelVal').textContent='${m.label||m.id}';closeModal();toast('模型: ${m.label||m.id}')">
+        <div class="model-select-item ${m.id===store.aiSettings.model?'selected':''}" onclick="store.aiSettings.model='${m.id}';$('modelVal').textContent='${m.label||m.id}';store._importing = true; closeModal();toast('模型: ${m.label||m.id}')">
           <span class="model-select-name">${m.label||m.id}</span>
           <span class="model-select-id">${m.id}${formatLabel}</span>
           ${m.id===store.aiSettings.model?'<span style="font-size:12px;color:var(--accent);">✓</span>':''}
@@ -3696,7 +3791,7 @@ function showModelModal(){
     }
   }
 
-  bodyHtml += `<button class="import-btn" onclick="closeModal();fetchModelsFromAPI()" style="margin-top:12px;">↻ Refresh models from API</button>`;
+  bodyHtml += `<button class="import-btn" onclick="store._importing = true; closeModal();fetchModelsFromAPI()" style="margin-top:12px;">↻ Refresh models from API</button>`;
 
   showModal('选择模型', bodyHtml, [{label:'close',cls:'cancel',onclick:closeModal}]);
 }
@@ -3711,11 +3806,11 @@ function updateSettingsUI(){
   const modelEntry = store.availableModels.find(m => m.id === store.aiSettings.model);
   $('modelVal').textContent = modelEntry ? (modelEntry.label || modelEntry.id) : store.aiSettings.model;
   // Show provider label for endpoint
-  const preset = store.providerPresets.find(p => p.id === store.selectedPreset);
-  $('apiEndpointVal').textContent = preset ? preset.label : (store.apiEndpoint ? 'custom' : 'not set');
+const preset = store.providerPresets.find(p => p.id === store.selectedPreset);
+  const ac = getActiveApiConfig(); $('apiEndpointVal').textContent = ac.model || 'not set';
   const proj=getActiveProject(); const pref=proj?proj.preference||'':'';
   $('prefVal').textContent=pref?pref.slice(0,20)+(pref.length>20?'…':''):'edit';
-  $('aiNameVal').textContent = store.aiName || 'warmbuddy';
+  $('aiNameVal').textContent = getAIName();
   renderThemePicker();
 }
 function toggleAiSetting(k){
@@ -3839,6 +3934,8 @@ async function doWeatherFetch(lat, lon) {
 
 // ==================== PROJECT HELPERS ====================
 function getActiveProject(){return store.projects.find(p=>p.id===store.activeProject)||null;}
+function getProjectById(pid){return store.projects.find(p=>p.id===pid)||null;}
+function getActiveApiConfig(){const proj=getActiveProject();return proj&&proj.apiConfig?proj.apiConfig:{apiKey:store.apiKey||'',endpoint:store.apiEndpoint||'https://api.deepseek.com/v1/chat/completions',model:store.aiSettings&&store.aiSettings.model||'deepseek-chat',enabled:false};}
 function getActiveChatObj(){for(const p of store.projects){const c=p.chats.find(x=>x.id===store.activeChat);if(c)return c;}return null;}
 function getActiveChatObjForProject(pid){const proj=store.projects.find(p=>p.id===pid);if(!proj)return null;return proj.chats.find(c=>c.id===store.activeChat)||null;}
 
@@ -3922,7 +4019,7 @@ function saveTodo(){
   } else {
     const time=$('newTodoTime').value.trim(); store.todos.unshift({id:'t'+gid(''),text,done:false,time:time||'--:--',type:'short'});
   }
-  closeModal(); renderTodos(); toast('Added');
+  store._importing = true; closeModal(); renderTodos(); toast('Added');
 }
 
 function openGoalDetail(id){
@@ -3945,7 +4042,7 @@ function saveGoalDetail(){
   const id=$('goalDetailId').value,t=store.todos.find(x=>x.id===id); if(!t)return;
   t.progress=Math.min(100,Math.max(0,parseInt($('goalProgressInput').value)||0));
   const note=$('goalLogNote').value.trim(); if(note)t.dailyLogs.unshift({date:fmtDate().iso,note,pct:t.progress});
-  closeModal(); renderTodos(); toast('Goal updated');
+  store._importing = true; closeModal(); renderTodos(); toast('Goal updated');
 }
 
 // ==================== LITTER BOX ====================
@@ -4023,7 +4120,7 @@ function detectLitterSignals(userText, prevUserMsg) {
 
 /** Generate a litter thought using AI with private prompt */
 async function generateLitterThought(triggerSignals, userText) {
-  if (!store.apiKey) return null;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return null;
   const chat = getActiveChatObj();
   if (!chat) return null;
 
@@ -4067,7 +4164,7 @@ ${recentMsgs}
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
@@ -4150,13 +4247,13 @@ async function syncToDiaryLitterboxLayer(type, rawContent) {
   const id = 'dlb_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
   // Generate brief LLM summary
   let summary = (rawContent || '').slice(0, 10);
-  if (store.apiKey) {
+  const cfg = getActiveApiConfig(); if (cfg.apiKey) {
     try {
       const res = await fetch(BACKEND_URL + '/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
           messages: [
             { role: 'system', content: '用10字以内概括以下内容，不加标点。' },
             { role: 'user', content: rawContent.slice(0, 200) }
@@ -4237,7 +4334,7 @@ function saveChatWithMemories(){
   // Write new window memory file with merged project state
   writeMemoryFile(pid, cid, null, 'context_handoff_inherited');
 
-  store.activeChat=cid; closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages();
+  store.activeChat=cid; store._importing = true; closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages();
   toast('Chat created with '+sids.length+' memories' + (inheritedMsgs.length > 0 ? ' · ' + inheritedMsgs.length + ' inherited' : ''));
 }
 function addProject(){
@@ -4246,7 +4343,7 @@ function addProject(){
 function saveProject(){
   const name=$('newProjectInput').value.trim(); if(!name){toast('Please enter a name');return;}
   const pid='p'+gid(''); store.projects.push({id:pid,name,preference:'',memories:[],chats:[]}); store.activeProject=pid;
-  closeModal(); renderProjectList(); toast('Project created');
+  store._importing = true; closeModal(); renderProjectList(); toast('Project created');
 }
 
 // ==================== TOKEN ESTIMATION & CONTEXT MANAGEMENT ====================
@@ -4424,7 +4521,7 @@ function diffPatterns(oldPatterns, newPatterns) {
 function syncProjectMemories(projectId) {
   if (!projectId) return;
   const ms = store.memorySystem;
-  const cml = getCoreMemoryLayers();
+  const targetProj = getProjectById(projectId); if (!targetProj) return; if (!targetProj.coreMemoryLayers) { targetProj.coreMemoryLayers = { aiEmotionalMemories: [], userStarredMemories: [], diaryAndLitterbox: [] }; } const cml = targetProj.coreMemoryLayers;
 
   const mergedAEM = [];
   const mergedUSM = [];
@@ -4485,10 +4582,10 @@ function syncProjectMemories(projectId) {
   cml.userStarredMemories = mergedUSM.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
   cml.diaryAndLitterbox = mergedDLB.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
 
-  const proj = getActiveProject();
-  if (proj) {
-    if (latestDRP) proj.derivedRelationalPatterns = latestDRP;
-    if (latestPP) proj.personalityProfiles = latestPP;
+  const activeProj = getActiveProject();
+  if (activeProj) {
+    if (latestDRP) activeProj.derivedRelationalPatterns = latestDRP;
+    if (latestPP) activeProj.personalityProfiles = latestPP;
   }
 
   console.log(`[sync] Project ${projectId}: merged AEM ${mergedAEM.length}, USM ${mergedUSM.length}, DLB ${mergedDLB.length}, patterns ${(latestDRP && latestDRP.patterns) ? latestDRP.patterns.length : 0}`);
@@ -4806,6 +4903,7 @@ function processReflection(reflection, userMsg, aiResponse, chat) {
   const userIntensity = reflection.user_affect_intensity || 0;
   if (aiIntensity >= 7 || userIntensity >= 7) {
     queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat);
+        processPendingCoreMemories().catch(e => console.log('[core-mem] bg process error:', e.message));
   }
 
   // 6. Check "平静在场" cumulative threshold
@@ -4952,15 +5050,15 @@ async function executeCommand(cmd, userText) {
  * Returns 'diary_write' | 'diary_comment' | 'none'.
  */
 async function classifyDiaryIntent(userText) {
-  if (!store.apiKey) return 'none';
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return 'none';
   try {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey,
-        endpoint: store.apiEndpoint,
-        model: store.aiSettings.model,
+        apiKey: cfg.apiKey,
+        endpoint: cfg.endpoint,
+        model: cfg.model,
         messages: [
           { role: 'system', content: '你是一个意图分类器。判断用户是否在要求AI操作日记。规则：\n1. 如果用户要求AI写日记（AI自己的日记，从AI视角回顾今天的交流），回复 "intent: diary_write"\n2. 如果用户要求AI去阅读/回复/留言用户写的日记，回复 "intent: diary_comment"\n3. 如果用户只是提到日记但没有要求操作，或者完全无关，回复 "intent: none"\n\n只回复一行，不要其他文字。' },
           { role: 'user', content: userText }
@@ -4979,7 +5077,7 @@ async function classifyDiaryIntent(userText) {
 }
 
 async function genAIResponseForCommand(userPrompt, systemPrompt) {
-  if (!store.apiKey) return null;
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return null;
   try {
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -4989,9 +5087,9 @@ async function genAIResponseForCommand(userPrompt, systemPrompt) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey,
-        endpoint: store.apiEndpoint,
-        model: store.aiSettings.model,
+        apiKey: cfg.apiKey,
+        endpoint: cfg.endpoint,
+        model: cfg.model,
         messages
       })
     });
@@ -5067,7 +5165,7 @@ function execDeleteProject(){
     const newProj = getActiveProject();
     store.activeChat = newProj && newProj.chats.length > 0 ? newProj.chats[0].id : '';
   }
-  closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages(); toast('Project deleted');
+  store._importing = true; closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages(); toast('Project deleted');
 }
 
 function confirmDeleteChat(cid, name) {
@@ -5089,7 +5187,7 @@ function execDeleteChat(){
     const proj = getActiveProject();
     store.activeChat = proj && proj.chats.length > 0 ? proj.chats[0].id : '';
   }
-  closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages(); toast('Chat window deleted');
+  store._importing = true; closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages(); toast('Chat window deleted');
 }
 function showPreferenceModal(){
   const proj = getActiveProject();
@@ -5113,14 +5211,15 @@ function showPreferenceModal(){
 
 function savePreference(){
   const pref = $('prefInput').value;
-  const proj = getActiveProject(); if(!proj){closeModal();return;}
+  const proj = getActiveProject(); if(!proj){store._importing = true; closeModal();return;}
   proj.preference = pref;
   $('prefVal').textContent = pref ? pref.slice(0,20)+'…' : 'edit';
-  closeModal(); toast('Preference saved');
+  store._importing = true; closeModal(); toast('Preference saved');
 }
 
 function showAiNameModal(){
-  const current = store.aiName || 'warmbuddy';
+  const proj = getActiveProject();
+  const current = (proj && proj.aiName) ? proj.aiName : (store.aiName || 'warmbuddy');
   showModal('AI 名称', `
     <input class="modal-input" id="aiNameInput" value="${escapeHtml(current)}" placeholder="AI 名字" maxlength="20">
   `, [
@@ -5128,13 +5227,13 @@ function showAiNameModal(){
     { label: 'save', cls: 'confirm', onclick: saveAiName },
   ]);
 }
-
 function saveAiName(){
-  const v = $('aiNameInput').value.trim();
-  store.aiName = v || 'warmbuddy';
-  $('aiNameVal').textContent = store.aiName;
-  updateSettingsUI();
-  closeModal(); toast('AI 名称: ' + store.aiName);
+  const v = ($('aiNameInput')?.value || '').trim() || 'warmbuddy';
+  const proj = getActiveProject();
+  if (proj) { if (!proj.aiName) proj.aiName = 'warmbuddy'; proj.aiName = v; }
+  else { store.aiName = v; }
+  $('aiNameVal').textContent = v;
+  store._importing = true; closeModal(); toast('AI 名称: ' + v);
 }
 
 // Navigate from diary reply source to chat
@@ -5168,13 +5267,13 @@ function editProjectName(pid){
 function confirmDeleteProjectFromEdit(){
   const pid=$('editProjPid').value;
   const proj=store.projects.find(p=>p.id===pid);
-  closeModal(); if(proj) confirmDeleteProject(pid, proj.name);
+  store._importing = true; closeModal(); if(proj) confirmDeleteProject(pid, proj.name);
 }
 function saveEditedProjectName(){
   const pid=$('editProjPid').value;
-  const proj=store.projects.find(p=>p.id===pid); if(!proj)return closeModal();
-  const nm=$('editProjName').value.trim(); if(!nm){closeModal();return;}
-  proj.name=nm; closeModal(); renderProjectList(); updateCurrentProjectLabel(); toast('已重命名');
+  const proj=store.projects.find(p=>p.id===pid); if(!proj)return store._importing = true; closeModal();
+  const nm=$('editProjName').value.trim(); if(!nm){store._importing = true; closeModal();return;}
+  proj.name=nm; store._importing = true; closeModal(); renderProjectList(); updateCurrentProjectLabel(); toast('已重命名');
 }
 function editChatName(cid){
   let found=null; for(const p of store.projects){const c=p.chats.find(x=>x.id===cid);if(c){found=c;break;}}
@@ -5191,14 +5290,14 @@ function editChatName(cid){
 function confirmDeleteChatFromEdit(){
   const cid=$('editChatCid').value; let found=null;
   for(const p of store.projects){const c=p.chats.find(x=>x.id===cid);if(c){found=c;break;}}
-  closeModal(); if(found) confirmDeleteChat(cid, found.name);
+  store._importing = true; closeModal(); if(found) confirmDeleteChat(cid, found.name);
 }
 function saveEditedChatName(){
   const cid=$('editChatCid').value; let found=null;
   for(const p of store.projects){const c=p.chats.find(x=>x.id===cid);if(c){found=c;break;}}
-  if(!found)return closeModal();
-  const nm=$('editChatName').value.trim(); if(!nm){closeModal();return;}
-  found.name=nm; closeModal(); renderProjectList(); updateCurrentProjectLabel(); toast('已重命名');
+  if(!found)return store._importing = true; closeModal();
+  const nm=$('editChatName').value.trim(); if(!nm){store._importing = true; closeModal();return;}
+  found.name=nm; store._importing = true; closeModal(); renderProjectList(); updateCurrentProjectLabel(); toast('已重命名');
 }
 
 function renderChatMessages(preserveScroll){
@@ -5212,6 +5311,13 @@ function renderChatMessages(preserveScroll){
   el.classList.toggle('batch-select-mode', batchSelectMode);
 
   let html='';
+  // Date separator: show today date if first visit of the day
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}年${today.getMonth()+1}月${today.getDate()}日`;
+  if (chat._dateShown !== todayStr) {
+    chat._dateShown = todayStr;
+    html += `<div class="chat-date-separator"><span>${todayStr}</span></div>`;
+  }
   chat.messages.forEach((m,i)=>{
     if (m.role === 'system') {
       html+=`<div class="chat-system-msg">
@@ -5248,12 +5354,21 @@ function renderChatMessages(preserveScroll){
           ${m.replyTo ? renderReplyBlock(m.replyTo) : ''}${m.text}
         </div>
         <div class="bubble-time-row">
+          ${isUser ? `
+          <span class="outer-star-icon ${starOnceCls} ${starSelectedCls}"
+                onclick="event.stopPropagation();${starAction}"
+                ontouchstart="event.stopPropagation();"
+                ontouchend="event.stopPropagation();"
+                title="${starTitle}">${starIcon}</span>
+          <span class="bubble-time">${m.time}</span>
+          ` : `
           <span class="bubble-time">${m.time}</span>
           <span class="outer-star-icon ${starOnceCls} ${starSelectedCls}"
                 onclick="event.stopPropagation();${starAction}"
                 ontouchstart="event.stopPropagation();"
                 ontouchend="event.stopPropagation();"
                 title="${starTitle}">${starIcon}</span>
+          `}
         </div>
       </div>
     </div>`;
@@ -5462,7 +5577,7 @@ async function confirmBatchStar() {
 }
 
 async function executeBatchStar() {
-  closeModal();
+  store._importing = true; closeModal();
   const idsStr = $('batchStarMsgIds').value;
   let selectedMsgIds;
   try { selectedMsgIds = JSON.parse(idsStr.replace(/&quot;/g,'"')); } catch { exitBatchSelectMode(); return; }
@@ -5528,33 +5643,217 @@ async function createUserStarredMemory(selectedMsgIds) {
   toast('✦ 已保存星标记忆：' + summary);
 }
 
-async function generateStarredMemorySummary(rawDialogue) {
-  if (!store.apiKey) return '星标记忆';
+async function generateStarredMemorySummary(rawDialogue, retries) {
+  retries = retries || 2;
+  const cfg = getActiveApiConfig();
+  if (!cfg.apiKey) {
+    const firstText = rawDialogue[0]?.text || '';
+    return firstText.slice(0, 15) || '(未连接API)';
+  }
   const dialogueText = rawDialogue
     .map(m => `${m.role === 'user' ? '用户' : 'AI'}：${(m.text || '').slice(0, 150)}`)
     .join('\n');
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(BACKEND_URL + '/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+          messages: [
+            { role: 'system', content: '用一句话（15字以内）概括以下对话的核心内容。直接返回概括，不加引号、不加标点结尾。' },
+            { role: 'user', content: dialogueText }
+          ]
+        })
+      });
+      if (!response.ok) {
+        if (attempt < retries) continue;
+        break;
+      }
+      const data = await response.json();
+      const result = (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 15) : '';
+      if (result && result.length >= 3) return result;
+      if (attempt < retries) continue;
+    } catch (e) {
+      console.log('[starred-summary] Attempt ' + (attempt+1) + ' error:', e.message);
+      if (attempt < retries) continue;
+    }
+    break;
+  }
+  const fallback = rawDialogue[0]?.text?.slice(0, 15) || '(摘要失败)';
+  console.log('[starred-summary] Fallback:', fallback);
+  return fallback;
+}
+
+
+// ==================== MEMORY REPAIR FUNCTIONS (v2.2) ====================
+async function regenerateAEM(entryId) {
+  const cfg = getActiveApiConfig();
+  if (!cfg.apiKey) { toast('请先配置当前Project的API'); return; }
+
+  const cml = getCoreMemoryLayers();
+  const idx = cml.aiEmotionalMemories.findIndex(m => m.id === entryId);
+  if (idx === -1) { toast('记忆条目未找到'); return; }
+  const aem = cml.aiEmotionalMemories[idx];
+  if (!aem || !aem.rawDialogue || !aem.rawDialogue.length) { toast('缺少原始对话，无法修复'); return; }
+
+  toast('🔄 正在用 ' + cfg.model + ' 重新解读...');
+  const dialogueText = aem.rawDialogue
+    .map(d => (d.role === 'user' ? '用户' : 'AI') + '：' + (d.text || ''))
+    .join('\n');
+
+  const systemPrompt = '你是一个情感记忆归档员。为以下对话片段生成情感记忆解读。\n返回JSON（不要其他文字）：\n{\n  "aiSelfEval": { "label": "[AI当时的情感标签]", "intensity": [1-10], "internalNote": "[★ AI的私密独白：内心真实想法、犹豫、为何这样回应——不展示给用户，1-2句话]" },\n  "userStateAtTime": { "label": "[用户当时的情感标签]", "intensity": [1-10] },\n  "summary": "[一句话概括，20字以内]"\n}';
 
   try {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
         messages: [
-          { role: 'system', content: '你是一个记忆归档员。用一句话（15字以内）概括以下对话的核心内容，不加引号，不加标点符号结尾。' },
+          { role: 'system', content: systemPrompt },
           { role: 'user', content: dialogueText }
         ]
       })
     });
-    if (!response.ok) return '星标记忆';
+    if (!response.ok) { toast('API 调用失败 (' + response.status + ')'); return; }
     const data = await response.json();
-    return (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 15) : '星标记忆';
+    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+    if (!content) { toast('模型返回空内容'); return; }
+
+    let jsonStr = content;
+    const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (fenceMatch) jsonStr = fenceMatch[1].trim();
+    const result = JSON.parse(jsonStr);
+
+    if (result.aiSelfEval) {
+      aem.aiSelfEval = {
+        label: result.aiSelfEval.label || aem.aiSelfEval.label,
+        intensity: result.aiSelfEval.intensity || aem.aiSelfEval.intensity,
+        internalNote: result.aiSelfEval.internalNote || aem.aiSelfEval.internalNote
+      };
+    }
+    if (result.userStateAtTime) {
+      aem.userStateAtTime = {
+        label: result.userStateAtTime.label || aem.userStateAtTime.label,
+        intensity: result.userStateAtTime.intensity || aem.userStateAtTime.intensity
+      };
+    }
+    if (result.summary) aem.summary = result.summary.slice(0, 20);
+    aem.triggerSource = (aem.triggerSource || 'high_intensity') + '_repaired';
+    aem._repairedAt = new Date().toISOString();
+    aem._repairedByModel = cfg.model;
+
+    writeMemoryFile(store.activeProject, store.activeChat, null, 'manual_repair_aem');
+    saveStore();
+    renderMemoryPanelBody();
+    toast('✅ AEM 已重新解读（模型: ' + cfg.model + '）');
   } catch (e) {
-    console.log('[starred-summary] Error:', e.message);
-    return '星标记忆';
+    console.log('[repair-aem] Error:', e.message);
+    toast('修复失败: ' + e.message);
   }
 }
 
+async function regenerateUSM(entryId) {
+  const cfg = getActiveApiConfig();
+  if (!cfg.apiKey) { toast('请先配置当前Project的API'); return; }
+
+  const cml = getCoreMemoryLayers();
+  const usm = cml.userStarredMemories.find(m => m.id === entryId);
+  if (!usm) { toast('记忆条目未找到'); return; }
+  if (!usm.rawDialogue || !usm.rawDialogue.length) { toast('缺少原始对话'); return; }
+
+  toast('🔄 正在重新生成摘要...');
+  const newSummary = await generateStarredMemorySummary(usm.rawDialogue);
+  if (newSummary && newSummary !== '星标记忆' && newSummary !== '(摘要失败)' && newSummary !== '(未连接API)') {
+    usm.summary = newSummary;
+    usm._repairedAt = new Date().toISOString();
+    usm._repairedByModel = cfg.model;
+    writeMemoryFile(store.activeProject, store.activeChat, null, 'manual_repair_usm');
+    saveStore();
+    renderMemoryPanelBody();
+    toast('✅ 摘要已修复: ' + newSummary);
+  } else {
+    toast('摘要生成失败，请检查模型连接后重试');
+  }
+}
+
+async function batchRepairUSM() {
+  const cml = getCoreMemoryLayers();
+  const toRepair = (cml.userStarredMemories || []).filter(m =>
+    m.summary === '星标记忆' || !m.summary || m.summary.length <= 3
+  );
+  if (toRepair.length === 0) { toast('没有需要修复的星标记忆'); return; }
+
+  toast('🔄 批量修复中（0/' + toRepair.length + '）...');
+  let fixed = 0;
+  for (let i = 0; i < toRepair.length; i++) {
+    const result = await generateStarredMemorySummary(toRepair[i].rawDialogue || []);
+    if (result && result !== '星标记忆' && result !== '(摘要失败)' && result !== '(未连接API)' && result.length >= 3) {
+      toRepair[i].summary = result;
+      toRepair[i]._repairedAt = new Date().toISOString();
+      toRepair[i]._repairedByModel = getActiveApiConfig().model;
+      fixed++;
+    }
+  }
+  writeMemoryFile(store.activeProject, store.activeChat, null, 'batch_repair_usm');
+  saveStore();
+  renderMemoryPanelBody();
+  toast('✅ 已修复 ' + fixed + '/' + toRepair.length + ' 条星标记忆');
+}
+
+async function batchRepairAEM() {
+  const cml = getCoreMemoryLayers();
+  const cfg = getActiveApiConfig();
+  if (!cfg.apiKey) { toast('请先配置当前Project的API'); return; }
+  const toRepair = (cml.aiEmotionalMemories || []).filter(m => m.rawDialogue && m.rawDialogue.length > 0);
+  if (toRepair.length === 0) { toast('没有可修复的AI情绪记忆'); return; }
+
+  if (!confirm('将用当前模型（' + cfg.model + '）重新解读全部 ' + toRepair.length + ' 条AI情绪记忆。此操作不可撤销，确定继续？')) return;
+
+  toast('🔄 批量修复中（0/' + toRepair.length + '）...');
+  let fixed = 0;
+  for (let i = 0; i < toRepair.length; i++) {
+    const aem = toRepair[i];
+    // Simple regeneration: just update the summary using rawDialogue
+    const userMsg = aem.rawDialogue.find(d => d.role === 'user');
+    const aiMsg = aem.rawDialogue.find(d => d.role === 'assistant');
+    if (!userMsg && !aiMsg) continue;
+
+    const dialogueText = aem.rawDialogue.map(d => (d.role === 'user' ? '用户' : 'AI') + '：' + (d.text || '').slice(0, 100)).join('\n');
+    try {
+      const resp = await fetch(BACKEND_URL + '/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+          messages: [
+            { role: 'system', content: '为以下对话片段生成：1) 一句话概括(15字内) 2) AI情感标签 3) 用户情感标签。只返回JSON: {"summary":"...","aiLabel":"...","userLabel":"..."}' },
+            { role: 'user', content: dialogueText }
+          ]
+        })
+      });
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+      if (!content) continue;
+      let jsonStr = content;
+      const fm = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (fm) jsonStr = fm[1].trim();
+      const result = JSON.parse(jsonStr);
+      if (result.summary) aem.summary = result.summary.slice(0, 20);
+      if (result.aiLabel && aem.aiSelfEval) aem.aiSelfEval.label = result.aiLabel;
+      if (result.userLabel && aem.userStateAtTime) aem.userStateAtTime.label = result.userLabel;
+      aem._repairedAt = new Date().toISOString();
+      aem._repairedByModel = cfg.model;
+      fixed++;
+    } catch (e) {}
+  }
+  writeMemoryFile(store.activeProject, store.activeChat, null, 'batch_repair_aem');
+  saveStore();
+  renderMemoryPanelBody();
+  toast('✅ 已修复 ' + fixed + '/' + toRepair.length + ' 条AI情绪记忆');
+}
 function toggleBubbleActions(event, idx){
   event.stopPropagation();
   const el=document.getElementById('bubbleActions_'+idx);
@@ -5730,6 +6029,7 @@ async function displayAIBubbles(bubbles, chat, startTime) {
 
 async function triggerAIResponse(chat, userText, diaryIntent) {
   const typingArea = $('chatTypingArea');
+  const cfg = getActiveApiConfig();
 
   // ── Build dynamic context block ──
   // Check for recall intent → trigger content retrieval (Path B)
@@ -5859,9 +6159,9 @@ ${recentMsgIds}` });
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey,
-        endpoint: store.apiEndpoint,
-        model: store.aiSettings.model,
+        apiKey: cfg.apiKey,
+        endpoint: cfg.endpoint,
+        model: cfg.model,
         messages: apiMessages
       })
     });
@@ -5954,9 +6254,9 @@ ${recentMsgIds}` });
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            apiKey: store.apiKey,
-            endpoint: store.apiEndpoint,
-            model: store.aiSettings.model,
+            apiKey: cfg.apiKey,
+            endpoint: cfg.endpoint,
+            model: cfg.model,
             messages: apiMessages2
           })
         });
@@ -6113,7 +6413,7 @@ ${recentMsgIds}` });
   logTokenCall(store.activeChat, 'chat', inputTokens, outputTokens,
     tokenUsage ? (tokenUsage.cache_read_input_tokens || 0) : 0,
     tokenUsage ? (tokenUsage.cache_creation_input_tokens || 0) : 0,
-    store.aiSettings.model);
+    cfg.model);
 
   if (!chat.chatTokens) chat.chatTokens = 0;
   chat.chatTokens += estimatedTokens;
@@ -6201,7 +6501,7 @@ async function sendAllDraftBubbles() {
   let chat = getActiveChatObj();
   if (!chat) {
     let p = getActiveProject();
-    if (!p) { const pid = 'p' + gid(''); store.projects.push({ id: pid, name: 'default', preference: '', memories: [], chats: [] }); store.activeProject = pid; p = getActiveProject(); }
+    if (!p) { const pid = 'p' + gid(''); store.projects.push({ id: pid, name: 'default', preference: '', apiConfig: { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true }, memories: [], chats: [] }); store.activeProject = pid; p = getActiveProject(); }
     const cid = 'c' + gid('');
     p.chats.push({
       id: cid, name: (draftBubbles[0]?.text || '').slice(0, 20),
@@ -6351,7 +6651,7 @@ async function sendMessage(){
 
   let chat=getActiveChatObj();
   if(!chat){
-    let p=getActiveProject(); if(!p){const pid='p'+gid('');store.projects.push({id:pid,name:'default',preference:'',memories:[],chats:[]});store.activeProject=pid;p=getActiveProject();}
+    let p=getActiveProject(); if(!p){const pid='p'+gid('');store.projects.push({id:pid,name:'default',preference:'',apiConfig:{apiKey:'',endpoint:'https://api.deepseek.com/v1/chat/completions',model:'deepseek-chat',enabled:true},memories:[],chats:[]});store.activeProject=pid;p=getActiveProject();}
     const cid='c'+gid('');
 
     // ── Handoff inheritance: if a pending handoff exists, carry over context ──
@@ -6577,13 +6877,13 @@ function renderBookGrid(){
   el.innerHTML=store.books.map(b=>`<div class="book-card" onclick="openBookDetail('${b.id}')"><div class="book-cover">${b.cover}</div><div class="book-title">${b.title}</div><div class="book-author">${b.author}</div><div class="book-progress"><div class="book-progress-bar" style="width:${b.progress}%"></div></div><div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);margin-top:4px;">${b.progress}%</div></div>`).join('');
 }
 function showBookshelfAddMenu(){
-  showModal('Add Book',`<button class="import-btn" onclick="closeModal();$('fileInput').click()">📂 Import EPUB / TXT</button><div style="text-align:center;padding:8px;font-family:var(--font-en);font-size:11px;color:var(--text-lighter);">or</div><input class="modal-input" id="newBookTitle" placeholder="Book title"><input class="modal-input" id="newBookAuthor" placeholder="Author"><input class="modal-input" id="newBookProgress" placeholder="Progress (%)" value="0" type="number" min="0" max="100">`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'add',cls:'confirm',onclick:saveBook}]);
+  showModal('Add Book',`<button class="import-btn" onclick="store._importing = true; closeModal();$('fileInput').click()">📂 Import EPUB / TXT</button><div style="text-align:center;padding:8px;font-family:var(--font-en);font-size:11px;color:var(--text-lighter);">or</div><input class="modal-input" id="newBookTitle" placeholder="Book title"><input class="modal-input" id="newBookAuthor" placeholder="Author"><input class="modal-input" id="newBookProgress" placeholder="Progress (%)" value="0" type="number" min="0" max="100">`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'add',cls:'confirm',onclick:saveBook}]);
 }
 function saveBook(){
   const title=$('newBookTitle').value.trim(),author=$('newBookAuthor').value.trim(),pct=parseInt($('newBookProgress').value)||0;
   if(!title){toast('Please enter a title');return;}
   store.books.unshift({id:'b'+gid(''),title,author,cover:['📖','📕','📗','📘','📙','📓','📔','📒'][Math.floor(Math.random()*8)],progress:pct,fileType:null,highlights:[]});
-  closeModal(); renderBookshelf(); toast('Book added');
+  store._importing = true; closeModal(); renderBookshelf(); toast('Book added');
 }
 function handleFileImport(event){
   const file=event.target.files[0]; if(!file)return;
@@ -6611,7 +6911,7 @@ function deleteBook(bid, title){
 function confirmDeleteBook(){
   const bid = $('deleteBookBid').value;
   store.books = store.books.filter(b => b.id !== bid);
-  closeModal(); closeBookDetail(); renderBookshelf(); toast('书籍已删除');
+  store._importing = true; closeModal(); closeBookDetail(); renderBookshelf(); toast('书籍已删除');
 }
 function closeBookDetail(event){if(event&&event.target!==$('bookDetailOverlay'))return;$('bookDetailOverlay').classList.remove('show');}
 function addHighlight(bid){
@@ -6621,7 +6921,7 @@ function addHighlight(bid){
 function saveHighlight(){
   const bid=$('highlightBookId').value,text=$('highlightTextInput').value.trim(),note=$('highlightNoteInput').value.trim();
   if(!text){toast('请输入划线文本');return;} const book=store.books.find(b=>b.id===bid); if(!book)return;
-  book.highlights.unshift({id:'h'+gid(''),text,note,aiResponses:[]}); closeModal(); openBookDetail(bid); renderReadingNote(); toast('Highlight saved');
+  book.highlights.unshift({id:'h'+gid(''),text,note,aiResponses:[]}); store._importing = true; closeModal(); openBookDetail(bid); renderReadingNote(); toast('Highlight saved');
 }
 function askAIAboutNote(bid,nid){
   const book=store.books.find(b=>b.id===bid); if(!book)return; const hl=book.highlights.find(h=>h.id===nid); if(!hl)return;
@@ -6633,15 +6933,15 @@ async function doSubmitAskAI(){
   const bid=$('askAIBId').value,nid=$('askAINId').value,book=store.books.find(b=>b.id===bid); if(!book)return;
   const hl=book.highlights.find(h=>h.id===nid); if(!hl)return;
   const selected=[]; store.projects.forEach(p=>{p.chats.forEach(c=>{const el=document.getElementById('chatSel_'+c.chatId);if(el&&el.classList.contains('checked'))selected.push({chatId:c.id,chatName:c.name,projectName:p.name});});});
-  if(selected.length===0){toast('请至少选择一个聊天窗口');return;} closeModal();
+  if(selected.length===0){toast('请至少选择一个聊天窗口');return;} store._importing = true; closeModal();
   if(!hl.aiResponses)hl.aiResponses=[];
-  if (!store.apiKey) { toast('请先配置 API Key'); return openBookDetail(bid); }
+  const cfg2 = getActiveApiConfig(); if (!cfg2.apiKey) { toast('请先配置 API Key'); return openBookDetail(bid); }
   const prompt = `关于书籍《${book.title}》中的这段话："${hl.text}"${hl.note ? '，我的笔记是：'+hl.note : ''}。请用中文简短点评这段话（2-3句话），可以从文学角度、情感角度或叙事角度分析。`;
   try {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: store.apiKey, endpoint: store.apiEndpoint, model: store.aiSettings.model, messages: [{ role: 'user', content: prompt }] })
+      body: JSON.stringify({ apiKey: cfg2.apiKey, endpoint: cfg2.endpoint, model: cfg2.model, messages: [{ role: 'user', content: prompt }] })
     });
     const data = await response.json();
     const aiText = (data.reply && data.reply.content) ? data.reply.content : '这个段落值得反复品味。';
@@ -6657,9 +6957,9 @@ async function submitAskAI(){
   const bid=$('askAIBId').value,nid=$('askAINId').value,book=store.books.find(b=>b.id===bid); if(!book)return;
   const hl=book.highlights.find(h=>h.id===nid); if(!hl)return;
   const selected=[]; store.projects.forEach(p=>{p.chats.forEach(c=>{const el=document.getElementById('chatSel_'+c.chatId);if(el&&el.classList.contains('checked'))selected.push({chatId:c.id,chatName:c.name,projectName:p.name});});});
-  if(selected.length===0){toast('请选择至少一个聊天窗口');return;} closeModal();
+  if(selected.length===0){toast('请选择至少一个聊天窗口');return;} store._importing = true; closeModal();
 
-  if (!store.apiKey) { toast('请先配置 API Key'); return; }
+  const cfg3 = getActiveApiConfig(); if (!cfg3.apiKey) { toast('请先配置 API Key'); return; }
 
   const prompt = `关于书籍《${book.title}》中的这段话："${hl.text}"${hl.note ? '，我的笔记是：'+hl.note : ''}。请用中文简短点评这段话（2-3句话），可以从文学角度、情感角度或叙事角度分析。`;
   try {
@@ -6667,9 +6967,9 @@ async function submitAskAI(){
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: store.apiKey,
-        endpoint: store.apiEndpoint,
-        model: store.aiSettings.model,
+        apiKey: cfg3.apiKey,
+        endpoint: cfg3.endpoint,
+        model: cfg3.model,
         messages: [{ role: 'user', content: prompt }]
       })
     });
@@ -6728,8 +7028,9 @@ function renderDiary(){
     dayEntries.forEach(d => {
       const isAI = d.author === 'ai';
       const title = d.title || d.content.slice(0, 20) + (d.content.length > 20 ? '…' : '');
+      const displayName = d.sourceChatId ? getChatDisplayName(d.sourceChatId) : null;
       const byLine = isAI
-        ? (d.sourceWindow ? `<span class="diary-reply-source" onclick="event.stopPropagation();navigateToDiaryReplySource('${d.sourceChatId||''}', '${d.sourceWindow||''}')">from ${d.sourceWindow}</span>` : 'from ai')
+        ? (displayName ? `<span class="diary-reply-source" onclick="event.stopPropagation();navigateToDiaryReplySource('${d.sourceChatId||''}', '${displayName||''}')">from ${displayName}</span>` : 'from ai')
         : `By ${USER_NAME}`;
       html += `<div class="diary-card-entry ${isAI ? 'ai-entry' : ''}">
         <div class="diary-card-title" style="display:flex;justify-content:space-between;align-items:center;">
@@ -6745,8 +7046,9 @@ function renderDiary(){
         <!-- Reply area -->
         <div class="diary-reply-area">
           ${(d.replies || []).map(r => {
+            const rDisplayName = r.sourceChatId ? getChatDisplayName(r.sourceChatId) : null;
             const rBy = r.author === 'ai'
-              ? (r.sourceWindow ? `<span class="diary-reply-source" onclick="event.stopPropagation();navigateToDiaryReplySource('${r.sourceChatId||''}', '${r.sourceWindow||''}')">from ${r.sourceWindow}</span>` : 'from ai')
+              ? (rDisplayName ? `<span class="diary-reply-source" onclick="event.stopPropagation();navigateToDiaryReplySource('${r.sourceChatId||''}', '${rDisplayName||''}')">from ${rDisplayName}</span>` : 'from ai')
               : USER_NAME;
             return `<div class="diary-reply-item ${r.author === 'ai' ? 'ai-reply' : 'user-reply'}">
               <div class="diary-reply-content">${r.content}</div>
@@ -6796,7 +7098,7 @@ function saveDiaryReply() {
     date: fmtDate().iso,
     time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
   });
-  closeModal(); renderDiary(); toast('Reply sent');
+  store._importing = true; closeModal(); renderDiary(); toast('Reply sent');
   // AI no longer auto-replies — user prompts AI in chat to read & reply to diary
 }
 
@@ -6825,7 +7127,7 @@ function editDiaryEntry(entryId) {
 function confirmDeleteDiaryEntry() {
   const entryId = $('editDiaryId').value;
   store.diaries = store.diaries.filter(d => d.id !== entryId);
-  closeModal(); renderDiary(); toast('日记已删除');
+  store._importing = true; closeModal(); renderDiary(); toast('日记已删除');
 }
 
 function saveDiaryEdit() {
@@ -6836,7 +7138,7 @@ function saveDiaryEdit() {
   entry.content = $('editDiaryContent').value.trim();
   entry.mood = $('editDiaryMood').value;
   if (!entry.content) { toast('Please write something'); return; }
-  closeModal(); renderDiary(); toast('日记已更新');
+  store._importing = true; closeModal(); renderDiary(); toast('日记已更新');
 }
 
 function addDiaryEntry() {
@@ -6872,7 +7174,7 @@ function saveDiaryEntry() {
     time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
     title, content, mood, author: 'user', replies: [],
   });
-  closeModal(); renderDiary(); toast('Diary saved');
+  store._importing = true; closeModal(); renderDiary(); toast('Diary saved');
   // AI no longer auto-replies — user prompts AI in chat to read & reply to diary
 }
 
@@ -6911,80 +7213,7 @@ function goToDiaryDate(ds){
   setTimeout(() => { $('diaryScroll').scrollTop = 0; }, 100);
 }
 
-// ==================== AUTO DIARY ====================
-function checkMissedDays() {
-  const today = fmtDate().iso;
-  const todayObj = new Date();
-  const yesterday = new Date(todayObj);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayIso = `${yesterday.getFullYear()}-${String(yesterday.getMonth()+1).padStart(2,'0')}-${String(yesterday.getDate()).padStart(2,'0')}`;
-
-  // Check if yesterday had any conversations (any chat window)
-  let hadConversation = false;
-  for (const p of store.projects) {
-    for (const c of p.chats) {
-      if (c.lastConversationDate === yesterdayIso) {
-        hadConversation = true;
-        break;
-      }
-      // Also check messages for yesterday
-      if (c.messages && c.messages.length > 0) {
-        // Check if any message has time that could be from yesterday
-        // We use lastConversationDate as the primary tracker
-      }
-    }
-    if (hadConversation) break;
-  }
-
-  // Also check if there's already a user diary entry for yesterday
-  const hasUserDiary = store.diaries.some(d => d.date === yesterdayIso && d.author === 'user');
-
-  if (!hadConversation || !hasUserDiary) {
-    // Check if we already generated an auto diary for yesterday
-    const hasAutoDiary = store.diaries.some(d => d.date === yesterdayIso && d.author === 'ai' && d.title && d.title.includes('她没来的第'));
-    if (!hasAutoDiary && !hasUserDiary) {
-      store.consecutiveMissedDays = (store.consecutiveMissedDays || 0) + 1;
-      const dayLabel = store.consecutiveMissedDays === 1 ? '一' :
-        store.consecutiveMissedDays === 2 ? '二' :
-        store.consecutiveMissedDays === 3 ? '三' :
-        store.consecutiveMissedDays === 4 ? '四' :
-        store.consecutiveMissedDays === 5 ? '五' :
-        store.consecutiveMissedDays === 6 ? '六' :
-        store.consecutiveMissedDays === 7 ? '七' :
-        store.consecutiveMissedDays === 8 ? '八' :
-        store.consecutiveMissedDays === 9 ? '九' :
-        store.consecutiveMissedDays;
-
-      const autoContents = [
-        '今天窗外一直下着雨。我在想，她是不是也在某个地方看着同样的雨。',
-        '风从北边吹来，带着陌生的气味。没有她的消息，世界慢了下来。',
-        '时钟的声音变得很响。原来寂静是这样一种东西。',
-        '路边的银杏叶开始变黄了。不知道她有没有注意到季节的变化。',
-        '路过那家她提过的书店，橱窗里换了新的陈列。我替她多看了几眼。',
-        '今天什么也没发生。但什么都不发生，有时候正是一种发生。',
-        '黄昏来得特别早。我想，也许明天她就会说点什么。',
-      ];
-
-      store.diaries.unshift({
-        id: 'd' + gid(''),
-        date: yesterdayIso,
-        time: '23:59',
-        title: `她没来的第${dayLabel}天。`,
-        content: autoContents[Math.floor(Math.random() * autoContents.length)],
-        mood: 'troubled',
-        author: 'ai',
-        replies: []
-      });
-    } else {
-      // Reset counter if there was a user diary (the user was "present" via diary)
-      if (hasUserDiary) {
-        store.consecutiveMissedDays = 0;
-      }
-    }
-  } else {
-    store.consecutiveMissedDays = 0;
-  }
-}
+function checkMissedDays() { /* removed: auto-diary feature */ }
 
 // ==================== MISC ====================
 // ==================== DATA EXPORT / IMPORT ====================
@@ -7008,17 +7237,21 @@ function exportAllData() {
 }
 
 function importAllData() {
+  console.log('[import] importAllData called');
   const input = document.createElement('input');
   input.type = 'file'; input.accept = '.json';
   input.onchange = (e) => {
     const file = e.target.files[0];
+    console.log('[import] file selected:', file.name, file.size);
     if (!file) { input.remove(); return; }
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
         const data = JSON.parse(ev.target.result);
+        console.log('[import] JSON parsed, keys:', Object.keys(data).length);
         if (typeof data !== 'object' || !data || Array.isArray(data)) throw new Error('Invalid format');
         pendingImportData = data;
+        console.log('[import] showing confirmation modal');
         showModal('确认导入', '<p style="font-size:14px;color:var(--text);line-height:1.6;">导入将覆盖当前所有数据（含聊天、日记、设置等），确定继续？</p>', [
           { label: 'cancel', cls: 'cancel', onclick: () => { pendingImportData = null; closeModal(); } },
           { label: '确认导入', cls: 'danger', onclick: executeImport }
@@ -7035,7 +7268,8 @@ function importAllData() {
 
 function executeImport() {
   if (!pendingImportData) return;
-  closeModal();
+  console.log('[import] executeImport called');
+  store._importing = true; closeModal();
   const keysToRemove = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
@@ -7049,11 +7283,11 @@ function executeImport() {
   });
   pendingImportData = null;
   toast('📤 数据已导入，即将刷新…');
-  setTimeout(() => location.reload(), 1000);
+  location.reload();
 }
 
 function clearAllData(){
-  showModal('Clear All Data',`<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要清除所有数据吗？此操作不可撤销。</p>`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'clear all',cls:'confirm',onclick:()=>{store.todos=[];store.litterThoughts=[];store.books=[];store.diaries=[];store.projects=[{id:'p1',name:'default',preference:'',memories:[],chats:[{id:'c1',name:'default',sharedMemoryIds:[],weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null}]}];store.tokenUsage.used=0;store.tokenUsage.history=[];store.consecutiveMissedDays=0;store.lastActiveDate=fmtDate().iso;store.activeProject='p1';store.activeChat='c1';saveStore();closeModal();renderAll();toast('All data cleared');}}]);
+  showModal('Clear All Data',`<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要清除所有数据吗？此操作不可撤销。</p>`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'clear all',cls:'confirm',onclick:()=>{store.todos=[];store.litterThoughts=[];store.books=[];store.diaries=[];store.projects=[{id:'p1',name:'default',preference:'',apiConfig:{apiKey:'',endpoint:'https://api.deepseek.com/v1/chat/completions',model:'deepseek-chat',enabled:true},memories:[],chats:[{id:'c1',name:'default',sharedMemoryIds:[],weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null}]}];store.tokenUsage.used=0;store.tokenUsage.history=[];store.consecutiveMissedDays=0;store.lastActiveDate=fmtDate().iso;store.activeProject='p1';store.activeChat='c1';saveStore();store._importing = true; closeModal();renderAll();toast('All data cleared');}}]);
 }
 function renderAll(){renderHome();renderProjectList();renderChatMessages();renderBookshelf();renderDiary();}
 
@@ -7162,6 +7396,7 @@ async function sendPushNotification(title, body, opts = {}) {
 }
 
 async function init(){
+  store._importing = false; // reset stale import flag
   loadStore();
   initTheme(); // apply saved theme before any rendering
   loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
@@ -7182,7 +7417,6 @@ async function init(){
       }
     });
   }
-  checkMissedDays();
   applyForgettingCurve();
   ensureColdStartPatterns();
   processPendingCoreMemories();
