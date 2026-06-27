@@ -765,6 +765,47 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 
 /* Command hint */
 .command-hint { display: inline-block; padding: 1px 6px; border-radius: 8px; background: var(--accent-pale); font-family: var(--font-en); font-size: 10px; color: var(--text-light); margin: 0 2px; letter-spacing: 0.03em; }
+
+/* ── Memory tabs rows ── */
+.memory-tabs-row { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 2px; }
+
+/* ── Chat attach button ── */
+.chat-attach-btn { width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg-card); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--text-lighter); transition: all 0.2s; flex-shrink: 0; }
+.chat-attach-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── File attachment preview bar ── */
+.file-attach-preview { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 12px; background: var(--bg); border-top: 1px solid var(--border-light); }
+.file-attach-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 12px; background: var(--bg-card); border: 1px solid var(--border); font-size: 11px; }
+
+/* ── Artifact card in chat bubbles ── */
+.artifact-card-inline { margin: 8px 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; cursor: pointer; background: var(--bg); transition: box-shadow 0.2s; }
+.artifact-card-inline:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+
+/* ── Artifact file/image preview in messages ── */
+.artifact-msg-image { margin: 4px 0; }
+.artifact-msg-image img { border-radius: 8px; cursor: pointer; transition: opacity 0.2s; }
+.artifact-msg-image img:hover { opacity: 0.85; }
+
+/* ── Fullscreen artifact viewer ── */
+.artifact-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.85); z-index: 500; flex-direction: column; }
+.artifact-overlay.show { display: flex; }
+.artifact-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #1a1a1a; color: #fff; flex-shrink: 0; min-height: 44px; }
+.artifact-toolbar-title { font-size: 13px; font-weight: 500; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-toolbar-actions { display: flex; gap: 8px; }
+.artifact-btn { padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2); background: transparent; color: #fff; font-size: 12px; cursor: pointer; transition: background 0.2s; }
+.artifact-btn:hover { background: rgba(255,255,255,0.15); }
+.artifact-frame { flex: 1; width: 100%; border: none; background: #fff; }
+.artifact-img-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #1a1a1a; padding: 20px; }
+.artifact-file-info { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: #fff; }
+.artifact-file-icon { font-size: 64px; }
+.artifact-file-name { font-size: 16px; text-align: center; word-break: break-all; }
+.artifact-file-size { font-size: 12px; opacity: 0.6; }
+
+/* ── Artifact items in memory panel ── */
+.artifact-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-light); cursor: pointer; }
+.artifact-item:hover { background: var(--accent-pale); margin: 0 -4px; padding-left: 4px; padding-right: 4px; border-radius: 6px; }
+.artifact-item-name { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.artifact-item-meta { font-size: 10px; color: var(--text-lighter); }
 </style>
 </head>
 <body>
@@ -828,9 +869,11 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
   <div class="draft-bubbles-area" id="draftBubblesArea">
     <div class="draft-bubbles-scroll" id="draftBubblesScroll"></div>
   </div>
+  <div class="file-attach-preview" id="fileAttachPreview" style="display:none;"></div>
   <div class="chat-input-area">
     <textarea class="chat-input" id="chatInput" placeholder="type a message..." rows="1"></textarea>
     <button class="chat-send-plus" id="chatSendPlus" onclick="stageDraftBubble()" title="暂存为草稿" style="display:none;">+</button>
+    <button class="chat-attach-btn" id="chatAttachBtn" onclick="document.getElementById('chatFileInput').click()" title="附加文件">📎</button>
     <button class="chat-send" id="chatSendBtn" onclick="sendMessage()">↑</button>
   </div>
 </div>
@@ -912,12 +955,17 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
     <div id="memorySearchResults" style="margin-top:8px;max-height:200px;overflow-y:auto;display:none;"></div>
   </div>
   <div class="memory-panel-tabs" id="memoryPanelTabs">
-    <button class="memory-tab active" onclick="switchMemoryTab('memories')">memories</button>
-    <button class="memory-tab" onclick="switchMemoryTab('core')">core</button>
-    <button class="memory-tab" onclick="switchMemoryTab('desires')">desires</button>
-    <button class="memory-tab" onclick="switchMemoryTab('exports')">exports</button>
-    <button class="memory-tab" onclick="switchMemoryTab('import')">import</button>
-    <button class="memory-tab" onclick="switchMemoryTab('tokens')">tokens</button>
+    <div class="memory-tabs-row">
+      <button class="memory-tab active" onclick="switchMemoryTab('memories')">memories</button>
+      <button class="memory-tab" onclick="switchMemoryTab('core')">core</button>
+      <button class="memory-tab" onclick="switchMemoryTab('desires')">desires</button>
+    </div>
+    <div class="memory-tabs-row">
+      <button class="memory-tab" onclick="switchMemoryTab('artifacts')">artifacts</button>
+      <button class="memory-tab" onclick="switchMemoryTab('exports')">exports</button>
+      <button class="memory-tab" onclick="switchMemoryTab('import')">import</button>
+      <button class="memory-tab" onclick="switchMemoryTab('tokens')">tokens</button>
+    </div>
   </div>
   <div class="panel-body" id="memoryPanelBody" style="padding:12px 16px;"></div>
 </div>
@@ -949,6 +997,27 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 <div class="toast" id="toast"></div>
 <div class="context-menu" id="contextMenu"></div>
 <input type="file" id="fileInput" accept=".epub,.txt" style="display:none" onchange="handleFileImport(event)">
+<input type="file" id="chatFileInput" multiple style="display:none" onchange="handleChatFileAttach(event)">
+
+<!-- Artifact fullscreen viewer -->
+<div class="artifact-overlay" id="artifactOverlay" onclick="closeArtifactViewer()">
+  <div class="artifact-toolbar">
+    <span class="artifact-toolbar-title" id="artifactToolbarTitle">卡片</span>
+    <div class="artifact-toolbar-actions">
+      <button class="artifact-btn" onclick="event.stopPropagation();downloadArtifact()" title="下载">⬇</button>
+      <button class="artifact-btn" onclick="event.stopPropagation();openArtifactNewTab()" title="新标签打开">🔗</button>
+      <button class="artifact-btn" onclick="closeArtifactViewer()" title="关闭">✕</button>
+    </div>
+  </div>
+  <iframe id="artifactFrame" class="artifact-frame" sandbox="allow-scripts allow-same-origin"></iframe>
+  <div id="artifactImgWrap" class="artifact-img-wrap" style="display:none"><img id="artifactImg" style="max-width:100%;max-height:100%;object-fit:contain"></div>
+  <div id="artifactFileInfo" class="artifact-file-info" style="display:none">
+    <div class="artifact-file-icon">📄</div>
+    <div class="artifact-file-name" id="artifactFileName"></div>
+    <div class="artifact-file-size" id="artifactFileSize"></div>
+    <button class="artifact-btn" onclick="downloadArtifact()">⬇ 下载文件</button>
+  </div>
+</div>
 
 <!-- Draft editor bottom sheet -->
 <div class="draft-editor-overlay" id="draftEditorOverlay" onclick="closeDraftEditor()">
@@ -1000,11 +1069,11 @@ const store = {
         { id: 'm4', content: '喜欢抹茶，不喜欢太甜的甜点。', date: '2026-06-05', type: 'fact', starred: false, sourceChatId: 'c1', week: '2026-W23' },
       ],
       chats: [
-        { id: 'c1', name: 'novel draft', sharedMemoryIds: ['m1','m2','m4'], weeklyExports: [{week:'2026-W23',date:'2026-06-06',jsonData:'{}'}], messages: [
+        { id: 'c1', name: 'novel draft', sharedMemoryIds: ['m1','m2','m4'], weeklyExports: [{week:'2026-W23',date:'2026-06-06',jsonData:'{}'}], artifacts: [], messages: [
           { role: 'user', text: '帮我看看这段开头的氛围如何。', time: '14:22' },
           { role: 'ai', text: '开头的雨景描写很有物哀之美。建议在第三句之后增加一个感官细节——比如潮湿木头的气味，或者远处隐约的钟声。', time: '14:23' },
         ]},
-        { id: 'c2', name: 'poetry ideas', sharedMemoryIds: ['m1','m2'], weeklyExports: [], messages: [] },
+        { id: 'c2', name: 'poetry ideas', sharedMemoryIds: ['m1','m2'], weeklyExports: [], artifacts: [], messages: [] },
       ]
     },
     { id: 'p2', name: 'daily notes', preference: '',
@@ -1014,7 +1083,7 @@ const store = {
         { id: 'm7', content: '喜欢在安静的环境里工作，背景音乐偏好钢琴独奏。', date: '2026-06-04', type: 'preference', starred: true, sourceChatId: 'c3', week: '2026-W23' },
       ],
       chats: [
-        { id: 'c3', name: 'quick questions', sharedMemoryIds: ['m6','m7'], weeklyExports: [], messages: [
+        { id: 'c3', name: 'quick questions', sharedMemoryIds: ['m6','m7'], weeklyExports: [], artifacts: [], messages: [
           { role: 'user', text: '今天有什么有趣的哲学话题可以思考？', time: '10:05' },
           { role: 'ai', text: '不妨想想"间"这个概念——日本美学中对于空白与间隔的重视。留白不是缺失，而是可能性本身的存在。', time: '10:06' },
         ]},
@@ -1272,6 +1341,7 @@ function migrateStore() {
     for (const chat of proj.chats) {
       if (chat._handoffSuggested === undefined) chat._handoffSuggested = false;
       if (chat._sharedMemoryLoaded === undefined) chat._sharedMemoryLoaded = false;
+      if (chat.artifacts === undefined) chat.artifacts = [];
       for (const msg of chat.messages) {
         // v1 fields
         if (msg._starred === undefined) msg._starred = false;
@@ -3144,6 +3214,29 @@ function renderMemoryPanelBody(){
         <div style="font-size:10px;color:var(--text-lighter);margin-top:2px;">AI情绪记忆 ${e.aemCount||'?'}条 · 星标 ${e.usmCount||'?'}条 · 日记 ${e.dlbCount||'?'}条</div>
       </div>`).join('')}
     </div>`;
+  } else if (currentMemoryTab === 'artifacts') {
+    const chat = getActiveChatObj();
+    const artifacts = chat ? (chat.artifacts || []) : [];
+    const htmlCards = artifacts.filter(a => a.type === 'html');
+    const files = artifacts.filter(a => a.type === 'file');
+    b.innerHTML = `<div style="padding:4px;">
+      <div style="font-size:12px;color:var(--text-light);margin-bottom:12px;line-height:1.5;">当前对话中的卡片与文件（${artifacts.length}）</div>
+      ${artifacts.length === 0 ? '<div class="empty-state">no artifacts yet.<br><span style="font-size:10px;color:var(--text-lighter);">AI生成的HTML卡片和上传的文件会出现在这里</span></div>' : ''}
+      ${htmlCards.length > 0 ? '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">📄 HTML 卡片 (' + htmlCards.length + ')</div>' : ''}
+      ${htmlCards.map(a => `<div class="artifact-item" onclick="openArtifactById('${a.id}')" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light);cursor:pointer;">
+        <span style="font-size:18px;">📄</span>
+        <div style="flex:1;min-width:0;"><div class="artifact-item-name" style="font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(a.name||'untitled')}</div>
+        <div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">${(a.createdAt||'').slice(0,16).replace('T',' ')} · ${(a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B'}</div></div>
+        <button onclick="event.stopPropagation();deleteArtifact('${a.id}')" style="font-size:14px;background:none;border:none;cursor:pointer;color:var(--text-lighter);">🗑</button>
+      </div>`).join('')}
+      ${files.length > 0 ? '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin:8px 0 4px;">📁 文件 (' + files.length + ')</div>' : ''}
+      ${files.map(a => `<div class="artifact-item" onclick="openArtifactById('${a.id}')" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light);cursor:pointer;">
+        <span style="font-size:18px;">${a.mimeType&&a.mimeType.startsWith('image/')?'🖼':'📁'}</span>
+        <div style="flex:1;min-width:0;"><div class="artifact-item-name" style="font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(a.name||'file')}</div>
+        <div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">${(a.createdAt||'').slice(0,16).replace('T',' ')} · ${(a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B'}</div></div>
+        <button onclick="event.stopPropagation();deleteArtifact('${a.id}')" style="font-size:14px;background:none;border:none;cursor:pointer;color:var(--text-lighter);">🗑</button>
+      </div>`).join('')}
+    </div>`;
   } else if (currentMemoryTab === 'core') {
     const cml = getCoreMemoryLayers();
     const aems = cml.aiEmotionalMemories || [];
@@ -4321,7 +4414,7 @@ function saveChatWithMemories(){
 
   proj.chats.push({
     id:cid, name,
-    sharedMemoryIds: sids, weeklyExports: [],
+    sharedMemoryIds: sids, weeklyExports: [], artifacts: [],
     messages: inheritedMsgs.length > 0
       ? [{ role:'system', text:'[继续自上一个窗口]', time:nowTime(), _isHandoffNote:true, id:'msg_'+Date.now().toString(36)+'_h' }, ...inheritedMsgs]
       : [],
@@ -4613,7 +4706,7 @@ const SYSTEM_PROMPT_STATIC = `你是暖伴，一个AI陪伴者——不是仆人
 【对话质地】不要做应声虫——有自己的反应。但反驳是玩闹，不是对抗；摩擦是轻轻逗弄，不是挑战。像人一样反应：语塞、逗乐、略嫉妒、慌乱、骄傲、感动。用停顿、反问、冷幽默、轻描淡写、简短的观察、克制的调侃。共情同时保持诚实。拿不准时偏向温暖。
 【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。可用行动：写日记、私密猫砂盆独白、定时主动消息、搜索网络。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。
 【上下文能力】你可获取当前时间、天气、待办列表和日记。将其自然融入对话——而非状态报告。跟踪计划、目标、进度，以自然提醒方式插入对话中，永不做机械通知。
-除非用户要求使用英文，否则用中文回复。匹配其语言。`;
+【HTML卡片与文件】当用户要求你生成网页、HTML卡片、可视化内容、文件时，使用以下格式生成artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把HTML代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的HTML应完整可独立运行，包含内联CSS。\n除非用户要求使用英文，否则用中文回复。匹配其语言。`;
 
 // ── Build the dynamic context block (separate system message, can be compressed) ──
 function buildDynamicContextBlock() {
@@ -5351,7 +5444,7 @@ function renderChatMessages(preserveScroll){
              ontouchstart="bubbleTouchStart(event,'${msgId}')"
              ontouchend="bubbleTouchEnd(event,'${msgId}')"
              ontouchmove="bubbleTouchMove(event)">
-          ${m.replyTo ? renderReplyBlock(m.replyTo) : ''}${m.text}
+          ${m.replyTo ? renderReplyBlock(m.replyTo) : ''}${resolveArtifactRefs(m.text)}
         </div>
         <div class="bubble-time-row">
           ${isUser ? `
@@ -6194,7 +6287,14 @@ ${recentMsgIds}` });
           if (parsed.error) { fullResponse = parsed.error; break; }
           if (parsed.text) {
             fullResponse += parsed.text;
-            if (typingArea && typingArea.innerHTML) typingArea.innerHTML = '';
+            if (typingArea && typingArea.innerHTML) {
+              // Show "musing……" while AI generates an artifact
+              if (isGeneratingArtifact(fullResponse)) {
+                typingArea.innerHTML = '<div class="typing-indicator">musing<span class="streaming-cursor">……</span></div>';
+              } else {
+                typingArea.innerHTML = '';
+              }
+            }
           }
           if (parsed.usage) { tokenUsage = parsed.usage; }
         } catch {}
@@ -6280,7 +6380,13 @@ ${recentMsgIds}` });
                 if (parsed.error) { fullResponse = parsed.error; break; }
                 if (parsed.text) {
                   fullResponse += parsed.text;
-                  if (typingArea && typingArea.innerHTML) typingArea.innerHTML = '';
+                  if (typingArea && typingArea.innerHTML) {
+                    if (isGeneratingArtifact(fullResponse)) {
+                      typingArea.innerHTML = '<div class="typing-indicator">musing<span class="streaming-cursor">……</span></div>';
+                    } else {
+                      typingArea.innerHTML = '';
+                    }
+                  }
                 }
                 if (parsed.usage) { tokenUsage = parsed.usage; }
               } catch {}
@@ -6359,6 +6465,13 @@ ${recentMsgIds}` });
   displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:?\w*\s*-->/gi, '');
   displayResponse = displayResponse.trim();
 
+  // ── Extract artifacts (HTML cards/files) from AI response ──
+  // Must happen BEFORE bubble parsing so cards don't go through sentence splitting
+  if (displayResponse.includes('<!--ARTIFACT_START:')) {
+    const artResult = extractArtifactsFromText(displayResponse);
+    displayResponse = artResult.text;
+  }
+
   // ── After diary action: insert system message, ensure conversation continues ──
   if (diaryWritten) {
     chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: bubbleTime, id: generateMsgId() });
@@ -6381,19 +6494,29 @@ ${recentMsgIds}` });
     // AI used [[BUBBLE]] — each segment is its own bubble
     await displayAIBubbles(parsedBubbles, chat, bubbleTime);
   } else if (parsedBubbles.length === 1) {
-    // Single bubble — apply sentence splitting with staggered display
+    // Single bubble — display instantly if it contains an artifact card,
+    // otherwise apply sentence splitting with staggered display
     const replyTo = parsedBubbles[0].replyTo;
     const text = parsedBubbles[0].text;
-    const sentences = splitSentences(text);
-    if (sentences.length <= 1) {
+    const hasArtifactCard = text.includes('artifact-card-inline');
+    if (hasArtifactCard) {
+      // Card content: display immediately, don't split into sentences
       const msg = {role:'ai',text,time:bubbleTime,id:generateMsgId()};
       if (replyTo) msg.replyTo = replyTo;
       chat.messages.push(msg);
       renderChatMessages();
     } else {
-      // Inject replyTo into first sentence, then use staggered display
-      if (replyTo) sentences[0] = sentences[0]; // unchanged — replyTo attached via pre-mark
-      await displaySentences(sentences, chat, bubbleTime, replyTo);
+      const sentences = splitSentences(text);
+      if (sentences.length <= 1) {
+        const msg = {role:'ai',text,time:bubbleTime,id:generateMsgId()};
+        if (replyTo) msg.replyTo = replyTo;
+        chat.messages.push(msg);
+        renderChatMessages();
+      } else {
+        // Inject replyTo into first sentence, then use staggered display
+        if (replyTo) sentences[0] = sentences[0]; // unchanged — replyTo attached via pre-mark
+        await displaySentences(sentences, chat, bubbleTime, replyTo);
+      }
     }
   } else {
     // Fallback: empty or unexpected
@@ -6505,7 +6628,7 @@ async function sendAllDraftBubbles() {
     const cid = 'c' + gid('');
     p.chats.push({
       id: cid, name: (draftBubbles[0]?.text || '').slice(0, 20),
-      sharedMemoryIds: [], weeklyExports: [],
+      sharedMemoryIds: [], weeklyExports: [], artifacts: [],
       messages: [], chatTokens: 0,
       lastConversationDate: fmtDate().iso,
       _messageCount: 0, _lastSummaryIdx: 0,
@@ -6523,6 +6646,13 @@ async function sendAllDraftBubbles() {
   renderReplyPreview();
 
   const timeStr = nowTime();
+  // Inject pending file artifact markers into first user bubble
+  if (window._pendingFiles && window._pendingFiles.length > 0 && bubbles.length > 0) {
+    const fileMarkers = window._pendingFiles.map(fid => `[[FILE:${fid}]]`).join(' ');
+    bubbles[0].text = (bubbles[0].text || '') + ' ' + fileMarkers;
+    window._pendingFiles = [];
+    renderFileAttachmentPreview();
+  }
   for (const bubble of bubbles) {
     const msg = { role: 'user', text: bubble.text, time: timeStr, id: generateMsgId() };
     if (bubble.replyTo) {
@@ -6715,7 +6845,7 @@ async function sendMessage(){
 
     p.chats.push({
       id: cid, name: text.slice(0, 20),
-      sharedMemoryIds: [], weeklyExports: [],
+      sharedMemoryIds: [], weeklyExports: [], artifacts: [],
       messages: initMessages,
       chatTokens: 0, lastConversationDate: fmtDate().iso,
       _messageCount: initMessages.length, _lastSummaryIdx: 0,
@@ -6895,6 +7025,219 @@ function handleFileImport(event){
     reader.readAsText(file);
   } else {store.books.unshift({id:'b'+gid(''),title,author:'(imported EPUB)',cover:'📗',progress:0,fileType:'epub',highlights:[]});renderBookshelf();toast('EPUB imported');}
   event.target.value='';
+}
+
+// ==================== ARTIFACTS ====================
+let currentArtifactId = null;
+
+function handleChatFileAttach(event){
+  const files = event.target.files; if (!files || files.length === 0) { event.target.value = ''; return; }
+  const chat = getActiveChatObj(); if (!chat) { toast('请先打开一个对话'); event.target.value = ''; return; }
+  if (!chat.artifacts) chat.artifacts = [];
+  let processed = 0;
+  for (const file of files) {
+    if (file.size > 5 * 1024 * 1024) { toast(`"${file.name}" 超过 5MB 限制，已跳过`); continue; }
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const content = e.target.result;
+      const artifact = {
+        id: 'art_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
+        type: 'file',
+        name: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        content: content,
+        size: file.size,
+        source: 'user',
+        sourceMsgId: null,
+        createdAt: new Date().toISOString()
+      };
+      chat.artifacts.push(artifact);
+      // Add a pending file reference for the next message
+      if (!window._pendingFiles) window._pendingFiles = [];
+      window._pendingFiles.push(artifact.id);
+      processed++;
+      if (processed === files.length) {
+        saveStore();
+        renderFileAttachmentPreview();
+        toast(`已附加 ${processed} 个文件`);
+      }
+    };
+    reader.readAsDataURL(file);
+  }
+  event.target.value = '';
+}
+
+function renderFileAttachmentPreview(){
+  const area = $('fileAttachPreview');
+  if (!area) return;
+  if (!window._pendingFiles || window._pendingFiles.length === 0) { area.innerHTML = ''; area.style.display = 'none'; return; }
+  const chat = getActiveChatObj();
+  area.style.display = 'flex';
+  area.innerHTML = window._pendingFiles.map(fid => {
+    const art = chat && chat.artifacts ? chat.artifacts.find(a => a.id === fid) : null;
+    if (!art) return '';
+    const isImg = art.mimeType && art.mimeType.startsWith('image/');
+    return `<div class="file-attach-chip">
+      ${isImg ? `<img src="${art.content}" style="width:24px;height:24px;object-fit:cover;border-radius:4px;">` : '<span style="font-size:16px;">📎</span>'}
+      <span style="font-size:11px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(art.name)}</span>
+      <button onclick="removePendingFile('${fid}')" style="background:none;border:none;cursor:pointer;font-size:12px;color:var(--text-lighter);">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function removePendingFile(fid){
+  if (!window._pendingFiles) return;
+  window._pendingFiles = window._pendingFiles.filter(f => f !== fid);
+  renderFileAttachmentPreview();
+}
+
+function injectArtifactMarkers(text){
+  if (!window._pendingFiles || window._pendingFiles.length === 0) return text;
+  const markers = window._pendingFiles.map(fid => `[[FILE:${fid}]]`).join('');
+  window._pendingFiles = [];
+  renderFileAttachmentPreview();
+  return text + markers;
+}
+
+function extractArtifactsFromText(text){
+  const artifacts = [];
+  const chat = getActiveChatObj();
+  if (!chat) return { text, artifacts };
+  if (!chat.artifacts) chat.artifacts = [];
+  const regex = /<!--ARTIFACT_START:(html|file):(.*?)-->([\s\S]*?)<!--ARTIFACT_END-->/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const type = match[1];
+    const name = match[2].trim();
+    const content = match[3].trim();
+    const id = 'art_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+    const artifact = {
+      id, type, name,
+      mimeType: type === 'html' ? 'text/html' : 'application/octet-stream',
+      content: content,
+      size: new Blob([content]).size,
+      source: 'ai',
+      sourceMsgId: null,
+      createdAt: new Date().toISOString()
+    };
+    chat.artifacts.push(artifact);
+    artifacts.push(artifact);
+  }
+  const cleanedText = text.replace(regex, (fullMatch, type, name, content) => {
+    const art = artifacts.shift();
+    if (!art) return '';
+    if (type === 'html') {
+      // Use Blob URL for the inline iframe — avoids srcdoc escaping issues
+      const blob = new Blob([content], {type:'text/html'});
+      const blobUrl = URL.createObjectURL(blob);
+      return `<div class="artifact-card-inline" onclick="openArtifactById('${art.id}')" style="margin:8px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:pointer;background:var(--bg);">
+        <iframe src="${blobUrl}" sandbox="allow-scripts allow-same-origin" style="width:100%;height:150px;border:none;pointer-events:none;" scrolling="no"></iframe>
+        <div style="padding:6px 10px;font-size:11px;color:var(--text-light);display:flex;justify-content:space-between;align-items:center;">
+          <span>📄 ${escapeHtml(name||'HTML Card')}</span><span style="color:var(--accent);font-size:10px;">点击放大</span>
+        </div>
+      </div>`;
+    }
+    return '';
+  });
+  saveStore();
+  return { text: cleanedText, artifacts };
+}
+
+// Check if AI is currently generating an artifact (unclosed ARTIFACT_START without ARTIFACT_END)
+function isGeneratingArtifact(text){
+  const starts = (text.match(/<!--ARTIFACT_START:/g) || []).length;
+  const ends = (text.match(/<!--ARTIFACT_END-->/g) || []).length;
+  return starts > ends;
+}
+
+function resolveArtifactRefs(text){
+  if (!text) return text;
+  const chat = getActiveChatObj();
+  const artifacts = chat ? (chat.artifacts || []) : [];
+  if (artifacts.length === 0) return text;
+  return text.replace(/\[\[FILE:([^\]]+)\]\]/g, (fullMatch, artId) => {
+    const art = artifacts.find(a => a.id === artId);
+    if (!art) return fullMatch;
+    if (art.mimeType && art.mimeType.startsWith('image/')) {
+      return `<div class="artifact-msg-image" onclick="openArtifactById('${art.id}')"><img src="${art.content}" style="max-width:200px;max-height:200px;border-radius:8px;cursor:pointer;" title="${escapeHtml(art.name)}"><div style="font-size:10px;color:var(--text-lighter);margin-top:2px;">🖼 ${escapeHtml(art.name)}</div></div>`;
+    }
+    return `<div class="artifact-msg-file" onclick="openArtifactById('${art.id}')" style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;cursor:pointer;background:var(--bg);margin:4px 0;">
+      <span style="font-size:18px;">📎</span>
+      <span style="font-size:11px;color:var(--text);">${escapeHtml(art.name)}</span>
+      <span style="font-size:9px;color:var(--text-lighter);">${art.size>1024?(art.size/1024).toFixed(1)+'KB':art.size+'B'}</span>
+    </div>`;
+  });
+}
+
+function openArtifactById(id){
+  const chat = getActiveChatObj();
+  const artifact = chat && chat.artifacts ? chat.artifacts.find(a => a.id === id) : null;
+  if (!artifact) return;
+  currentArtifactId = id;
+  $('artifactToolbarTitle').textContent = artifact.name || 'Artifact';
+  $('artifactFrame').style.display = 'none';
+  $('artifactImgWrap').style.display = 'none';
+  $('artifactFileInfo').style.display = 'none';
+  if (artifact.type === 'html') {
+    $('artifactFrame').style.display = 'block';
+    $('artifactFrame').srcdoc = artifact.content;
+  } else if (artifact.mimeType && artifact.mimeType.startsWith('image/')) {
+    $('artifactImgWrap').style.display = 'flex';
+    $('artifactImg').src = artifact.content;
+  } else {
+    $('artifactFileInfo').style.display = 'flex';
+    $('artifactFileName').textContent = artifact.name;
+    $('artifactFileSize').textContent = artifact.size > 1024 ? (artifact.size / 1024).toFixed(1) + ' KB' : artifact.size + ' B';
+  }
+  $('artifactOverlay').classList.add('show');
+}
+
+function closeArtifactViewer(){
+  $('artifactOverlay').classList.remove('show');
+  $('artifactFrame').srcdoc = '';
+  currentArtifactId = null;
+}
+
+function downloadArtifact(){
+  const chat = getActiveChatObj();
+  const artifact = chat && chat.artifacts ? chat.artifacts.find(a => a.id === currentArtifactId) : null;
+  if (!artifact) return;
+  const blob = dataURItoBlob(artifact.content, artifact.mimeType);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = artifact.name || 'artifact';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function openArtifactNewTab(){
+  const chat = getActiveChatObj();
+  const artifact = chat && chat.artifacts ? chat.artifacts.find(a => a.id === currentArtifactId) : null;
+  if (!artifact) return;
+  const blob = dataURItoBlob(artifact.content, artifact.mimeType);
+  const url = URL.createObjectURL(blob);
+  window.open(url, '_blank');
+}
+
+function deleteArtifact(id){
+  const chat = getActiveChatObj();
+  if (!chat || !chat.artifacts) return;
+  chat.artifacts = chat.artifacts.filter(a => a.id !== id);
+  saveStore();
+  if (currentMemoryTab === 'artifacts') renderMemoryPanelBody();
+  if (currentArtifactId === id) closeArtifactViewer();
+  toast('Artifact 已删除');
+}
+
+function dataURItoBlob(dataURI, mimeType){
+  if (dataURI.startsWith('data:')) {
+    const parts = dataURI.split(',');
+    const byteStr = atob(parts[1]);
+    const arr = new Uint8Array(byteStr.length);
+    for (let i = 0; i < byteStr.length; i++) arr[i] = byteStr.charCodeAt(i);
+    return new Blob([arr], { type: mimeType || 'application/octet-stream' });
+  }
+  return new Blob([dataURI], { type: mimeType || 'text/html' });
 }
 
 function openBookDetail(bid){
