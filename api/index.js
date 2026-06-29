@@ -22,6 +22,17 @@ try {
 // synchronous startup errors and ensure proper error propagation.
 module.exports = (req, res) => {
   try {
+    // Vercel rewrite passes original path as query param: /api/index?__path=presets
+    // Restore req.url so Express routes like /api/presets match correctly
+    if (req.query && req.query.__path) {
+      const originalPath = '/api/' + req.query.__path;
+      // Preserve original query string (excluding __path)
+      const qs = new URLSearchParams(req.query);
+      qs.delete('__path');
+      const qsStr = qs.toString();
+      req.url = originalPath + (qsStr ? '?' + qsStr : '');
+    }
+
     // Express 5 app handles the request — any uncaught async errors are
     // caught by the global error handler middleware in server.js
     app(req, res);
