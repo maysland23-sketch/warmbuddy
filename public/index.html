@@ -1038,8 +1038,8 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 
 <script>
 // ==================== DATA ====================
-// Backend API base URL (Render). Vercel only hosts static files.
-const BACKEND_URL = location.origin;
+// Backend API base URL — points to Render, NOT Vercel static host
+const BACKEND_URL = 'https://warmbuddy.onrender.com';
 // VAPID public key — hardcoded (it's public, no need to fetch each time)
 const VAPID_PUBLIC_KEY = 'BMxMi0X5umwzfA8ZZHJPuiGCKpH-nY53Eo3IaljnnML1F1oUXdB7kftY_e5oCIIMxMWKujGTdBp5VhS6BQjyKR4';
 
