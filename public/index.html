@@ -1178,14 +1178,32 @@ const store = {
 
 // ==================== PERSISTENCE ====================
 function saveStore() {
-  if (store._importing) return;
-  try { localStorage.setItem('warmbuddy-store', JSON.stringify(store)); } catch(e) {}
+  // NOTE: _importing guard REMOVED (v2.4 fix). The flag was being set to true
+  // by 30+ modal callbacks and never reset, permanently disabling all saves.
+  // The only legitimate use (executeImport) calls location.reload() immediately.
+  try {
+    var json = JSON.stringify(store);
+    localStorage.setItem('warmbuddy-store', json);
+    console.log('[saveStore] ✅ 保存成功, 大小:', (json.length/1024).toFixed(1), 'KB, 项目:', store.projects.length, '个');
+  } catch(e) {
+    console.error('[saveStore] ❌ 保存失败:', e.name, e.message);
+  }
 }
 function loadStore() {
   try {
-    const saved = JSON.parse(localStorage.getItem('warmbuddy-store'));
-    if (saved) Object.assign(store, saved);
-  } catch(e) {}
+    var saved = JSON.parse(localStorage.getItem('warmbuddy-store'));
+    if (saved) {
+      // Strip transient flags that must never persist across sessions
+      delete saved._importing;
+      delete saved._pendingHandoff;
+      Object.assign(store, saved);
+      console.log('[loadStore] ✅ 加载成功, 项目:', saved.projects ? saved.projects.length : 0, '个');
+    } else {
+      console.log('[loadStore] ⚠️ localStorage 中没有数据');
+    }
+  } catch(e) {
+    console.error('[loadStore] ❌ 加载失败:', e.name, e.message);
+  }
   migrateStore();
 }
 
@@ -7739,8 +7757,8 @@ async function sendPushNotification(title, body, opts = {}) {
 }
 
 async function init(){
-  store._importing = false; // reset stale import flag
   loadStore();
+  store._importing = false; // reset stale import flag (must be AFTER loadStore, which may load _importing=true from corrupted save)
   initTheme(); // apply saved theme before any rendering
   loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
   updateSettingsUI();
