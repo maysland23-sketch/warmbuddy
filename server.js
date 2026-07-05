@@ -462,8 +462,10 @@ function extractResponseContent(provider, data) {
 }
 
 // ==================== PROJECT CONFIGS + SYSTEM EVENTS ====================
-const CONFIGS_FILE = path.join(__dirname, 'projectConfigs.json');
-const EVENTS_FILE = path.join(__dirname, 'systemEvents.json');
+const DATA_DIR = process.env.RENDER_DISK_MOUNT_PATH || path.join(__dirname, 'data');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const CONFIGS_FILE = path.join(DATA_DIR, 'projectConfigs.json');
+const EVENTS_FILE = path.join(DATA_DIR, 'systemEvents.json');
 
 function loadProjectConfigs() {
   try { return JSON.parse(fs.readFileSync(CONFIGS_FILE, 'utf-8')); } catch { return {}; }
