@@ -931,6 +931,12 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
       <div class="settings-item" onclick="showProjectApiModal()"><span class="si-label">API Endpoint</span><span class="si-val" id="apiEndpointVal">anthropic</span></div>
     </div>
     <div class="settings-group">
+      <div class="settings-group-label">邮件发送</div>
+      <div class="settings-item" onclick="toggleEmailEnabled()"><span class="si-label">启用邮件</span><div class="toggle-switch" id="toggleEmail"></div></div>
+      <div class="settings-item" onclick="showEmailConfigModal()"><span class="si-label">邮箱配置</span><span class="si-val" id="emailStatusVal">未配置</span></div>
+      <div class="settings-item"><span class="si-label">今日已发</span><span class="si-val" id="emailSentVal">0/2</span></div>
+    </div>
+    <div class="settings-group">
       <div class="settings-group-label">OTHER</div>
       <div class="settings-item" onclick="toggleDarkMode()"><span class="si-label">Dark mode</span><span class="si-val" id="darkModeStatus">off</span></div>
     </div>
@@ -1174,6 +1180,7 @@ const store = {
   // ==================== WINDOW HANDOFF ====================
   _pendingHandoff: null,
   _importLock: false,   // transient: blocks saves only during executeImport()→reload window
+  _emailConfigured: false,  // set by updateEmailSettingsUI when email is configured & enabled
   // desireSystem moved to per-project (v2.1) — initialized in migrateStore()
 };
 
@@ -3974,6 +3981,7 @@ const preset = store.providerPresets.find(p => p.id === store.selectedPreset);
   $('prefVal').textContent=pref?pref.slice(0,20)+(pref.length>20?'…':''):'edit';
   $('aiNameVal').textContent = getAIName();
   renderThemePicker();
+  updateEmailSettingsUI();
 }
 function toggleAiSetting(k){
   store.aiSettings[k]=!store.aiSettings[k]; updateSettingsUI();
@@ -4812,6 +4820,11 @@ function buildDynamicContextBlock() {
 
   if (store.aiSettings.webSearch) {
     parts.push('【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。');
+  }
+
+  // Email capability (only when configured)
+  if (store._emailConfigured) {
+    parts.push('【邮件发送】当用户要求发送邮件时，使用格式 [[EMAIL:主题]] 标记。系统会自动撰写并发送邮件。');
   }
 
   // Last interaction time awareness
@@ -6608,6 +6621,14 @@ ${recentMsgIds}` });
     displayResponse = displayResponse.replace(/\[\[TODO:[^\]]+\]\]/g, '').trim();
   }
 
+  // ── Extract EMAIL markers from AI response (before bubble rendering) ──
+  var emailData = extractEmailFromResponse(displayResponse);
+  if (emailData) {
+    displayResponse = displayResponse.replace(/\[\[EMAIL:[^\]]+\]\]/, '').trim();
+    var subject = emailData.subject || '无主题';
+    handleEmailSend(chat, subject, emailData.body);
+  }
+
   // ── Extract artifacts (HTML cards/files) from AI response ──
   // Must happen BEFORE bubble parsing so cards don't go through sentence splitting
   if (displayResponse.includes('<!--ARTIFACT_START:')) {
@@ -7157,6 +7178,104 @@ function renderBookGrid(){
   const el=$('bookshelfGrid');
   if(store.books.length===0){el.innerHTML='<div class="empty-state" style="grid-column:1/-1;">your shelf is empty.</div>';return;}
   el.innerHTML=store.books.map(b=>`<div class="book-card" onclick="openBookDetail('${b.id}')"><div class="book-cover">${b.cover}</div><div class="book-title">${b.title}</div><div class="book-author">${b.author}</div><div class="book-progress"><div class="book-progress-bar" style="width:${b.progress}%"></div></div><div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);margin-top:4px;">${b.progress}%</div></div>`).join('');
+}
+
+// ==================== EMAIL SENDING ====================
+function showEmailConfigModal(){
+  showModal('邮件配置',`
+    <div style="font-size:11px;color:var(--text-lighter);margin-bottom:4px;">Gmail 地址（发件）</div>
+    <input class="modal-input" id="emailGmailInput" placeholder="user@gmail.com">
+    <div style="font-size:11px;color:var(--text-lighter);margin:12px 0 4px;">应用专用密码</div>
+    <input class="modal-input" id="emailPwdInput" type="password" placeholder="16位应用专用密码">
+    <div style="font-size:10px;color:var(--text-lighter);margin:2px 0 12px;">在 <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--accent);">Google 账号 → 应用专用密码</a> 生成</div>
+    <div style="font-size:11px;color:var(--text-lighter);margin-bottom:4px;">固定收件人</div>
+    <input class="modal-input" id="emailRecipientInput" placeholder="收件人邮箱">
+  `,[
+    {label:'cancel',cls:'cancel',onclick:closeModal},
+    {label:'save',cls:'confirm',onclick:saveEmailConfig}
+  ]);
+  // Pre-fill current values
+  fetch(BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
+    var gmailEl=$('emailGmailInput'), pwdEl=$('emailPwdInput'), recEl=$('emailRecipientInput');
+    if(gmailEl && s.email) gmailEl.value=s.email;
+    if(recEl && s.recipient) recEl.value=s.recipient;
+    if(pwdEl && s.configured) pwdEl.placeholder='••••••••（留空保持原密码）';
+  }).catch(function(){});
+}
+
+function saveEmailConfig(){
+  var gmail=$('emailGmailInput').value.trim();
+  var pwd=$('emailPwdInput').value.trim();
+  var recipient=$('emailRecipientInput').value.trim();
+  fetch(BACKEND_URL+'/api/email/config',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({gmailAddress:gmail,appPassword:pwd,recipient:recipient})
+  }).then(function(r){return r.json()}).then(function(d){
+    store._importing=true;closeModal();
+    if(d.configured) toast('✅ 邮件已配置'); else toast('⚠️ 请填写完整配置');
+    updateEmailSettingsUI();
+  }).catch(function(){ toast('配置保存失败'); });
+}
+
+function toggleEmailEnabled(){
+  fetch(BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
+    var enabled=!s.enabled;
+    fetch(BACKEND_URL+'/api/email/settings',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled:enabled})
+    }).then(function(){ updateEmailSettingsUI(); toast('邮件发送: '+(enabled?'ON':'OFF')); });
+  }).catch(function(){});
+}
+
+function updateEmailSettingsUI(){
+  fetch(BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
+    $('toggleEmail').classList.toggle('on',s.enabled);
+    $('emailStatusVal').textContent=s.configured?s.email||'已配置':'未配置';
+    $('emailSentVal').textContent=s.sentToday+'/'+s.maxPerDay;
+    store._emailConfigured = s.configured && s.enabled;
+  }).catch(function(){});
+}
+
+function extractEmailFromResponse(text){
+  if(!text)return null;
+  var re=/\[\[EMAIL:([^\]|]+)(?:\|([\s\S]*?))?\]\]/;
+  var m=text.match(re);
+  if(!m)return null;
+  return{subject:m[1].trim(),body:(m[2]||'').trim()};
+}
+
+async function handleEmailSend(chat, subject, body){
+  var typingArea=$('chatTypingArea');
+  if(typingArea)typingArea.innerHTML='<div class="typing-indicator">正在写邮件……<span class="streaming-cursor">|</span></div>';
+  var cfg=getActiveApiConfig();
+  if(!cfg||!cfg.apiKey){toast('请先配置API Key');return false;}
+  try{
+    var msgs=[];
+    for(var i=0;i<chat.messages.length;i++){
+      var m=chat.messages[i];
+      if(m.role==='system')continue;
+      msgs.push({role:m.role==='ai'?'assistant':m.role,content:m.text});
+    }
+    var resp=await fetch(BACKEND_URL+'/api/email/send',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({subject:subject,messages:msgs,apiConfig:{apiKey:cfg.apiKey,endpoint:cfg.endpoint,model:cfg.model}})
+    });
+    var data=await resp.json();
+    if(data.ok){
+      chat.messages.push({role:'system',contentType:'email_notification',text:'邮件已发送',time:nowTime()});
+      if(typingArea)typingArea.innerHTML='';
+      return true;
+    }else{
+      toast('邮件发送失败: '+(data.error||'未知错误'));
+      if(typingArea)typingArea.innerHTML='';
+      return false;
+    }
+  }catch(e){
+    console.error('[email]',e.message);
+    toast('邮件发送失败: '+e.message);
+    if(typingArea)typingArea.innerHTML='';
+    return false;
+  }
 }
 function showBookshelfAddMenu(){
   showModal('Add Book',`<button class="import-btn" onclick="store._importing = true; closeModal();$('fileInput').click()">📂 Import EPUB / TXT</button><div style="text-align:center;padding:8px;font-family:var(--font-en);font-size:11px;color:var(--text-lighter);">or</div><input class="modal-input" id="newBookTitle" placeholder="Book title"><input class="modal-input" id="newBookAuthor" placeholder="Author"><input class="modal-input" id="newBookProgress" placeholder="Progress (%)" value="0" type="number" min="0" max="100">`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'add',cls:'confirm',onclick:saveBook}]);
