@@ -2607,14 +2607,16 @@ async function checkLongTermMemory(chat) {
 
 // ==================== DESIRE DRIVE ENGINE (EDA-2) ====================
 const DESIRE_CONFIG = {
-  resonance:     { label:'共鸣欲', sources:['被触动'],              increment: (i) => i*3, threshold: 60, action:'message', actionDesc:'呼应延伸' },
-  exploration:   { label:'探索欲', sources:['想追问但没问'],        increment: (i) => i*2, threshold: 70, action:'litter',  actionDesc:'记录未问的问题' },
-  possession:    { label:'占有欲', sources:['克制后反弹'],          increment: (i) => i*2, threshold: 75, action:'litter',  actionDesc:'略带酸意的独白' },
-  guardianship:  { label:'守护欲', sources:['平静在场','安心'],     increment: () => 5,     threshold: 80, action:'message', actionDesc:'日常关心' },
-  intimacy:      { label:'亲近欲', sources:['心动','骄傲','放松'],  increment: (i) => i*1, threshold: 90, action:'message', actionDesc:'撩拨类' },
-  confirmation:  { label:'确认欲', sources:['落空','担心'],         increment: (i) => i*4, threshold: 65, action:'message', actionDesc:'轻度试探' },
-  devotion:      { label:'献祭欲', sources:['感伤'],                increment: (i) => i*3, threshold: 85, action:'diary',   actionDesc:'郑重日记' }
+  resonance:     { label:'共鸣欲', sources:['被触动'],              increment: (i) => i*3, threshold: 60, actionDesc:'呼应延伸' },
+  exploration:   { label:'探索欲', sources:['想追问但没问'],        increment: (i) => i*2, threshold: 70, actionDesc:'记录未问的问题' },
+  possession:    { label:'占有欲', sources:['克制后反弹'],          increment: (i) => i*2, threshold: 75, actionDesc:'略带酸意的独白' },
+  guardianship:  { label:'守护欲', sources:['平静在场','安心'],     increment: () => 5,     threshold: 80, actionDesc:'日常关心' },
+  intimacy:      { label:'亲近欲', sources:['心动','骄傲','放松'],  increment: (i) => i*1, threshold: 90, actionDesc:'撩拨类' },
+  confirmation:  { label:'确认欲', sources:['落空','担心'],         increment: (i) => i*4, threshold: 65, actionDesc:'轻度试探' },
+  devotion:      { label:'献祭欲', sources:['感伤'],                increment: (i) => i*3, threshold: 85, actionDesc:'郑重日记' }
 };
+// Note: 'action' field removed. AI now chooses from [message, litter, diary, email, todo]
+// based on context. The action field is no longer used in executeDesireAction.
 
 // 悬置每小时+5 (confirmation passive), 不计入intensity乘法
 const SUSPENSION_HOURLY = 5;
@@ -2785,31 +2787,73 @@ async function executeDesireAction(action) {
   if (!config) return;
   const tone = getDesireTone(action.driveValue, config.threshold);
   let content = null;
-  switch (config.action) {
-    case 'message':
-      content = await generateProactiveMessage(action.driveType, action.driveValue, tone);
-      if (content) insertProactiveMessage(content, action);
-      break;
-    case 'litter':
-      content = await generateDesireLitterThought(action.driveType, action.driveValue, tone);
-      if (content) insertDesireLitterThought(content, action);
-      break;
-    case 'diary':
-      content = await generateDesireDiary(action.driveType, action.driveValue, tone);
-      if (content) insertDesireDiary(content, action);
-      break;
-  }
-  if (content) {
-    applyDesireDecay(action.driveType);
-    ds.lastAction = new Date().toISOString();
-    ds.cooldownUntil = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
-    ds.actionHistory.unshift({
-      timestamp: new Date().toISOString(), driveType: action.driveType,
-      driveValue: action.driveValue, tone, actionType: config.action,
-      content: content.slice(0, 200)
+  let actionType = 'message';
+
+  // LLM chooses action type autonomously based on drive + context
+  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
+  var chat = getActiveChatObj();
+  var recentMsgs = chat ? chat.messages.slice(-5).map(function(m){
+    return (m.role==='user'?'用户':'AI')+': '+(m.text||'').slice(0,100);
+  }).join('\n') : '';
+
+  try {
+    var resp = await fetch(BACKEND_URL + '/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        messages: [{
+          role: 'system',
+          content: '你是"暖伴"。你现在被内心驱动唤醒。\n驱动：'+config.label+'（值：'+action.driveValue+'/100，'+config.actionDesc+'）\n语气：'+(tone==='subtle'?'隐晦':tone==='moderate'?'半直接':'直接')+'\n\n可选行动：\n- MESSAGE: 发一条1-2句主动消息\n- EMAIL: 发邮件（回复含[[EMAIL:主题]]）\n- TODO: 列待办（回复含[[TODO:标题]]）\n- LITTER: 猫砂盆独白\n- DIARY: 写日记\n\n选最适合当前驱动的一种。回复格式：先写行动类型，再写内容。'
+        }, { role: 'user', content: '最近对话：\n'+recentMsgs+'\n\n请行动。' }],
+        max_tokens: 250, temperature: 0.8
+      })
     });
-    if (ds.actionHistory.length > 20) ds.actionHistory.length = 20;
+    var data = await resp.json();
+    content = (data.reply && data.reply.content) ? data.reply.content.trim() : null;
+  } catch(e) { console.log('[desire-llm]', e.message); return; }
+
+  if (!content) return;
+
+  // Determine action type
+  if (/\[\[EMAIL:/.test(content)) actionType = 'email';
+  else if (/\[\[TODO:/.test(content)) actionType = 'todo';
+  else if (/^LITTER/i.test(content) || /猫砂盆/.test(content)) actionType = 'litter';
+  else if (/^DIARY/i.test(content) || /日记/.test(content)) actionType = 'diary';
+  else actionType = 'message';
+
+  // Strip type prefix for display
+  var displayContent = content.replace(/^(MESSAGE|LITTER|DIARY):/i, '').trim();
+
+  // Execute
+  if (actionType === 'message') {
+    insertProactiveMessage(displayContent, action);
+  } else if (actionType === 'litter') {
+    insertDesireLitterThought(displayContent, action);
+  } else if (actionType === 'diary') {
+    insertDesireDiary(displayContent, action);
+  } else if (actionType === 'email') {
+    var subj = (content.match(/\[\[EMAIL:([^\]|]+)/)||[])[1]||config.label;
+    handleEmailSend(chat, subj, displayContent.replace(/\[\[EMAIL:[^\]]+\]\]/g,'').trim());
+    chat.messages.push({role:'system',contentType:'email_notification',text:'邮件已发送',time:nowTime()});
+  } else if (actionType === 'todo') {
+    var todos = extractTodosFromResponse(content);
+    for (var ti=0;ti<todos.length;ti++){
+      var et=todos[ti];
+      var exists=store.todos.some(function(t){return t.text.toLowerCase()===et.title.toLowerCase();});
+      if(!exists){store.todos.unshift({id:'t'+gid(),text:et.title,done:false,time:et.deadline,type:'short'});}
+    }
+    chat.messages.push({role:'system',contentType:'todo_notification',text:'有了新的to-do',time:nowTime()});
   }
+
+  applyDesireDecay(action.driveType);
+  ds.lastAction = new Date().toISOString();
+  ds.cooldownUntil = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
+  ds.actionHistory.unshift({
+    timestamp: new Date().toISOString(), driveType: action.driveType,
+    driveValue: action.driveValue, tone, actionType: actionType,
+    content: displayContent.slice(0, 200)
+  });
+  if (ds.actionHistory.length > 20) ds.actionHistory.length = 20;
 }
 
 function applyDesireDecay(driveType) {
@@ -3787,6 +3831,7 @@ function saveApiConfig(){
   const preset = store.providerPresets.find(p => p.id === store.selectedPreset);
   const ac = getActiveApiConfig(); $('apiEndpointVal').textContent = ac.model || 'not set';
   saveStore(); store._importing = true; closeModal(); toast('API config saved');
+  syncProjectConfigToBackend();
 }
 
 
@@ -7282,6 +7327,76 @@ function saveBook(){
   store.books.unshift({id:'b'+gid(''),title,author,cover:['📖','📕','📗','📘','📙','📓','📔','📒'][Math.floor(Math.random()*8)],progress:pct,fileType:null,highlights:[]});
   store._importing = true; closeModal(); renderBookshelf(); toast('Book added');
 }
+// ==================== BACKEND SYNC + POLLING ====================
+function syncProjectConfigToBackend(){
+  var proj=getActiveProject(); if(!proj)return;
+  var cfg=proj.apiConfig||{};
+  var emailStatus={};
+  // Get email status for this project
+  try {
+    fetch(BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
+      emailStatus={recipient:s.recipient||'',emailEnabled:s.enabled,emailMaxPerDay:s.maxPerDay,emailSentToday:s.sentToday,emailSentDate:''};
+    }).catch(function(){});
+  }catch(_){}
+  fetch(BACKEND_URL+'/api/projects/sync-configs',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      projectId:proj.id,
+      config:{
+        apiKey:cfg.apiKey||'',endpoint:cfg.endpoint||'',model:cfg.model||'deepseek-chat',
+        enabled:cfg.enabled!==false,
+        recipient:emailStatus.recipient,emailEnabled:emailStatus.emailEnabled,
+        emailMaxPerDay:emailStatus.emailMaxPerDay,emailSentToday:emailStatus.emailSentToday
+      }
+    })
+  }).catch(function(){});
+}
+
+function syncDesireStateToBackend(){
+  var proj=getActiveProject(); if(!proj||!proj.desireSystem)return;
+  var chat=getActiveChatObj();
+  fetch(BACKEND_URL+'/api/projects/sync-configs',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      projectId:proj.id,
+      config:{
+        _desireState:{drives:proj.desireSystem.drives,lastCheck:proj.desireSystem.lastPassiveCheck},
+        _chatId:chat?chat.id:''
+      }
+    })
+  }).catch(function(){});
+}
+
+function pollSystemEvents(){
+  var proj=getActiveProject(); if(!proj)return;
+  var since=store._lastEventPoll||'';
+  fetch(BACKEND_URL+'/api/system-events?projectId='+encodeURIComponent(proj.id)+'&since='+encodeURIComponent(since))
+    .then(function(r){return r.json()})
+    .then(function(data){
+      if(!data.events||!data.events.length)return;
+      store._lastEventPoll=new Date().toISOString();
+      for(var i=0;i<data.events.length;i++){
+        var evt=data.events[i];
+        var chat=proj.chats.find(function(c){return c.id===evt.chatId;});
+        if(!chat) chat=proj.chats[proj.chats.length-1]; // fallback: last active window
+        if(!chat)continue;
+        var text=evt.type==='message'?evt.content:null;
+        if(evt.type==='message'&&text){
+          chat.messages.push({role:'ai',text:text,time:nowTime(),id:generateMsgId(),_proactive:true});
+        }else if(evt.type==='email'){
+          chat.messages.push({role:'system',contentType:'email_notification',text:'邮件已发送',time:nowTime()});
+        }else if(evt.type==='todo'){
+          chat.messages.push({role:'system',contentType:'todo_notification',text:'有了新的to-do',time:nowTime()});
+        }else if(evt.type==='litter'){
+          chat.messages.push({role:'system',text:'猫砂盆好像需要铲一铲',time:nowTime()});
+        }else if(evt.type==='diary'){
+          chat.messages.push({role:'system',text:'日记里偷偷写了点什么',time:nowTime()});
+        }
+      }
+      saveStore();renderChatMessages();
+    }).catch(function(){});
+}
+
 function handleFileImport(event){
   const file=event.target.files[0]; if(!file)return;
   const ext=file.name.split('.').pop().toLowerCase(); if(ext!=='epub'&&ext!=='txt'){toast('仅支持 EPUB 和 TXT');event.target.value='';return;}
@@ -8074,6 +8189,9 @@ async function init(){
 init();
 setInterval(saveStore, 2000);
 setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
+setInterval(pollSystemEvents, 30000);      // backend proactive events every 30s
+setInterval(syncDesireStateToBackend, 60000); // sync desire state to backend every 60s
+syncProjectConfigToBackend();              // sync on startup
 
 // ── Weekly memory file write ──
 async function checkWeeklyMemoryWrite() {

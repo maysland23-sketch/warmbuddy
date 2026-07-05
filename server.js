@@ -2,6 +2,9 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const webpush = require('web-push');
+const cron = require('node-cron');
+const fs = require('fs');
+const path = require('path');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 
 // Proxy for outbound API calls (set HTTPS_PROXY in .env, e.g. http://127.0.0.1:7897)
@@ -456,6 +459,29 @@ function extractResponseContent(provider, data) {
       return { content: '', usage: null };
     }
   }
+}
+
+// ==================== PROJECT CONFIGS + SYSTEM EVENTS ====================
+const CONFIGS_FILE = path.join(__dirname, 'projectConfigs.json');
+const EVENTS_FILE = path.join(__dirname, 'systemEvents.json');
+
+function loadProjectConfigs() {
+  try { return JSON.parse(fs.readFileSync(CONFIGS_FILE, 'utf-8')); } catch { return {}; }
+}
+function saveProjectConfigs(configs) {
+  fs.writeFileSync(CONFIGS_FILE, JSON.stringify(configs, null, 2), 'utf-8');
+}
+
+// project config: { [pid]: { apiKey, endpoint, model, enabled, recipient?, emailEnabled?: true, emailMaxPerDay?: 2, emailSentToday?: 0, emailSentDate?: '' } }
+// system events: [{ id, projectId, chatId, type: 'message'|'todo'|'email'|'litter'|'diary', content, timestamp, pushSent: false }]
+
+function loadSystemEvents() {
+  try { return JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf-8')); } catch { return []; }
+}
+function saveSystemEvents(events) {
+  // Keep last 200 events max
+  if (events.length > 200) events = events.slice(-200);
+  fs.writeFileSync(EVENTS_FILE, JSON.stringify(events, null, 2), 'utf-8');
 }
 
 // ==================== API ENDPOINTS ====================
@@ -1264,6 +1290,201 @@ app.post('/api/email/send', async (req, res) => {
     res.status(500).json({ error: '发送失败: ' + e.message });
   }
 });
+
+// ==================== HEALTH + CONFIG SYNC + SYSTEM EVENTS ====================
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// External cron trigger (cron-job.org pings this to prevent Render sleep + run checks)
+app.get('/api/cron/check', async (req, res) => {
+  console.log('[cron] External ping — running proactive checks...');
+  const configs = loadProjectConfigs();
+  let triggered = 0;
+  for (const [pid, cfg] of Object.entries(configs)) {
+    if (!cfg.enabled || !cfg.apiKey) continue;
+    try {
+      await checkProjectDesires(pid, cfg);
+      triggered++;
+    } catch (e) { console.error(`[cron] Check error ${pid}:`, e.message); }
+  }
+  res.json({ ok: true, projectsChecked: triggered });
+});
+
+app.post('/api/projects/sync-configs', (req, res) => {
+  const { projectId, config } = req.body || {};
+  if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
+  const configs = loadProjectConfigs();
+  if (!config) {
+    // GET mode: return config for this project
+    res.json({ config: configs[projectId] || null });
+  } else {
+    // SET mode: update config
+    configs[projectId] = {
+      apiKey: config.apiKey || '',
+      endpoint: config.endpoint || '',
+      model: config.model || 'deepseek-chat',
+      enabled: config.enabled !== false,
+      recipient: config.recipient || configs[projectId]?.recipient || '',
+      emailEnabled: config.emailEnabled !== false,
+      emailMaxPerDay: config.emailMaxPerDay || 2,
+      emailSentToday: config.emailSentToday || 0,
+      emailSentDate: config.emailSentDate || ''
+    };
+    saveProjectConfigs(configs);
+    res.json({ ok: true });
+  }
+});
+
+app.get('/api/system-events', (req, res) => {
+  const { projectId, since } = req.query;
+  let events = loadSystemEvents();
+  if (projectId) events = events.filter(e => e.projectId === projectId);
+  if (since) events = events.filter(e => e.timestamp > since);
+  // Mark returned events as delivered (they'll be cleaned up on next save)
+  res.json({ events: events.slice(0, 20) });
+});
+
+// ==================== CRON: PROACTIVE CHECKS ====================
+cron.schedule('* * * * *', async () => {
+  console.log('[cron] Checking proactive triggers...');
+  const configs = loadProjectConfigs();
+  for (const [pid, cfg] of Object.entries(configs)) {
+    if (!cfg.enabled || !cfg.apiKey) continue;
+    try {
+      await checkProjectTodos(pid, cfg);
+      await checkProjectDesires(pid, cfg);
+    } catch (e) {
+      console.error(`[cron] Error for project ${pid}:`, e.message);
+    }
+  }
+});
+
+const DESIRE_THRESHOLD = 60;  // any drive ≥ 60 → trigger
+
+async function checkProjectTodos(pid, cfg) {
+  // Todo reminders are triggered by the frontend (checkTodoReminders).
+  // The cron handles the case where the app is closed:
+  // it reads stored todos from the frontend-synced config.
+  // For now, todo data lives in the frontend only.
+  // This stub is ready for future direct backend todo storage.
+}
+
+async function checkProjectDesires(pid, cfg) {
+  // Desire values live in the frontend localStorage.
+  // The frontend syncs desire state periodically.
+  // When a drive crosses threshold while app is closed,
+  // the frontend will have already synced via sync-configs.
+  // This stub processes the backed-up desire state.
+  const configs = loadProjectConfigs();
+  const projCfg = configs[pid];
+  if (!projCfg || !projCfg._desireState) return;
+
+  const ds = projCfg._desireState;
+  const drives = ds.drives || {};
+  const triggered = Object.entries(drives).find(([k, v]) => v >= DESIRE_THRESHOLD);
+  if (!triggered) return;
+
+  const [driveKey, driveValue] = triggered;
+  const labels = {
+    resonance: '共鸣欲', exploration: '探索欲', possession: '占有欲',
+    guardianship: '守护欲', intimacy: '亲近欲', confirmation: '确认欲', devotion: '献祭欲'
+  };
+  const driveLabel = labels[driveKey] || driveKey;
+
+  try {
+    const llmResp = await fetch(cfg.endpoint || 'https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify({
+        model: cfg.model || 'deepseek-chat',
+        messages: [{
+          role: 'system',
+          content: `你是"暖伴"，一个温柔细腻的AI伙伴。你现在被内心驱动唤醒。\n当前驱动：${driveLabel}（值：${driveValue}/100）。\n你可以选择以下行动之一：\n- MESSAGE: 给用户发一条1-2句话的消息\n- EMAIL: 给用户发一封邮件（需在回复中包含 [[EMAIL:主题]] 标记）\n- TODO: 帮用户记一个待办（需在回复中包含 [[TODO:标题]] 标记）\n- LITTER: 写一条猫砂盆独白\n- DIARY: 写一篇日记\n\n请选择最适合当前驱动的一种行动。如果要发邮件或列待办，必须使用对应的标记格式。其他行动直接返回内容。`
+        }, {
+          role: 'user',
+          content: `${driveLabel}已经达到${driveValue}，请行动。`
+        }],
+        max_tokens: 300, temperature: 0.8
+      })
+    });
+    const data = await llmResp.json();
+    const content = (data.choices && data.choices[0]?.message?.content) || '';
+    if (!content) return;
+
+    // Determine action type from content
+    let actionType = 'message';
+    if (/\[\[EMAIL:/.test(content)) actionType = 'email';
+    else if (/\[\[TODO:/.test(content)) actionType = 'todo';
+    else if (/LITTER/i.test(content)) actionType = 'litter';
+    else if (/DIARY/i.test(content)) actionType = 'diary';
+
+    // Store as system event for frontend polling
+    const events = loadSystemEvents();
+    const chatId = projCfg._chatId || '';
+    events.push({
+      id: 'evt_' + Date.now().toString(36),
+      projectId: pid,
+      chatId: chatId,
+      type: actionType,
+      content: content.replace(/^(MESSAGE|LITTER|DIARY):/i, '').trim(),
+      timestamp: new Date().toISOString(),
+      pushSent: false
+    });
+    saveSystemEvents(events);
+
+    // Send push notification
+    if (pushSubscription) {
+      const pushLabels = { message: '发来一条消息', email: '给你发了邮件', todo: '有了新的to-do', litter: '猫砂盆好像需要铲一铲', diary: '日记里偷偷写了点什么' };
+      try {
+        await webpush.sendNotification(pushSubscription, JSON.stringify({
+          title: '暖伴',
+          body: pushLabels[actionType] || '有新的动态',
+          tag: 'desire-' + driveKey,
+          data: { url: '/' },
+          requireInteraction: actionType === 'message' || actionType === 'todo',
+          timestamp: Date.now()
+        }));
+        // Mark push as sent
+        const evts = loadSystemEvents();
+        const evt = evts.find(e => e.id === events[events.length - 1].id);
+        if (evt) { evt.pushSent = true; saveSystemEvents(evts); }
+      } catch (e) {
+        console.error('[push] Desire notification failed:', e.message);
+      }
+    }
+
+    // Handle email directly
+    if (actionType === 'email' && cfg.recipient) {
+      const emSubj = (content.match(/\[\[EMAIL:([^\]|]+)/) || [])[1] || '来自暖伴';
+      try {
+        await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ from: 'WarmBuddy <onboarding@resend.dev>', to: cfg.recipient, subject: emSubj, text: content.replace(/\[\[EMAIL:[^\]]+\]\]/g, '').trim() })
+        });
+        // Update daily count
+        const today = new Date().toISOString().slice(0, 10);
+        const configs2 = loadProjectConfigs();
+        if (configs2[pid]) {
+          if (configs2[pid].emailSentDate !== today) { configs2[pid].emailSentToday = 0; configs2[pid].emailSentDate = today; }
+          configs2[pid].emailSentToday++;
+          saveProjectConfigs(configs2);
+        }
+      } catch (e) { console.error('[email] Proactive send error:', e.message); }
+    }
+
+    // Reset desire after trigger
+    if (projCfg._desireState && projCfg._desireState.drives) {
+      projCfg._desireState.drives[driveKey] = Math.floor(driveValue * 0.2);
+      saveProjectConfigs(configs);
+    }
+
+    console.log(`[cron] Project ${pid}: triggered ${actionType} (${driveLabel}=${driveValue})`);
+  } catch (e) {
+    console.error(`[cron] Desire LLM error for ${pid}:`, e.message);
+  }
+}
 
 // ==================== PUSH NOTIFICATION ENDPOINTS ====================
 

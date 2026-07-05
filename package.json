@@ -19,6 +19,7 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "https-proxy-agent": "^7.0.0",
+    "node-cron": "^4.5.0",
     "sharp": "^0.35.1",
     "web-push": "^3.6.7"
   }
