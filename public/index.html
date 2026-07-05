@@ -1629,6 +1629,9 @@ function createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker) 
   if (cml.aiEmotionalMemories.length > 200) cml.aiEmotionalMemories.length = 200;
   writeMemoryFile(store.activeProject, store.activeChat, { aiEmotionalMemories: [aem] }, 'core_memory_added');
 
+  // System notification in chat
+  if (chat) chat.messages.push({ role: 'system', text: '有什么被记住了', time: nowTime() });
+
   // Cross-reference: also push to proj.memories (legacy memories panel)
   var proj = getActiveProject();
   if (proj) {
