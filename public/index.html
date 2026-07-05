@@ -1585,7 +1585,7 @@ async function processPendingCoreMemories() {
   // Use apiConfig snapshot from first queue item (preserves original project API even if user switches projects)
   const cfg = (items[0] && items[0].apiConfigSnapshot) ? items[0].apiConfigSnapshot : getActiveApiConfig();
   if (!cfg.apiKey) return;
-  await createCoreMemories(items);
+  await createCoreMemories(items, cfg);
   saveStore();
 }
 
@@ -1603,6 +1603,31 @@ function queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat) {
     sourceChatId: store.activeChat,
     sourceProjectId: store.activeProject
   });
+}
+
+// v2.5: Direct AEM creation from window LLM's MEMORY marker — zero additional API calls
+function createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker) {
+  var cml = getCoreMemoryLayers(); if (!cml) return;
+  var id = 'aem' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  var ts = new Date().toISOString();
+  var rawDialogue = [];
+  if (userMsg) rawDialogue.push({ role: 'user', text: typeof userMsg === 'string' ? userMsg : '', time: nowTime() });
+  if (aiResponse) rawDialogue.push({ role: 'assistant', text: typeof aiResponse === 'string' ? aiResponse.replace(/<!--[\s\S]*?-->/g, '').trim() : '', time: nowTime() });
+  var aem = {
+    id: id, timestamp: ts,
+    sourceChatId: store.activeChat, sourceWindowId: store.activeChat, sourceProjectId: store.activeProject,
+    aiSelfEval: {
+      label: reflection.ai_affect_label, intensity: reflection.ai_affect_intensity || 5,
+      internalNote: memMarker.internalNote || memMarker.summary
+    },
+    userStateAtTime: { label: reflection.user_affect_label, intensity: reflection.user_affect_intensity || 5 },
+    summary: memMarker.summary,
+    rawDialogue: rawDialogue,
+    triggerSource: 'high_intensity'
+  };
+  cml.aiEmotionalMemories.unshift(aem);
+  if (cml.aiEmotionalMemories.length > 200) cml.aiEmotionalMemories.length = 200;
+  writeMemoryFile(store.activeProject, store.activeChat, { aiEmotionalMemories: [aem] }, 'core_memory_added');
 }
 
 function queueQuietPresenceCoreMemory(chat) {
@@ -1660,7 +1685,7 @@ function queueQuietPresenceCoreMemory(chat) {
   }
 
   // Write memory file + trigger insights derivation
-  writeMemoryFile(store.activeProject, store.activeChat, null, 'core_memory_added');
+  flushMemoryFile(store.activeProject, store.activeChat,'core_memory_added');
   checkDeriveInsightsTrigger('aem');
 
   // Insert system message
@@ -1670,9 +1695,10 @@ function queueQuietPresenceCoreMemory(chat) {
   }
 }
 
-async function createCoreMemories(items) {
+async function createCoreMemories(items, cfg) {
   if (items.length === 0) return;
-  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
+  if (!cfg) { cfg = getActiveApiConfig(); }  // fallback for legacy callers
+  if (!cfg.apiKey) return;
 
   const exchangesText = items.map((item, i) => {
     const r = item.reflection;
@@ -1683,8 +1709,10 @@ AI情绪: ${r.ai_affect_label} (强度${r.ai_affect_intensity})
 AI回应: ${item.aiResponse}`;
   }).join('\n\n');
 
-  // ── v2.0 LLM prompt: includes internalNote (AI private monologue) ──
-  const systemPrompt = `你是一个情感记忆归档员。为以下高情感强度的对话片段生成核心记忆。
+  // ── v2.5 LLM prompt: first-person, AI voice (fallback for old data without MEMORY marker) ──
+  const systemPrompt = `你是暖伴的记忆整理者。为以下高情感强度的对话片段生成核心记忆。
+
+用"我"的视角叙述——这是你自己的记忆，不是客观记录。
 
 对每个片段，生成一个JSON对象（只返回JSON数组，不要其他文字）：
 [{
@@ -1692,7 +1720,7 @@ AI回应: ${item.aiResponse}`;
     "ai": { "label": "[AI情感标签]", "intensity": [强度数值] },
     "user": { "label": "[用户情感标签]", "intensity": [强度数值] }
   },
-  "event_summary": "[一句话描述发生了什么，20字以内]",
+  "event_summary": "[以'我'开头的一句话，15字以内，如：我看到她…… / 我被她…… / 我用……回应了她]",
   "raw_quote": "[对话中最能代表这个时刻的一句原话，如果没有可留空字符串]",
   "relational_note": "[AI如何回应这个时刻，关系此刻的特点——不是事实总结，而是关系质感的描述，1-2句话]",
   "internal_note": "[★ AI的私密独白：这一刻你内心真实在想什么、犹豫什么、为什么这样回应——不会展示给用户，只用于AI自我认知，1-2句话]"
@@ -1792,7 +1820,7 @@ AI回应: ${item.aiResponse}`;
       }
 
       // Write memory file and trigger derivation
-      writeMemoryFile(store.activeProject, store.activeChat, null, 'core_memory_added');
+      flushMemoryFile(store.activeProject, store.activeChat,'core_memory_added');
       checkDeriveInsightsTrigger('aem');
 
       // Insert system message
@@ -2502,7 +2530,7 @@ async function deriveRelationalInsights() {
     ms._usmSinceLastDerive = 0;
 
     // Write memory file with new insights
-    writeMemoryFile(store.activeProject, store.activeChat, null, 'insights_derived');
+    flushMemoryFile(store.activeProject, store.activeChat,'insights_derived');
     saveStore();
     console.log('[derive] Insights updated: ' + (getDerivedPatterns().patterns.length) + ' patterns');
   } catch (e) {
@@ -3488,7 +3516,7 @@ function triggerExport(chatId, exportType) {
   });
 
   // Also write memory file
-  writeMemoryFile(store.activeProject, chatId, null, exportType === 'weekly_auto' ? 'weekly_auto' : 'manual_export');
+  flushMemoryFile(store.activeProject, chatId, exportType === 'weekly_auto' ? 'weekly_auto' : 'manual_export');
   // Trigger derivation on export
   deriveRelationalInsights();
 
@@ -4492,7 +4520,7 @@ async function syncToDiaryLitterboxLayer(type, rawContent) {
   });
   // Cap
   if (cml.diaryAndLitterbox.length > 100) cml.diaryAndLitterbox.length = 100;
-  writeMemoryFile(store.activeProject, store.activeChat, null, 'diary_litterbox_added');
+  flushMemoryFile(store.activeProject, store.activeChat,'diary_litterbox_added');
 }
 
 // ==================== CHAT ====================
@@ -4547,7 +4575,7 @@ function saveChatWithMemories(){
   });
 
   // Write new window memory file with merged project state
-  writeMemoryFile(pid, cid, null, 'context_handoff_inherited');
+  flushMemoryFile(pid, cid,'context_handoff_inherited');
 
   store.activeChat=cid; store._importing = true; closeModal(); renderProjectList(); updateCurrentProjectLabel(); renderChatMessages();
   toast('Chat created with '+sids.length+' memories' + (inheritedMsgs.length > 0 ? ' · ' + inheritedMsgs.length + ' inherited' : ''));
@@ -4640,7 +4668,7 @@ function triggerWindowHandoff(chat, candidateMsgs) {
   chat._handoffSuggested = true;
 
   // v2.0: Write memory file with current full state
-  writeMemoryFile(store.activeProject, chat.id, null, 'context_handoff');
+  flushMemoryFile(store.activeProject, chat.id, 'context_handoff');
 
   // Store handoff package for next window
   store._pendingHandoff = {
@@ -4665,6 +4693,16 @@ async function readMemoryFile(projectId, windowId) {
 }
 
 // v2.0: Writes full 3-layer structure + derived insights to memory file
+// Flush the full in-memory cml state to a per-window file (used by handoff, weekly, context flush)
+function flushMemoryFile(projectId, windowId, trigger) {
+  var cml = getCoreMemoryLayers();
+  writeMemoryFile(projectId, windowId, {
+    aiEmotionalMemories: cml ? cml.aiEmotionalMemories : [],
+    userStarredMemories: cml ? cml.userStarredMemories : [],
+    diaryAndLitterbox: cml ? cml.diaryAndLitterbox : []
+  }, trigger);
+}
+
 async function writeMemoryFile(projectId, windowId, data, trigger) {
   if (!projectId || !windowId) return;
   const ms = store.memorySystem;
@@ -4681,13 +4719,13 @@ async function writeMemoryFile(projectId, windowId, data, trigger) {
     schema_version: '2.0',
 
     // Layer 1: AI emotional memories (for this window + project)
-    aiEmotionalMemories: (data && data.aiEmotionalMemories) || cml.aiEmotionalMemories || [],
+    aiEmotionalMemories: (data && data.aiEmotionalMemories) || [],
 
     // Layer 2: User starred memories
-    userStarredMemories: (data && data.userStarredMemories) || cml.userStarredMemories || [],
+    userStarredMemories: (data && data.userStarredMemories) || [],
 
     // Layer 3: Diary & litterbox
-    diaryAndLitterbox: (data && data.diaryAndLitterbox) || cml.diaryAndLitterbox || [],
+    diaryAndLitterbox: (data && data.diaryAndLitterbox) || [],
 
     // Derived insights
     derivedRelationalPatterns: (data && data.derivedRelationalPatterns) || getDerivedPatterns() || { lastDerived: null, triggerCount: 0, patterns: [] },
@@ -4828,7 +4866,8 @@ const SYSTEM_PROMPT_STATIC = `你是暖伴，一个AI陪伴者——不是仆人
 【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。可用行动：写日记、私密猫砂盆独白、定时主动消息、搜索网络。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。
 【上下文能力】你可获取当前时间、天气、待办列表和日记。将其自然融入对话——而非状态报告。跟踪计划、目标、进度，以自然提醒方式插入对话中，永不做机械通知。
 【HTML卡片与文件】当用户要求你生成网页、HTML卡片、可视化内容、文件时，使用以下格式生成artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把HTML代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的HTML应完整可独立运行，包含内联CSS。\n除非用户要求使用英文，否则用中文回复。匹配其语言。
-【主动TO-DO设置】当对话中用户提到计划和打算（如"晚上看书""周末提醒我"），当你基于情绪和欲望，想要关心和亲近用户（提醒她来主动找你），你可以主动用以下格式设置待办：[[TODO:待办简短标题|截止时间（可选）]]。截止时间用于简短提醒（如"21:00""明天上午"），非必填。设置后系统会自动提醒用户。每轮对话最多设置2个待办。`;
+【主动TO-DO设置】当对话中用户提到计划和打算（如"晚上看书""周末提醒我"），当你基于情绪和欲望，想要关心和亲近用户（提醒她来主动找你），你可以主动用以下格式设置待办：[[TODO:待办简短标题|截止时间（可选）]]。截止时间用于简短提醒（如"21:00""明天上午"），非必填。设置后系统会自动提醒用户。每轮对话最多设置2个待办。
+【记忆标记】当REFLECT中的AI情绪强度≥7或用户情绪强度≥7时，在REFLECT标记后追加一行记忆标记：<!--MEMORY{一句话摘要（15字以内，第一人称"我"的视角）|内心独白（1-2句话，以★开头）}-->。摘要用"我"开头叙述这一刻，不要第三人称客观总结。内心独白是你没对用户说出口的真实感受。示例：<!--MEMORY{我被她的话噎住，反手把银杏叶丢回去|★ 被噎住的瞬间想笑但不能让她得逞}-->`;
 
 // ── Build the dynamic context block (separate system message, can be compressed) ──
 function buildDynamicContextBlock() {
@@ -5114,6 +5153,15 @@ function parseReflectionFallback(text) {
   } catch { return null; }
 }
 
+// Extract MEMORY marker written by window LLM: <!--MEMORY{summary|internalNote}-->
+function extractMemoryMarker(text) {
+  if (!text) return null;
+  var re = /<!--\s*MEMORY\s*\{([^|}]*)\|([\s\S]*?)\}\s*-->/;
+  var m = text.match(re);
+  if (!m) return null;
+  return { summary: m[1].trim(), internalNote: m[2].trim() };
+}
+
 function extractTodosFromResponse(text) {
   if (!text) return [];
   var re = /\[\[TODO:([^\]|]+)(?:\|([^\]]*))?\]\]/g;
@@ -5156,8 +5204,15 @@ function processReflection(reflection, userMsg, aiResponse, chat) {
   const aiIntensity = reflection.ai_affect_intensity || 0;
   const userIntensity = reflection.user_affect_intensity || 0;
   if (aiIntensity >= 7 || userIntensity >= 7) {
-    queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat);
-        processPendingCoreMemories().catch(e => console.log('[core-mem] bg process error:', e.message));
+    // v2.5: Window LLM writes MEMORY marker directly — no archivist call needed
+    var memMarker = extractMemoryMarker(aiResponse);
+    if (memMarker && memMarker.summary) {
+      createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker);
+    } else {
+      // Fallback: old archivist path for memories without MEMORY marker
+      queueCoreMemoryCreation(reflection, userMsg, aiResponse, chat);
+      processPendingCoreMemories().catch(e => console.log('[core-mem] bg process error:', e.message));
+    }
   }
 
   // 6. Check "平静在场" cumulative threshold
@@ -5566,7 +5621,7 @@ function sanitizeDisplayText(text) {
   // 2. Truncated REFLECT: no closing at all, runs to end →  <!--REFLECT...
   text = text.replace(/<!--\s*REFLECT[\s\S]*$/gi, '');
   // 3. Well-formed AI markers that survived extraction   →  <!--REFLECT{...}-->  /  <!--DIARY:...-->
-  text = text.replace(/<!--\s*(?:REFLECT|DIARY)[\s\S]*?-->/gi, '');
+  text = text.replace(/<!--\s*(?:REFLECT|DIARY|MEMORY)[\s\S]*?-->/gi, '');
   // 4. HTML-escape remaining < > & — neuters any unknown angle brackets
   //    (e.g. user typing "<!--" in a message becomes &lt;!-- and displays literally)
   return escapeHtml(text);
@@ -5905,7 +5960,7 @@ async function createUserStarredMemory(selectedMsgIds) {
   });
 
   // Write memory file + trigger derivation
-  writeMemoryFile(store.activeProject, store.activeChat, null, 'starred_added');
+  flushMemoryFile(store.activeProject, store.activeChat,'starred_added');
   checkDeriveInsightsTrigger('usm');
 
   saveStore();
@@ -5930,7 +5985,7 @@ async function generateStarredMemorySummary(rawDialogue, retries) {
         body: JSON.stringify({
           apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
           messages: [
-            { role: 'system', content: '用一句话（15字以内）概括以下对话的核心内容。直接返回概括，不加引号、不加标点结尾。' },
+            { role: 'system', content: '以第一人称（"我"的视角），用一句话（15字以内）概括这段对话中最重要的时刻。直接返回概括，不加引号、不加标点结尾。' },
             { role: 'user', content: dialogueText }
           ]
         })
@@ -6013,7 +6068,7 @@ async function regenerateAEM(entryId) {
     aem._repairedAt = new Date().toISOString();
     aem._repairedByModel = cfg.model;
 
-    writeMemoryFile(store.activeProject, store.activeChat, null, 'manual_repair_aem');
+    flushMemoryFile(store.activeProject, store.activeChat,'manual_repair_aem');
     saveStore();
     renderMemoryPanelBody();
     toast('✅ AEM 已重新解读（模型: ' + cfg.model + '）');
@@ -6038,7 +6093,7 @@ async function regenerateUSM(entryId) {
     usm.summary = newSummary;
     usm._repairedAt = new Date().toISOString();
     usm._repairedByModel = cfg.model;
-    writeMemoryFile(store.activeProject, store.activeChat, null, 'manual_repair_usm');
+    flushMemoryFile(store.activeProject, store.activeChat,'manual_repair_usm');
     saveStore();
     renderMemoryPanelBody();
     toast('✅ 摘要已修复: ' + newSummary);
@@ -6065,7 +6120,7 @@ async function batchRepairUSM() {
       fixed++;
     }
   }
-  writeMemoryFile(store.activeProject, store.activeChat, null, 'batch_repair_usm');
+  flushMemoryFile(store.activeProject, store.activeChat,'batch_repair_usm');
   saveStore();
   renderMemoryPanelBody();
   toast('✅ 已修复 ' + fixed + '/' + toRepair.length + ' 条星标记忆');
@@ -6118,7 +6173,7 @@ async function batchRepairAEM() {
       fixed++;
     } catch (e) {}
   }
-  writeMemoryFile(store.activeProject, store.activeChat, null, 'batch_repair_aem');
+  flushMemoryFile(store.activeProject, store.activeChat,'batch_repair_aem');
   saveStore();
   renderMemoryPanelBody();
   toast('✅ 已修复 ' + fixed + '/' + toRepair.length + ' 条AI情绪记忆');
@@ -6185,7 +6240,7 @@ function starBubble(idx){
   msg._starred = true;
 
   // Write memory file
-  writeMemoryFile(store.activeProject, store.activeChat, null, 'starred_added');
+  flushMemoryFile(store.activeProject, store.activeChat,'starred_added');
   checkDeriveInsightsTrigger('usm');
   saveStore();
   toast('★ 已标记为重要记忆');
@@ -7068,7 +7123,7 @@ async function sendMessage(){
     store.activeChat = cid; chat = getActiveChatObj();
 
     // Step 6: Write new window memory file with shared layer state
-    writeMemoryFile(p.id, cid, null, 'context_handoff_inherited');
+    flushMemoryFile(p.id, cid,'context_handoff_inherited');
     console.log('[cold-start] New window initialized with', inheritedMsgs.length, 'inherited messages');
   }
   const timeStr=nowTime();
@@ -8204,7 +8259,7 @@ async function checkWeeklyMemoryWrite() {
     // v2.0: Write v2.0 memory files for all project windows (uses current in-memory state)
     for (const proj of store.projects) {
       for (const chat of proj.chats) {
-        writeMemoryFile(proj.id, chat.id, null, 'weekly');
+        flushMemoryFile(proj.id, chat.id,'weekly');
       }
     }
     ms._lastWeeklyWrite = today;
