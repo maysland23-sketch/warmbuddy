@@ -7183,36 +7183,31 @@ function renderBookGrid(){
 // ==================== EMAIL SENDING ====================
 function showEmailConfigModal(){
   showModal('邮件配置',`
-    <div style="font-size:11px;color:var(--text-lighter);margin-bottom:4px;">Gmail 地址（发件）</div>
-    <input class="modal-input" id="emailGmailInput" placeholder="user@gmail.com">
-    <div style="font-size:11px;color:var(--text-lighter);margin:12px 0 4px;">应用专用密码</div>
-    <input class="modal-input" id="emailPwdInput" type="password" placeholder="16位应用专用密码">
-    <div style="font-size:10px;color:var(--text-lighter);margin:2px 0 12px;">在 <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color:var(--accent);">Google 账号 → 应用专用密码</a> 生成</div>
     <div style="font-size:11px;color:var(--text-lighter);margin-bottom:4px;">固定收件人</div>
     <input class="modal-input" id="emailRecipientInput" placeholder="收件人邮箱">
+    <div style="font-size:11px;color:var(--text-lighter);margin:12px 0 4px;">发件人名称</div>
+    <input class="modal-input" id="emailSenderNameInput" placeholder="WarmBuddy">
+    <div style="font-size:10px;color:var(--text-lighter);margin:2px 0 12px;">发件地址为 onboarding@resend.dev（Resend 免费层）</div>
   `,[
     {label:'cancel',cls:'cancel',onclick:closeModal},
     {label:'save',cls:'confirm',onclick:saveEmailConfig}
   ]);
-  // Pre-fill current values
   fetch(BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
-    var gmailEl=$('emailGmailInput'), pwdEl=$('emailPwdInput'), recEl=$('emailRecipientInput');
-    if(gmailEl && s.email) gmailEl.value=s.email;
+    var recEl=$('emailRecipientInput'), nameEl=$('emailSenderNameInput');
     if(recEl && s.recipient) recEl.value=s.recipient;
-    if(pwdEl && s.configured) pwdEl.placeholder='••••••••（留空保持原密码）';
+    if(nameEl && s.senderName) nameEl.value=s.senderName;
   }).catch(function(){});
 }
 
 function saveEmailConfig(){
-  var gmail=$('emailGmailInput').value.trim();
-  var pwd=$('emailPwdInput').value.trim();
   var recipient=$('emailRecipientInput').value.trim();
+  var senderName=$('emailSenderNameInput').value.trim();
   fetch(BACKEND_URL+'/api/email/config',{
     method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({gmailAddress:gmail,appPassword:pwd,recipient:recipient})
+    body:JSON.stringify({recipient:recipient,senderName:senderName})
   }).then(function(r){return r.json()}).then(function(d){
     store._importing=true;closeModal();
-    if(d.configured) toast('✅ 邮件已配置'); else toast('⚠️ 请填写完整配置');
+    if(d.configured) toast('✅ 邮件已配置'); else toast('⚠️ 请填写收件人邮箱');
     updateEmailSettingsUI();
   }).catch(function(){ toast('配置保存失败'); });
 }
@@ -7230,7 +7225,8 @@ function toggleEmailEnabled(){
 function updateEmailSettingsUI(){
   fetch(BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
     $('toggleEmail').classList.toggle('on',s.enabled);
-    $('emailStatusVal').textContent=s.configured?s.email||'已配置':'未配置';
+    var status=s.apiKeySet?(s.recipient?'已配置':'缺收件人'):'API Key 未设';
+    $('emailStatusVal').textContent=status;
     $('emailSentVal').textContent=s.sentToday+'/'+s.maxPerDay;
     store._emailConfigured = s.configured && s.enabled;
   }).catch(function(){});

@@ -1,11 +1,8 @@
 require('dotenv').config();
-const dns = require('dns');
-dns.setDefaultResultOrder('ipv4first');  // Render IPv6 unreachable for SMTP
 const express = require('express');
 const cors = require('cors');
 const webpush = require('web-push');
 const { HttpsProxyAgent } = require('https-proxy-agent');
-const nodemailer = require('nodemailer');
 
 // Proxy for outbound API calls (set HTTPS_PROXY in .env, e.g. http://127.0.0.1:7897)
 const OUTBOUND_PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
@@ -1155,14 +1152,14 @@ app.post('/api/weather', async (req, res) => {
 });
 
 // ==================== EMAIL ENDPOINTS ====================
+const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
 const emailState = {
   enabled: true,
   maxPerDay: 2,
-  gmailAddress: '',
-  appPassword: '',
   recipient: '',
+  senderName: 'WarmBuddy',
   sentToday: 0,
-  sentDate: ''  // YYYY-MM-DD
+  sentDate: ''
 };
 
 function resetEmailDaily() {
@@ -1176,21 +1173,21 @@ function resetEmailDaily() {
 app.get('/api/email/status', (req, res) => {
   resetEmailDaily();
   res.json({
-    configured: !!(emailState.gmailAddress && emailState.appPassword && emailState.recipient),
+    configured: !!(RESEND_API_KEY && emailState.recipient),
     enabled: emailState.enabled,
-    email: emailState.gmailAddress ? emailState.gmailAddress.slice(0, 3) + '***@' + emailState.gmailAddress.split('@')[1] : '',
+    apiKeySet: !!RESEND_API_KEY,
     recipient: emailState.recipient,
+    senderName: emailState.senderName,
     sentToday: emailState.sentToday,
     maxPerDay: emailState.maxPerDay
   });
 });
 
 app.post('/api/email/config', (req, res) => {
-  const { gmailAddress, appPassword, recipient } = req.body || {};
-  if (gmailAddress !== undefined) emailState.gmailAddress = gmailAddress.trim();
-  if (appPassword !== undefined && appPassword.trim()) emailState.appPassword = appPassword.trim();
+  const { recipient, senderName } = req.body || {};
   if (recipient !== undefined) emailState.recipient = recipient.trim();
-  res.json({ ok: true, configured: !!(emailState.gmailAddress && emailState.appPassword && emailState.recipient) });
+  if (senderName !== undefined) emailState.senderName = senderName.trim() || 'WarmBuddy';
+  res.json({ ok: true, configured: !!(RESEND_API_KEY && emailState.recipient) });
 });
 
 app.post('/api/email/settings', (req, res) => {
@@ -1202,10 +1199,9 @@ app.post('/api/email/settings', (req, res) => {
 
 app.post('/api/email/send', async (req, res) => {
   resetEmailDaily();
+  if (!RESEND_API_KEY) return res.status(400).json({ error: 'Resend API Key 未配置 (环境变量 RESEND_API_KEY)' });
   if (!emailState.enabled) return res.status(403).json({ error: '邮件功能已关闭' });
-  if (!emailState.gmailAddress || !emailState.appPassword || !emailState.recipient) {
-    return res.status(400).json({ error: '邮箱未配置' });
-  }
+  if (!emailState.recipient) return res.status(400).json({ error: '收件人邮箱未配置' });
   if (emailState.sentToday >= emailState.maxPerDay) {
     return res.status(429).json({ error: `今日发送已达上限(${emailState.maxPerDay}封)` });
   }
@@ -1224,7 +1220,7 @@ app.post('/api/email/send', async (req, res) => {
           body: JSON.stringify({
             model: apiConfig.model || 'deepseek-chat',
             messages: [
-              { role: 'system', content: `你是一个邮件撰写助手。根据对话上下文和主题写一封简洁得体的邮件正文。纯文本格式，不包含问候语模板。直接返回邮件正文，不要任何前缀或说明。` },
+              { role: 'system', content: `你是一个邮件撰写助手。根据对话上下文和主题写一封简洁得体的邮件正文。纯文本格式。直接返回邮件正文，不要任何前缀或说明。` },
               ...messages.slice(-6),
               { role: 'user', content: `请撰写邮件。主题：${subject}。收件人：${emailState.recipient}。只返回正文。` }
             ],
@@ -1234,40 +1230,38 @@ app.post('/api/email/send', async (req, res) => {
         const data = await llmResp.json();
         body = (data.choices && data.choices[0]?.message?.content) || subject;
       } catch (e) {
-        body = subject; // fallback: use subject as body
+        body = subject;
       }
     } else {
       body = subject;
     }
 
-    // Step 2: Send via Gmail SMTP (explicit settings, more reliable from cloud IPs)
-    const transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 587,
-      secure: false,  // use STARTTLS
-      requireTLS: true,
-      auth: { user: emailState.gmailAddress, pass: emailState.appPassword },
-      tls: { rejectUnauthorized: false }
-    });
-    console.log('[email] Attempting send from', emailState.gmailAddress, 'to', emailState.recipient);
-    await transporter.sendMail({
-      from: emailState.gmailAddress,
-      to: emailState.recipient,
-      subject: subject,
-      text: body
+    // Step 2: Send via Resend API
+    const resp = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: `${emailState.senderName} <onboarding@resend.dev>`,
+        to: emailState.recipient,
+        subject: subject,
+        text: body
+      })
     });
 
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      throw new Error(errData.message || `Resend API returned ${resp.status}`);
+    }
+
     emailState.sentToday++;
-    console.log(`[email] Sent to ${emailState.recipient}: "${subject}" (${emailState.sentToday}/${emailState.maxPerDay} today)`);
+    console.log(`[email] Sent "${subject}" → ${emailState.recipient} (${emailState.sentToday}/${emailState.maxPerDay} today)`);
     res.json({ ok: true, sentToday: emailState.sentToday, maxPerDay: emailState.maxPerDay });
   } catch (e) {
-    console.error('[email] Send error — code:', e.code, '| message:', e.message, '| command:', e.command, '| response:', e.response);
-    console.error('[email] Full error:', JSON.stringify(e, Object.getOwnPropertyNames(e)));
-    if (e.code === 'EAUTH') {
-      res.status(401).json({ error: 'Gmail 认证失败，请检查邮箱地址和应用专用密码。也可能需要访问 accounts.google.com/DisplayUnlockCaptcha 解锁。' });
-    } else {
-      res.status(500).json({ error: '发送失败: ' + (e.message || String(e)) });
-    }
+    console.error('[email] Send error:', e.message);
+    res.status(500).json({ error: '发送失败: ' + e.message });
   }
 });
 
