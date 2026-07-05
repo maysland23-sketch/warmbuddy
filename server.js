@@ -1259,11 +1259,12 @@ app.post('/api/email/send', async (req, res) => {
     console.log(`[email] Sent to ${emailState.recipient}: "${subject}" (${emailState.sentToday}/${emailState.maxPerDay} today)`);
     res.json({ ok: true, sentToday: emailState.sentToday, maxPerDay: emailState.maxPerDay });
   } catch (e) {
-    console.error('[email] Send error:', e.message);
+    console.error('[email] Send error — code:', e.code, '| message:', e.message, '| command:', e.command, '| response:', e.response);
+    console.error('[email] Full error:', JSON.stringify(e, Object.getOwnPropertyNames(e)));
     if (e.code === 'EAUTH') {
-      res.status(401).json({ error: 'Gmail 认证失败，请检查邮箱地址和应用专用密码' });
+      res.status(401).json({ error: 'Gmail 认证失败，请检查邮箱地址和应用专用密码。也可能需要访问 accounts.google.com/DisplayUnlockCaptcha 解锁。' });
     } else {
-      res.status(500).json({ error: '发送失败: ' + e.message });
+      res.status(500).json({ error: '发送失败: ' + (e.message || String(e)) });
     }
   }
 });
