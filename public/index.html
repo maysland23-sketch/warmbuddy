@@ -1628,6 +1628,20 @@ function createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker) 
   cml.aiEmotionalMemories.unshift(aem);
   if (cml.aiEmotionalMemories.length > 200) cml.aiEmotionalMemories.length = 200;
   writeMemoryFile(store.activeProject, store.activeChat, { aiEmotionalMemories: [aem] }, 'core_memory_added');
+
+  // Cross-reference: also push to proj.memories (legacy memories panel)
+  var proj = getActiveProject();
+  if (proj) {
+    proj.memories.push({
+      id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      content: memMarker.summary,
+      date: fmtDate().iso, type: 'core', starred: false,
+      sourceChatId: store.activeChat, week: weekLabel(),
+      decayFactor: 1.0, affectLabel: reflection.ai_affect_label, affectIntensity: reflection.ai_affect_intensity || 5,
+      semanticKey: null, isCompressed: false, compressedFrom: [], lastAccessed: fmtDate().iso,
+      isCoreMemory: false, coreMemoryId: aem.id
+    });
+  }
 }
 
 function queueQuietPresenceCoreMemory(chat) {
@@ -6720,6 +6734,8 @@ ${recentMsgIds}` });
     // Strip TODO markers from display text so they don't appear in bubbles
     displayResponse = displayResponse.replace(/\[\[TODO:[^\]]+\]\]/g, '').trim();
   }
+  // Strip MEMORY marker from display (written by window LLM alongside REFLECT)
+  displayResponse = displayResponse.replace(/<!--\s*MEMORY\s*\{[\s\S]*?\}\s*-->/gi, '').trim();
 
   // ── Extract EMAIL markers from AI response (before bubble rendering) ──
   var emailData = extractEmailFromResponse(displayResponse);
