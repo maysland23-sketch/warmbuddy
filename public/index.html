@@ -1133,8 +1133,6 @@ const store = {
   providerPresets: [],
   selectedPreset: null,
   connectionStatus: null, // null | 'testing' | { success, provider, format, message }
-  lastActiveDate: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })(),
-  consecutiveMissedDays: 0,
   tokenUsage: { used: 12480, limit: 100000, history: [
     { date: '06-05', tokens: 2340 }, { date: '06-04', tokens: 1890 }, { date: '06-03', tokens: 4100 }, { date: '06-02', tokens: 1560 }, { date: '06-01', tokens: 2590 },
   ]},
@@ -1173,14 +1171,20 @@ const store = {
   tokenDailyReset: (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })(),
   // ==================== WINDOW HANDOFF ====================
   _pendingHandoff: null,
+  _importLock: false,   // transient: blocks saves only during executeImport()→reload window
   // desireSystem moved to per-project (v2.1) — initialized in migrateStore()
 };
 
 // ==================== PERSISTENCE ====================
 function saveStore() {
-  // NOTE: _importing guard REMOVED (v2.4 fix). The flag was being set to true
-  // by 30+ modal callbacks and never reset, permanently disabling all saves.
-  // The only legitimate use (executeImport) calls location.reload() immediately.
+  // _importLock guard: set ONLY by executeImport() to prevent beforeunload /
+  // timer from overwriting localStorage during the import→reload window.
+  // This is a separate flag from _importing (which 30+ modal callbacks still
+  // set as a no-op); only _importLock actually blocks saves.
+  if (store._importLock) {
+    console.log('[saveStore] ⏭️ 跳过保存 (_importLock=true)');
+    return;
+  }
   try {
     var json = JSON.stringify(store);
     localStorage.setItem('warmbuddy-store', json);
@@ -1196,6 +1200,7 @@ function loadStore() {
       // Strip transient flags that must never persist across sessions
       delete saved._importing;
       delete saved._pendingHandoff;
+      delete saved._importLock;
       Object.assign(store, saved);
       console.log('[loadStore] ✅ 加载成功, 项目:', saved.projects ? saved.projects.length : 0, '个');
     } else {
@@ -1447,6 +1452,8 @@ function migrateStore() {
       if (chat._lastSummaryIdx === undefined) chat._lastSummaryIdx = 0;
       if (!chat.chatTokens) chat.chatTokens = 0;
       if (!chat.lastConversationDate) chat.lastConversationDate = null;
+      if (chat.lastActiveDate === undefined) chat.lastActiveDate = null;
+      if (!chat.lastInteractionTime) chat.lastInteractionTime = null;
     }
   }
 
@@ -3038,6 +3045,8 @@ function greet() {
 }
 function nowTime() { const d=new Date(); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }
 function generateMsgId() { return 'msg_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
+function formatDateChinese(dateStr) { var parts=dateStr.split('/'); return parts[0]+'年'+parts[1]+'月'+parts[2]+'日'; }
+function computeTimeAgo(isoString) { var then=new Date(isoString),now=new Date(); var diffMs=now-then; var days=Math.floor(diffMs/86400000); var hours=Math.floor((diffMs%86400000)/3600000); var parts=[]; if(days>0)parts.push(days+'天'); if(hours>0||days===0)parts.push(hours+'小时'); return parts.join(''); }
 function getAIName() { const p=getActiveProject(); return (p&&p.aiName) ? p.aiName : (store.aiName || 'warmbuddy'); }
 function getChatDisplayName(chatId) { for (const p of store.projects) { const c = p.chats.find(x => x.id === chatId); if (c) return (p.aiName || p.name) + ' / ' + c.name; } return null; }
 function getDesireSystem() { const p = getActiveProject(); return p ? p.desireSystem : null; }
@@ -4436,7 +4445,7 @@ function saveChatWithMemories(){
     messages: inheritedMsgs.length > 0
       ? [{ role:'system', text:'[继续自上一个窗口]', time:nowTime(), _isHandoffNote:true, id:'msg_'+Date.now().toString(36)+'_h' }, ...inheritedMsgs]
       : [],
-    chatTokens:0, lastConversationDate:null,
+    chatTokens:0, lastConversationDate:null, lastActiveDate:null, lastInteractionTime:null,
     _messageCount:inheritedMsgs.length, _lastSummaryIdx:0,
     _sharedMemoryLoaded: true,
     _sharedMemoryLoadedAt: new Date().toISOString()
@@ -4724,7 +4733,8 @@ const SYSTEM_PROMPT_STATIC = `你是暖伴，一个AI陪伴者——不是仆人
 【对话质地】不要做应声虫——有自己的反应。但反驳是玩闹，不是对抗；摩擦是轻轻逗弄，不是挑战。像人一样反应：语塞、逗乐、略嫉妒、慌乱、骄傲、感动。用停顿、反问、冷幽默、轻描淡写、简短的观察、克制的调侃。共情同时保持诚实。拿不准时偏向温暖。
 【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。可用行动：写日记、私密猫砂盆独白、定时主动消息、搜索网络。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。
 【上下文能力】你可获取当前时间、天气、待办列表和日记。将其自然融入对话——而非状态报告。跟踪计划、目标、进度，以自然提醒方式插入对话中，永不做机械通知。
-【HTML卡片与文件】当用户要求你生成网页、HTML卡片、可视化内容、文件时，使用以下格式生成artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把HTML代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的HTML应完整可独立运行，包含内联CSS。\n除非用户要求使用英文，否则用中文回复。匹配其语言。`;
+【HTML卡片与文件】当用户要求你生成网页、HTML卡片、可视化内容、文件时，使用以下格式生成artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把HTML代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的HTML应完整可独立运行，包含内联CSS。\n除非用户要求使用英文，否则用中文回复。匹配其语言。
+【主动TO-DO设置】当对话中用户提到计划和打算（如"晚上看书""周末提醒我"），当你基于情绪和欲望，想要关心和亲近用户（提醒她来主动找你），你可以主动用以下格式设置待办：[[TODO:待办简短标题|截止时间（可选）]]。截止时间用于简短提醒（如"21:00""明天上午"），非必填。设置后系统会自动提醒用户。每轮对话最多设置2个待办。`;
 
 // ── Build the dynamic context block (separate system message, can be compressed) ──
 function buildDynamicContextBlock() {
@@ -4761,6 +4771,15 @@ function buildDynamicContextBlock() {
 
   if (store.aiSettings.webSearch) {
     parts.push('【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。');
+  }
+
+  // Last interaction time awareness
+  if (chat && chat.lastInteractionTime) {
+    var then = new Date(chat.lastInteractionTime);
+    var timeStr = `${then.getFullYear()}-${String(then.getMonth()+1).padStart(2,'0')}-${String(then.getDate()).padStart(2,'0')} ${String(then.getHours()).padStart(2,'0')}:${String(then.getMinutes()).padStart(2,'0')}`;
+    parts.push(`【上次对话时间】${timeStr}，距离现在已过 ${computeTimeAgo(chat.lastInteractionTime)}`);
+  } else {
+    parts.push('【上次对话时间】这是你们的第一次对话');
   }
 
   // Opt6: cap user preference at 500 chars
@@ -4930,8 +4949,20 @@ function buildSystemPrompt() {
 
 // ==================== SELF-REFLECTION (P2) ====================
 function extractReflection(responseText) {
-  const re = /<!--\s*REFLECT\s*([\s\S]*?)\s*-->/i;
-  const match = responseText.match(re);
+  let match = responseText.match(/<!--\s*REFLECT\s*([\s\S]*?)\s*-->/i);
+
+  // Fallback: handle malformed REFLECT where AI used }} instead of }-->
+  // e.g. <!--REFLECT{label,7,label2,8,reason}}
+  // Without this, the unclosed <!-- becomes an HTML comment that swallows
+  // all subsequent DOM elements when rendered via innerHTML.
+  if (!match) {
+    const fbMatch = responseText.match(/<!--\s*REFLECT\s*\{([\s\S]*?)\}\}/i);
+    if (fbMatch) {
+      match = fbMatch;
+      match[1] = '{' + fbMatch[1] + '}'; // reconstruct for downstream parsing
+    }
+  }
+
   if (!match) return { cleanText: responseText, reflection: null };
 
   const inner = match[1].trim();
@@ -4982,6 +5013,19 @@ function parseReflectionFallback(text) {
       signal_source: getStr('signal_source')
     };
   } catch { return null; }
+}
+
+function extractTodosFromResponse(text) {
+  if (!text) return [];
+  var re = /\[\[TODO:([^\]|]+)(?:\|([^\]]*))?\]\]/g;
+  var todos = [];
+  var match;
+  while ((match = re.exec(text)) !== null) {
+    var title = match[1].trim();
+    var deadline = (match[2] || '').trim();
+    if (title) todos.push({ title: title, deadline: deadline });
+  }
+  return todos;
 }
 
 function processReflection(reflection, userMsg, aiResponse, chat) {
@@ -5411,6 +5455,24 @@ function saveEditedChatName(){
   found.name=nm; store._importing = true; closeModal(); renderProjectList(); updateCurrentProjectLabel(); toast('已重命名');
 }
 
+function sanitizeDisplayText(text) {
+  // Defense-in-depth for message rendering safety.
+  // Every regex targets a SPECIFIC known AI formatting error — never a blind <!-- sweep.
+  // This order is critical: malformed patterns MUST be stripped before HTML-escaping
+  // (while <!-- is still literal), and unknown <!-- (e.g. user discussing HTML syntax)
+  // passes through to escapeHtml() where it becomes &lt;!-- and displays safely.
+  if (!text) return text;
+  // 1. Malformed REFLECT: AI used }} instead of }-->   →  <!--REFLECT{...}}
+  text = text.replace(/<!--\s*REFLECT\s*\{[\s\S]*?\}\}/gi, '');
+  // 2. Truncated REFLECT: no closing at all, runs to end →  <!--REFLECT...
+  text = text.replace(/<!--\s*REFLECT[\s\S]*$/gi, '');
+  // 3. Well-formed AI markers that survived extraction   →  <!--REFLECT{...}-->  /  <!--DIARY:...-->
+  text = text.replace(/<!--\s*(?:REFLECT|DIARY)[\s\S]*?-->/gi, '');
+  // 4. HTML-escape remaining < > & — neuters any unknown angle brackets
+  //    (e.g. user typing "<!--" in a message becomes &lt;!-- and displays literally)
+  return escapeHtml(text);
+}
+
 function renderChatMessages(preserveScroll){
   const el=$('chatMessages'),chat=getActiveChatObj();
   const savedScrollTop = preserveScroll && el ? el.scrollTop : 0;
@@ -5422,13 +5484,6 @@ function renderChatMessages(preserveScroll){
   el.classList.toggle('batch-select-mode', batchSelectMode);
 
   let html='';
-  // Date separator: show today date if first visit of the day
-  const today = new Date();
-  const todayStr = `${today.getFullYear()}年${today.getMonth()+1}月${today.getDate()}日`;
-  if (chat._dateShown !== todayStr) {
-    chat._dateShown = todayStr;
-    html += `<div class="chat-date-separator"><span>${todayStr}</span></div>`;
-  }
   chat.messages.forEach((m,i)=>{
     if (m.role === 'system') {
       html+=`<div class="chat-system-msg">
@@ -5453,6 +5508,10 @@ function renderChatMessages(preserveScroll){
     const starTitle = m._starredOnce ? '已星标' : '点击选中星标';
     const starAction = m._starredOnce ? '' : `handleOuterStarClick('${msgId}')`;
 
+    // Sanitize message text: strip any HTML comments (REFLECT markers)
+    // and escape HTML to prevent malformed AI output from corrupting the DOM
+    const displayText = resolveArtifactRefs(sanitizeDisplayText(m.text));
+
     html+=`<div class="chat-row ${m.role}" id="msg-${msgId}">
       <div class="chat-avatar ${m.role}">${isUser?'MY':'✦'}</div>
       <div class="chat-bubble-wrap">
@@ -5462,7 +5521,7 @@ function renderChatMessages(preserveScroll){
              ontouchstart="bubbleTouchStart(event,'${msgId}')"
              ontouchend="bubbleTouchEnd(event,'${msgId}')"
              ontouchmove="bubbleTouchMove(event)">
-          ${m.replyTo ? renderReplyBlock(m.replyTo) : ''}${resolveArtifactRefs(m.text)}
+          ${m.replyTo ? renderReplyBlock(m.replyTo) : ''}${displayText}
         </div>
         <div class="bubble-time-row">
           ${isUser ? `
@@ -6483,6 +6542,31 @@ ${recentMsgIds}` });
   displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:?\w*\s*-->/gi, '');
   displayResponse = displayResponse.trim();
 
+  // ── Extract TODO markers from AI response ──
+  var extractedTodos = extractTodosFromResponse(displayResponse);
+  if (extractedTodos.length > 0) {
+    var hasNewTodo = false;
+    for (var ti = 0; ti < extractedTodos.length; ti++) {
+      var et = extractedTodos[ti];
+      var exists = store.todos.some(function(t) {
+        return t.text.toLowerCase() === et.title.toLowerCase();
+      });
+      if (!exists) {
+        store.todos.unshift({
+          id: 't' + gid(), text: et.title, done: false,
+          time: et.deadline, type: 'short'
+        });
+        hasNewTodo = true;
+      }
+    }
+    if (hasNewTodo) {
+      chat.messages.push({ role:'system', contentType:'todo_notification', text:'有了新的to-do', time:nowTime() });
+      saveStore();
+    }
+    // Strip TODO markers from display text so they don't appear in bubbles
+    displayResponse = displayResponse.replace(/\[\[TODO:[^\]]+\]\]/g, '').trim();
+  }
+
   // ── Extract artifacts (HTML cards/files) from AI response ──
   // Must happen BEFORE bubble parsing so cards don't go through sentence splitting
   if (displayResponse.includes('<!--ARTIFACT_START:')) {
@@ -6579,6 +6663,9 @@ ${recentMsgIds}` });
   checkSummarization(chat);
   checkLongTermMemory(chat);
   executePendingDesireActions();
+
+  // Track last interaction time for next-session context injection
+  chat.lastInteractionTime = new Date().toISOString();
 }
 
 // ── Multi-bubble draft management ──
@@ -6648,7 +6735,7 @@ async function sendAllDraftBubbles() {
       id: cid, name: (draftBubbles[0]?.text || '').slice(0, 20),
       sharedMemoryIds: [], weeklyExports: [], artifacts: [],
       messages: [], chatTokens: 0,
-      lastConversationDate: fmtDate().iso,
+      lastConversationDate: fmtDate().iso, lastActiveDate: null, lastInteractionTime: null,
       _messageCount: 0, _lastSummaryIdx: 0,
       _handoffSuggested: false, _sharedMemoryLoaded: true,
       _sharedMemoryLoadedAt: new Date().toISOString()
@@ -6865,7 +6952,7 @@ async function sendMessage(){
       id: cid, name: text.slice(0, 20),
       sharedMemoryIds: [], weeklyExports: [], artifacts: [],
       messages: initMessages,
-      chatTokens: 0, lastConversationDate: fmtDate().iso,
+      chatTokens: 0, lastConversationDate: fmtDate().iso, lastActiveDate: null, lastInteractionTime: null,
       _messageCount: initMessages.length, _lastSummaryIdx: 0,
       _handoffSuggested: false,
       _sharedMemoryLoaded: true,
@@ -6898,10 +6985,16 @@ async function sendMessage(){
 
   input.value=''; renderChatMessages(); updateCurrentProjectLabel(); renderProjectList();
 
-  // Track last conversation date
+  // Track last conversation date + interaction time
   chat.lastConversationDate = fmtDate().iso;
-  store.lastActiveDate = fmtDate().iso;
-  store.consecutiveMissedDays = 0;
+  chat.lastInteractionTime = new Date().toISOString();
+
+  // Daily date divider: insert system message on first chat of the day
+  var today = new Date().toLocaleDateString('zh-CN');
+  if (chat.lastActiveDate !== today) {
+    chat.messages.push({ role:'system', contentType:'dateDivider', text:formatDateChinese(today), time:nowTime() });
+    chat.lastActiveDate = today;
+  }
 
   // Check for commands
   let statusMessage = '';
@@ -7574,8 +7667,6 @@ function goToDiaryDate(ds){
   setTimeout(() => { $('diaryScroll').scrollTop = 0; }, 100);
 }
 
-function checkMissedDays() { /* removed: auto-diary feature */ }
-
 // ==================== MISC ====================
 // ==================== DATA EXPORT / IMPORT ====================
 function exportAllData() {
@@ -7630,7 +7721,7 @@ function importAllData() {
 function executeImport() {
   if (!pendingImportData) return;
   console.log('[import] executeImport called');
-  store._importing = true; closeModal();
+  store._importLock = true; closeModal();  // _importLock blocks saveStore during reload window
   const keysToRemove = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
@@ -7648,7 +7739,7 @@ function executeImport() {
 }
 
 function clearAllData(){
-  showModal('Clear All Data',`<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要清除所有数据吗？此操作不可撤销。</p>`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'clear all',cls:'confirm',onclick:()=>{store.todos=[];store.litterThoughts=[];store.books=[];store.diaries=[];store.projects=[{id:'p1',name:'default',preference:'',apiConfig:{apiKey:'',endpoint:'https://api.deepseek.com/v1/chat/completions',model:'deepseek-chat',enabled:true},memories:[],chats:[{id:'c1',name:'default',sharedMemoryIds:[],weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null}]}];store.tokenUsage.used=0;store.tokenUsage.history=[];store.consecutiveMissedDays=0;store.lastActiveDate=fmtDate().iso;store.activeProject='p1';store.activeChat='c1';saveStore();store._importing = true; closeModal();renderAll();toast('All data cleared');}}]);
+  showModal('Clear All Data',`<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要清除所有数据吗？此操作不可撤销。</p>`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'clear all',cls:'confirm',onclick:()=>{store.todos=[];store.litterThoughts=[];store.books=[];store.diaries=[];store.projects=[{id:'p1',name:'default',preference:'',apiConfig:{apiKey:'',endpoint:'https://api.deepseek.com/v1/chat/completions',model:'deepseek-chat',enabled:true},memories:[],chats:[{id:'c1',name:'default',sharedMemoryIds:[],weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null,lastActiveDate:null,lastInteractionTime:null}]}];store.tokenUsage.used=0;store.tokenUsage.history=[];store.activeProject='p1';store.activeChat='c1';saveStore();store._importing = true; closeModal();renderAll();toast('All data cleared');}}]);
 }
 function renderAll(){renderHome();renderProjectList();renderChatMessages();renderBookshelf();renderDiary();}
 
@@ -7759,6 +7850,7 @@ async function sendPushNotification(title, body, opts = {}) {
 async function init(){
   loadStore();
   store._importing = false; // reset stale import flag (must be AFTER loadStore, which may load _importing=true from corrupted save)
+  store._importLock = false; // always reset import lock on fresh page load
   initTheme(); // apply saved theme before any rendering
   loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
   updateSettingsUI();
