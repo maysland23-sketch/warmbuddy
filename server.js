@@ -1238,11 +1238,16 @@ app.post('/api/email/send', async (req, res) => {
       body = subject;
     }
 
-    // Step 2: Send via Gmail SMTP
+    // Step 2: Send via Gmail SMTP (explicit settings, more reliable from cloud IPs)
     const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: emailState.gmailAddress, pass: emailState.appPassword }
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,  // use STARTTLS
+      requireTLS: true,
+      auth: { user: emailState.gmailAddress, pass: emailState.appPassword },
+      tls: { rejectUnauthorized: false }
     });
+    console.log('[email] Attempting send from', emailState.gmailAddress, 'to', emailState.recipient);
     await transporter.sendMail({
       from: emailState.gmailAddress,
       to: emailState.recipient,
