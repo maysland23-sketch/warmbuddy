@@ -1,4 +1,4 @@
-const CACHE_NAME = 'warmbuddy-v1';
+const CACHE_NAME = 'warmbuddy-v2';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

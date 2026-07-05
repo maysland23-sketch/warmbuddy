@@ -1036,6 +1036,8 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 
 </div>
 
+<script src="localforage.min.js"></script>
+
 <script>
 // ==================== DATA ====================
 // Backend API base URL — points to Render, NOT Vercel static host
@@ -1176,26 +1178,56 @@ const store = {
 };
 
 // ==================== PERSISTENCE ====================
+var _saveTimer = null;
+
 function saveStore() {
   // _importLock guard: set ONLY by executeImport() to prevent beforeunload /
-  // timer from overwriting localStorage during the import→reload window.
-  // This is a separate flag from _importing (which 30+ modal callbacks still
-  // set as a no-op); only _importLock actually blocks saves.
+  // timer from overwriting storage during the import→reload window.
   if (store._importLock) {
     console.log('[saveStore] ⏭️ 跳过保存 (_importLock=true)');
     return;
   }
-  try {
-    var json = JSON.stringify(store);
-    localStorage.setItem('warmbuddy-store', json);
-    console.log('[saveStore] ✅ 保存成功, 大小:', (json.length/1024).toFixed(1), 'KB, 项目:', store.projects.length, '个');
-  } catch(e) {
-    console.error('[saveStore] ❌ 保存失败:', e.name, e.message);
-  }
+  // Debounce: merge rapid successive calls (e.g. timer + modal close) into one write
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(function() {
+    _saveTimer = null;
+    try {
+      // localforage auto-serializes objects — write the store object directly
+      localforage.setItem('warmbuddy-store', store).then(function() {
+        var size = JSON.stringify(store).length;
+        console.log('[saveStore] ✅ 保存成功, 大小:', (size/1024).toFixed(1), 'KB, 项目:', store.projects.length, '个');
+      }).catch(function(e) {
+        console.error('[saveStore] localforage 写入失败，降级 localStorage:', e.message);
+        // Fallback to synchronous localStorage if IndexedDB is unavailable
+        try { localStorage.setItem('warmbuddy-store', JSON.stringify(store)); } catch(_) {}
+        if (e.name === 'QuotaExceededError' || (e.message && e.message.includes('quota'))) {
+          toast('⚠️ 存储空间不足，请导出数据后清理旧对话');
+        }
+      });
+    } catch(e) {
+      console.error('[saveStore] ❌ 保存失败:', e.message);
+    }
+  }, 300);
 }
-function loadStore() {
+
+async function loadStore() {
   try {
-    var saved = JSON.parse(localStorage.getItem('warmbuddy-store'));
+    // 1. Try localforage first (stores objects natively)
+    var saved = await localforage.getItem('warmbuddy-store');
+
+    // 2. Fallback: migrate from localStorage if localforage is empty
+    if (!saved) {
+      var raw = localStorage.getItem('warmbuddy-store');
+      if (raw) {
+        try { saved = JSON.parse(raw); } catch(_) { saved = null; }
+        if (saved) {
+          // Auto-migrate: write to localforage for next time
+          console.log('[loadStore] 从 localStorage 迁移到 localforage…');
+          localforage.setItem('warmbuddy-store', saved).catch(function(){});
+        }
+      }
+    }
+
     if (saved) {
       // Strip transient flags that must never persist across sessions
       delete saved._importing;
@@ -1204,10 +1236,15 @@ function loadStore() {
       Object.assign(store, saved);
       console.log('[loadStore] ✅ 加载成功, 项目:', saved.projects ? saved.projects.length : 0, '个');
     } else {
-      console.log('[loadStore] ⚠️ localStorage 中没有数据');
+      console.log('[loadStore] ⚠️ 存储中没有数据');
     }
   } catch(e) {
-    console.error('[loadStore] ❌ 加载失败:', e.name, e.message);
+    console.error('[loadStore] ❌ 加载失败:', e.message);
+    // Last-resort fallback: try localStorage directly
+    try {
+      var raw = localStorage.getItem('warmbuddy-store');
+      if (raw) { var s = JSON.parse(raw); delete s._importing; delete s._pendingHandoff; delete s._importLock; Object.assign(store, s); }
+    } catch(_) {}
   }
   migrateStore();
 }
@@ -3119,12 +3156,17 @@ function highlightMemory(memId) {
   // Trigger rebuild of BM25 after memory interaction
   store.memorySystem.bm25Index._dirty = true;
 }
-function switchMemoryTab(tab){
+async function switchMemoryTab(tab){
   currentMemoryTab=tab;
   document.querySelectorAll('#memoryPanelTabs .memory-tab').forEach(t=>t.classList.remove('active'));
   const btn=document.querySelector(`#memoryPanelTabs .memory-tab[onclick*="${tab}"]`); if(btn)btn.classList.add('active');
   const titles={tokens:'token usage',exports:'exports',core:'core memories',import:'import',desires:'desire drives',memories:'memory'};
   $('memoryPanelTitle').textContent=titles[tab]||'memory';
+  // Pre-fetch pattern change log for exports tab (async readMemoryFile)
+  if (tab === 'exports') {
+    var chat = getActiveChatObj();
+    if (chat) store._cachedPatternLog = await readMemoryFile(store.activeProject, chat.id);
+  }
   renderMemoryPanelBody();
 }
 
@@ -3301,10 +3343,10 @@ function renderMemoryPanelBody(){
           drp.patterns.map(p => `<div style="font-size:11px;color:var(--text-light);padding:4px 0;border-bottom:1px solid var(--border-light);"><b>${p.patternName}</b> (×${p.frequency||1}): ${(p.description||'').slice(0,50)}</div>`).join('') +
           '</div>';
       })() +
-      // Pattern change log (from memory file)
+      // Pattern change log (from memory file) — pre-fetched async into _cachedPatternLog
       (() => {
         if (!chat) return '';
-        const file = readMemoryFile(store.activeProject, chat.id);
+        var file = store._cachedPatternLog;
         if (!file || !file.pattern_change_log || file.pattern_change_log.length === 0) return '';
         return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">' +
           '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">PATTERN CHANGE LOG</div>' +
@@ -4016,14 +4058,14 @@ function renderThemePicker() {
 async function fetchWeather() {
   if (!store.aiSettings.autoWeather) return;
   let loc = null;
-  try { const stored = localStorage.getItem('userLocation'); if (stored) loc = JSON.parse(stored); } catch {}
+  try { loc = await localforage.getItem('userLocation'); } catch {}
 
   if (!loc) {
     if (!navigator.geolocation) { toast('浏览器不支持定位'); return; }
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         const newLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-        localStorage.setItem('userLocation', JSON.stringify(newLoc));
+        localforage.setItem('userLocation', newLoc).catch(function(){});
         await doWeatherFetch(newLoc.lat, newLoc.lon);
       },
       (err) => {
@@ -4563,19 +4605,18 @@ function memoryFileKey(projectId, windowId) {
   return `warmbuddy-memory-${projectId}-${windowId}`;
 }
 
-function readMemoryFile(projectId, windowId) {
+async function readMemoryFile(projectId, windowId) {
   try {
-    const raw = localStorage.getItem(memoryFileKey(projectId, windowId));
-    return raw ? JSON.parse(raw) : null;
+    return await localforage.getItem(memoryFileKey(projectId, windowId));
   } catch { return null; }
 }
 
 // v2.0: Writes full 3-layer structure + derived insights to memory file
-function writeMemoryFile(projectId, windowId, data, trigger) {
+async function writeMemoryFile(projectId, windowId, data, trigger) {
   if (!projectId || !windowId) return;
   const ms = store.memorySystem;
   const cml = getCoreMemoryLayers();
-  const existing = readMemoryFile(projectId, windowId);
+  const existing = await readMemoryFile(projectId, windowId);
   const ts = new Date().toISOString();
 
   // Build v2.0 file from current in-memory state
@@ -4616,7 +4657,7 @@ function writeMemoryFile(projectId, windowId, data, trigger) {
   }
 
   try {
-    localStorage.setItem(memoryFileKey(projectId, windowId), JSON.stringify(file));
+    await localforage.setItem(memoryFileKey(projectId, windowId), file);
   } catch (e) {
     console.log('[memory-file] Write failed:', e.message);
   }
@@ -4638,7 +4679,7 @@ function diffPatterns(oldPatterns, newPatterns) {
 }
 
 // v2.0: Merge all 3 layers across project windows, dedup by ID
-function syncProjectMemories(projectId) {
+async function syncProjectMemories(projectId) {
   if (!projectId) return;
   const ms = store.memorySystem;
   const targetProj = getProjectById(projectId); if (!targetProj) return; if (!targetProj.coreMemoryLayers) { targetProj.coreMemoryLayers = { aiEmotionalMemories: [], userStarredMemories: [], diaryAndLitterbox: [] }; } const cml = targetProj.coreMemoryLayers;
@@ -4651,11 +4692,11 @@ function syncProjectMemories(projectId) {
   let latestPP = null, latestPPTime = '';
 
   const prefix = `warmbuddy-memory-${projectId}-`;
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
+  const allKeys = await localforage.keys();
+  for (const key of allKeys) {
     if (!key || !key.startsWith(prefix)) continue;
     try {
-      const file = JSON.parse(localStorage.getItem(key));
+      const file = await localforage.getItem(key);  // localforage auto-parses JSON
       if (!file) continue;
 
       // Merge aiEmotionalMemories
@@ -7669,13 +7710,16 @@ function goToDiaryDate(ds){
 
 // ==================== MISC ====================
 // ==================== DATA EXPORT / IMPORT ====================
-function exportAllData() {
+async function exportAllData() {
   const data = {};
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
+  const allKeys = await localforage.keys();
+  for (const key of allKeys) {
     if (key && (key.startsWith('warmbuddy-') || key === 'userLocation')) {
-      try { data[key] = JSON.parse(localStorage.getItem(key)); }
-      catch { data[key] = localStorage.getItem(key); }
+      try {
+        const val = await localforage.getItem(key);
+        // Export as JSON string for backward-compatible backup files
+        data[key] = typeof val === 'string' ? val : JSON.stringify(val);
+      } catch { data[key] = null; }
     }
   }
   const date = new Date().toISOString().slice(0, 10);
@@ -7718,21 +7762,36 @@ function importAllData() {
   input.click();
 }
 
-function executeImport() {
+async function executeImport() {
   if (!pendingImportData) return;
   console.log('[import] executeImport called');
   store._importLock = true; closeModal();  // _importLock blocks saveStore during reload window
-  const keysToRemove = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key && (key.startsWith('warmbuddy-') || key === 'userLocation')) {
-      keysToRemove.push(key);
+
+  // Remove old warmbuddy- keys from localforage + localStorage (belt-and-suspenders)
+  var allKeys = await localforage.keys();
+  for (var ki = 0; ki < allKeys.length; ki++) {
+    var k = allKeys[ki];
+    if (k && (k.startsWith('warmbuddy-') || k === 'userLocation')) {
+      await localforage.removeItem(k);
     }
   }
-  keysToRemove.forEach(k => localStorage.removeItem(k));
-  Object.entries(pendingImportData).forEach(([k, v]) => {
-    localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
-  });
+  // Also clear legacy localStorage (in case of dual-write safety net)
+  for (var li = 0; li < localStorage.length; li++) {
+    var lk = localStorage.key(li);
+    if (lk && (lk.startsWith('warmbuddy-') || lk === 'userLocation')) {
+      localStorage.removeItem(lk);
+    }
+  }
+
+  // Write imported data — value may be a JS object (new) or JSON string (old backup)
+  var entries = Object.entries(pendingImportData);
+  for (var ei = 0; ei < entries.length; ei++) {
+    var key = entries[ei][0];
+    var v = entries[ei][1];
+    var value = (typeof v === 'string') ? JSON.parse(v) : v;
+    await localforage.setItem(key, value);
+  }
+
   pendingImportData = null;
   toast('📤 数据已导入，即将刷新…');
   location.reload();
@@ -7848,7 +7907,7 @@ async function sendPushNotification(title, body, opts = {}) {
 }
 
 async function init(){
-  loadStore();
+  await loadStore();
   store._importing = false; // reset stale import flag (must be AFTER loadStore, which may load _importing=true from corrupted save)
   store._importLock = false; // always reset import lock on fresh page load
   initTheme(); // apply saved theme before any rendering
@@ -7902,7 +7961,7 @@ setInterval(saveStore, 2000);
 setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
 
 // ── Weekly memory file write ──
-function checkWeeklyMemoryWrite() {
+async function checkWeeklyMemoryWrite() {
   const now = new Date();
   const dayOfWeek = now.getDay(); // 0 = Sunday
   const today = fmtDate().iso;
@@ -7917,14 +7976,14 @@ function checkWeeklyMemoryWrite() {
     }
     ms._lastWeeklyWrite = today;
     // Flush evicted messages to memory files
-    flushEvictedMessages();
+    await flushEvictedMessages();
     // Trigger derivation on weekly write
     deriveRelationalInsights();
     console.log('[weekly-write] v2.0 memory files written for all projects');
   }
 }
 
-function flushEvictedMessages() {
+async function flushEvictedMessages() {
   const ms = store.memorySystem;
   if (!ms._evictedMessages || ms._evictedMessages.length === 0) return;
   const proj = getActiveProject();
@@ -7932,7 +7991,7 @@ function flushEvictedMessages() {
   const chat = getActiveChatObj();
   if (!chat) { ms._evictedMessages = []; return; }
 
-  const existing = readMemoryFile(store.activeProject, chat.id) || {};
+  const existing = await readMemoryFile(store.activeProject, chat.id) || {};
   const userStarred = existing.userStarredMemories || [];
   for (const ev of ms._evictedMessages) {
     userStarred.push({
@@ -8005,7 +8064,11 @@ document.addEventListener('click', function requestPushOnce() {
   _pushPermissionRequested = true;
   setTimeout(() => requestPushPermission(), 2000); // slight delay after page load
 }, { once: true });
-window.addEventListener('beforeunload', saveStore);
+window.addEventListener('beforeunload', function() {
+  saveStore();  // fire-and-forget: localforage may be interrupted
+  // Safety net: synchronous localStorage write as fallback
+  try { localStorage.setItem('warmbuddy-store', JSON.stringify(store)); } catch(_) {}
+});
 </script>
 </body>
 </html>
