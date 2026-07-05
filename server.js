@@ -1065,22 +1065,25 @@ app.post('/api/search', async (req, res) => {
         results = JSON.stringify(data).slice(0, 500);
       }
     } else {
-      // Free DuckDuckGo Instant Answer API (no key needed)
-      const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`;
-      const resp = await fetch(ddgUrl);
+      // Free DuckDuckGo HTML search (no key needed, scrapes result page)
+      const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+      const resp = await fetch(ddgUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      });
       if (!resp.ok) throw new Error(`DuckDuckGo returned ${resp.status}`);
-      const data = await resp.json();
+      const html = await resp.text();
 
+      // Parse HTML search results: extract title + snippet pairs
       const parts = [];
-      if (data.AbstractText && data.AbstractText.trim()) {
-        parts.push(data.AbstractText.trim());
-      }
-      if (data.Answer && data.Answer.trim()) {
-        parts.push(data.Answer.trim());
-      }
-      if (data.RelatedTopics && Array.isArray(data.RelatedTopics)) {
-        for (const topic of data.RelatedTopics.slice(0, 3)) {
-          if (topic.Text) parts.push(topic.Text.trim());
+      const resultRe = /<a[^>]*class="result__a"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+      let m;
+      let count = 0;
+      while ((m = resultRe.exec(html)) !== null && count < 3) {
+        var title = m[1].replace(/<[^>]+>/g, '').trim();
+        var snippet = m[2].replace(/<[^>]+>/g, '').trim();
+        if (title && snippet) {
+          parts.push(title + ': ' + snippet);
+          count++;
         }
       }
       results = parts.join(' | ');
