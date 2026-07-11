@@ -473,7 +473,11 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 let supabase = null;
 if (SUPABASE_URL && SUPABASE_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+    db: { schema: 'public' },
+    // Disable realtime WebSocket — we only use DB queries, not subscriptions
+    realtime: { enabled: false }
+  });
   console.log('[supabase] Connected to:', SUPABASE_URL);
 } else {
   console.log('[supabase] NOT configured — falling back to file-based configs');
