@@ -7171,9 +7171,10 @@ async function sendMessage(){
 
   input.value=''; renderChatMessages(); updateCurrentProjectLabel(); renderProjectList();
 
-  // Track last conversation date + interaction time
+  // Track last conversation date
   chat.lastConversationDate = fmtDate().iso;
-  chat.lastInteractionTime = new Date().toISOString();
+  // NOTE: lastInteractionTime is updated AFTER AI response (in triggerAIResponse),
+  // so buildDynamicContextBlock() sees the PREVIOUS interaction time for correct elapsed-time calculation.
 
   // Daily date divider: insert system message on first chat of the day
   var today = new Date().toLocaleDateString('zh-CN');
@@ -7207,6 +7208,7 @@ async function sendMessage(){
         chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: aiTime, id: generateMsgId() });
       }
       chat.messages.push({role:'ai',text:cmdResult,time:aiTime,id:generateMsgId()});
+      chat.lastInteractionTime = new Date().toISOString();
       renderChatMessages();
       renderProjectList();
       return;
