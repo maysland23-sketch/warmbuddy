@@ -3918,6 +3918,7 @@ function saveProjectApiConfig(pid){
   proj.apiConfig.enabled = document.getElementById('pjApiEnabled')?.classList.contains('on') !== false;
   saveStore(); store._importing = true; closeModal();
   renderProjectList(); updateSettingsUI();
+  syncProjectConfigToBackend();  // sync to backend (Supabase) for cron
   toast('✅ ' + proj.name + ' API 配置已保存');
 }
 async function testProjectConnection(pid){
