@@ -7412,6 +7412,9 @@ function saveBook(){
 function syncProjectConfigToBackend(){
   var proj=getActiveProject(); if(!proj)return;
   var cfg=getActiveApiConfig();
+  // Fallback to store-level apiKey: proj.apiConfig may exist with empty apiKey
+  var apiKey = cfg.apiKey || store.apiKey || '';
+  var endpoint = cfg.endpoint || store.apiEndpoint || 'https://api.deepseek.com/v1/chat/completions';
   var emailStatus={};
   // Get email status for this project
   try {
@@ -7424,8 +7427,8 @@ function syncProjectConfigToBackend(){
     body:JSON.stringify({
       projectId:proj.id,
       config:{
-        apiKey:cfg.apiKey||'',endpoint:cfg.endpoint||'',model:cfg.model||'deepseek-chat',
-        enabled:cfg.enabled!==false,
+        apiKey:apiKey,endpoint:endpoint,model:cfg.model||'deepseek-chat',
+        enabled:!!apiKey,
         recipient:emailStatus.recipient,emailEnabled:emailStatus.emailEnabled,
         emailMaxPerDay:emailStatus.emailMaxPerDay,emailSentToday:emailStatus.emailSentToday
       }
