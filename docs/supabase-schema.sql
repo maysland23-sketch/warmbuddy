@@ -1,19 +1,25 @@
 -- WarmBuddy Supabase Schema
 -- Run this in Supabase SQL Editor after creating your project
 
+-- Table 1: Per-project API configs + desire state (for cron wake-up)
 CREATE TABLE IF NOT EXISTS project_configs (
   project_id  TEXT PRIMARY KEY,
   config      JSONB NOT NULL DEFAULT '{}',
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Enable Row Level Security
-ALTER TABLE project_configs ENABLE ROW LEVEL SECURITY;
+-- Table 2: Key-value store for app-level state (push subscription, etc.)
+CREATE TABLE IF NOT EXISTS app_state (
+  key         TEXT PRIMARY KEY,
+  value       JSONB,
+  updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
 
--- Allow service_role to read/write (backend uses service_role key)
-CREATE POLICY service_role_all ON project_configs
-  FOR ALL USING (true);
+-- Disable RLS (backend-only access via service_role key)
+ALTER TABLE project_configs DISABLE ROW LEVEL SECURITY;
+ALTER TABLE app_state DISABLE ROW LEVEL SECURITY;
 
--- Optional: Create index on updated_at for efficient queries
-CREATE INDEX IF NOT EXISTS idx_project_configs_updated
-  ON project_configs (updated_at DESC);
+-- Grant access
+GRANT ALL ON project_configs TO PUBLIC;
+GRANT ALL ON app_state TO PUBLIC;
+GRANT USAGE ON SCHEMA public TO PUBLIC;

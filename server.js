@@ -83,6 +83,22 @@ if (!vapidInitialized) {
 // In-memory push subscription store (single-user app)
 let pushSubscription = null;
 
+// Persist push subscription to Supabase (survives Render restarts)
+async function loadPushSubscription() {
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase.from('app_state').select('value').eq('key', 'push_subscription').single();
+    if (error || !data) return null;
+    return data.value || null;
+  } catch (e) { console.error('[supabase] loadPushSubscription error:', e.message); return null; }
+}
+async function savePushSubscription(sub) {
+  if (!supabase) return;
+  try {
+    await supabase.from('app_state').upsert({ key: 'push_subscription', value: sub, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  } catch (e) { console.error('[supabase] savePushSubscription error:', e.message); }
+}
+
 // ==================== AUTH MIDDLEWARE ====================
 const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD || 'mays2026';
 
@@ -479,6 +495,10 @@ if (SUPABASE_URL && SUPABASE_KEY) {
     realtime: { enabled: false }
   });
   console.log('[supabase] Connected to:', SUPABASE_URL);
+  // Restore push subscription from DB (survives Render restarts)
+  loadPushSubscription().then(function(sub) {
+    if (sub) { pushSubscription = sub; console.log('[push] Subscription restored from Supabase'); }
+  }).catch(function(){});
 } else {
   console.log('[supabase] NOT configured — falling back to file-based configs');
 }
@@ -1606,6 +1626,7 @@ app.post('/api/push/subscribe', (req, res) => {
     return res.status(400).json({ error: 'Invalid subscription' });
   }
   pushSubscription = subscription;
+  savePushSubscription(subscription);  // persist to Supabase
   console.log('[push] Subscription saved:', subscription.endpoint.slice(0, 60) + '...');
   res.json({ success: true });
 });
@@ -1646,6 +1667,7 @@ app.post('/api/push/send', async (req, res) => {
     // If subscription is invalid/expired, clear it
     if (err.statusCode === 404 || err.statusCode === 410) {
       pushSubscription = null;
+      savePushSubscription(null);  // clear from Supabase too
       console.log('[push] Subscription expired, cleared');
     }
     res.status(502).json({ error: err.message });
