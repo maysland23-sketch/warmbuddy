@@ -495,9 +495,18 @@ if (SUPABASE_URL && SUPABASE_KEY) {
     realtime: { enabled: false }
   });
   console.log('[supabase] Connected to:', SUPABASE_URL);
-  // Restore push subscription from DB (survives Render restarts)
+  // Restore push subscription + email config from DB (survives Render restarts)
   loadPushSubscription().then(function(sub) {
     if (sub) { pushSubscription = sub; console.log('[push] Subscription restored from Supabase'); }
+  }).catch(function(){});
+  loadEmailConfig().then(function(cfg) {
+    if (cfg) {
+      emailState.recipient = cfg.recipient || '';
+      emailState.senderName = cfg.senderName || 'WarmBuddy';
+      emailState.enabled = cfg.enabled !== false;
+      emailState.maxPerDay = cfg.maxPerDay || 2;
+      console.log('[email] Config restored from Supabase');
+    }
   }).catch(function(){});
 } else {
   console.log('[supabase] NOT configured — falling back to file-based configs');
@@ -1274,6 +1283,21 @@ const emailState = {
   sentDate: ''
 };
 
+// Persist email config to Supabase (survives Render restarts)
+async function loadEmailConfig() {
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase.from('app_state').select('value').eq('key', 'email_config').single();
+    if (error || !data) return null;
+    return data.value || null;
+  } catch (e) { return null; }
+}
+function saveEmailConfig() {
+  if (!supabase) return;
+  var cfg = { recipient: emailState.recipient, senderName: emailState.senderName, enabled: emailState.enabled, maxPerDay: emailState.maxPerDay };
+  supabase.from('app_state').upsert({ key: 'email_config', value: cfg, updated_at: new Date().toISOString() }, { onConflict: 'key' }).catch(function(){});
+}
+
 function resetEmailDaily() {
   const today = new Date().toISOString().slice(0, 10);
   if (emailState.sentDate !== today) {
@@ -1299,6 +1323,7 @@ app.post('/api/email/config', (req, res) => {
   const { recipient, senderName } = req.body || {};
   if (recipient !== undefined) emailState.recipient = recipient.trim();
   if (senderName !== undefined) emailState.senderName = senderName.trim() || 'WarmBuddy';
+  saveEmailConfig();
   res.json({ ok: true, configured: !!(RESEND_API_KEY && emailState.recipient) });
 });
 
@@ -1306,6 +1331,7 @@ app.post('/api/email/settings', (req, res) => {
   const { enabled, maxPerDay } = req.body || {};
   if (enabled !== undefined) emailState.enabled = !!enabled;
   if (maxPerDay !== undefined) emailState.maxPerDay = Math.max(1, parseInt(maxPerDay) || 2);
+  saveEmailConfig();
   res.json({ ok: true, enabled: emailState.enabled, maxPerDay: emailState.maxPerDay });
 });
 
