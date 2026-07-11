@@ -6,6 +6,7 @@ const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const { createClient } = require('@supabase/supabase-js');
 
 // Proxy for outbound API calls (set HTTPS_PROXY in .env, e.g. http://127.0.0.1:7897)
 const OUTBOUND_PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
@@ -467,14 +468,73 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const CONFIGS_FILE = path.join(DATA_DIR, 'projectConfigs.json');
 const EVENTS_FILE = path.join(DATA_DIR, 'systemEvents.json');
 
-function loadProjectConfigs() {
+// ── Supabase client (project configs persisted in DB, not ephemeral filesystem) ──
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+  console.log('[supabase] Connected to:', SUPABASE_URL);
+} else {
+  console.log('[supabase] NOT configured — falling back to file-based configs');
+}
+
+// In-memory config cache (reduces Supabase roundtrips for cron)
+let _configsCache = null;
+let _configsCacheTime = 0;
+const CONFIGS_CACHE_TTL = 15000; // 15s
+
+async function loadProjectConfigs() {
+  if (supabase) {
+    try {
+      // Use cache if fresh
+      if (_configsCache && (Date.now() - _configsCacheTime) < CONFIGS_CACHE_TTL) {
+        return _configsCache;
+      }
+      const { data, error } = await supabase.from('project_configs').select('project_id, config');
+      if (error) throw error;
+      const configs = {};
+      for (const row of (data || [])) {
+        configs[row.project_id] = row.config || {};
+      }
+      _configsCache = configs;
+      _configsCacheTime = Date.now();
+      return configs;
+    } catch (e) {
+      console.error('[supabase] loadProjectConfigs error:', e.message);
+      // Fallback to file on error
+    }
+  }
+  // File-based fallback
   try { return JSON.parse(fs.readFileSync(CONFIGS_FILE, 'utf-8')); } catch { return {}; }
 }
-function saveProjectConfigs(configs) {
+
+async function saveProjectConfigs(configs) {
+  // Update cache
+  _configsCache = configs;
+  _configsCacheTime = Date.now();
+
+  if (supabase) {
+    try {
+      const rows = Object.entries(configs).map(([pid, cfg]) => ({
+        project_id: pid,
+        config: cfg,
+        updated_at: new Date().toISOString()
+      }));
+      if (rows.length === 0) return;
+      const { error } = await supabase.from('project_configs').upsert(rows, { onConflict: 'project_id' });
+      if (error) throw error;
+      return;
+    } catch (e) {
+      console.error('[supabase] saveProjectConfigs error:', e.message);
+      // Fallback to file on error
+    }
+  }
+  // File-based fallback
   fs.writeFileSync(CONFIGS_FILE, JSON.stringify(configs, null, 2), 'utf-8');
 }
 
-// project config: { [pid]: { apiKey, endpoint, model, enabled, recipient?, emailEnabled?: true, emailMaxPerDay?: 2, emailSentToday?: 0, emailSentDate?: '' } }
+// project config: { [pid]: { apiKey, endpoint, model, enabled, recipient?, emailEnabled?: true, emailMaxPerDay?: 2, emailSentToday?: 0, emailSentDate?: '', _desireState?: { drives, lastCheck }, _chatId?: '' } }
 // system events: [{ id, projectId, chatId, type: 'message'|'todo'|'email'|'litter'|'diary', content, timestamp, pushSent: false }]
 
 function loadSystemEvents() {
@@ -1301,7 +1361,7 @@ app.get('/api/health', (req, res) => {
 // External cron trigger (cron-job.org pings this to prevent Render sleep + run checks)
 app.get('/api/cron/check', async (req, res) => {
   console.log('[cron] External ping — running proactive checks...');
-  const configs = loadProjectConfigs();
+  const configs = await loadProjectConfigs();
   let triggered = 0;
   for (const [pid, cfg] of Object.entries(configs)) {
     if (!cfg.enabled || !cfg.apiKey) continue;
@@ -1313,27 +1373,34 @@ app.get('/api/cron/check', async (req, res) => {
   res.json({ ok: true, projectsChecked: triggered });
 });
 
-app.post('/api/projects/sync-configs', (req, res) => {
+app.post('/api/projects/sync-configs', async (req, res) => {
   const { projectId, config } = req.body || {};
   if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
-  const configs = loadProjectConfigs();
+  const configs = await loadProjectConfigs();
   if (!config) {
     // GET mode: return config for this project
     res.json({ config: configs[projectId] || null });
   } else {
-    // SET mode: update config
+    // SET mode: DEEP MERGE — preserve existing fields not in the request
+    const existing = configs[projectId] || {};
     configs[projectId] = {
-      apiKey: config.apiKey || '',
-      endpoint: config.endpoint || '',
-      model: config.model || 'deepseek-chat',
-      enabled: config.enabled !== false,
-      recipient: config.recipient || configs[projectId]?.recipient || '',
-      emailEnabled: config.emailEnabled !== false,
-      emailMaxPerDay: config.emailMaxPerDay || 2,
-      emailSentToday: config.emailSentToday || 0,
-      emailSentDate: config.emailSentDate || ''
+      // Preserve all existing fields
+      ...existing,
+      // Override only the fields present in the request (non-undefined)
+      ...(config.apiKey !== undefined ? { apiKey: config.apiKey } : {}),
+      ...(config.endpoint !== undefined ? { endpoint: config.endpoint } : {}),
+      ...(config.model !== undefined ? { model: config.model } : {}),
+      ...(config.enabled !== undefined ? { enabled: config.enabled } : {}),
+      ...(config.recipient !== undefined ? { recipient: config.recipient } : {}),
+      ...(config.emailEnabled !== undefined ? { emailEnabled: config.emailEnabled } : {}),
+      ...(config.emailMaxPerDay !== undefined ? { emailMaxPerDay: config.emailMaxPerDay } : {}),
+      ...(config.emailSentToday !== undefined ? { emailSentToday: config.emailSentToday } : {}),
+      ...(config.emailSentDate !== undefined ? { emailSentDate: config.emailSentDate } : {}),
+      // Preserve underscore-prefixed internal state (_desireState, _chatId)
+      ...(config._desireState !== undefined ? { _desireState: config._desireState } : {}),
+      ...(config._chatId !== undefined ? { _chatId: config._chatId } : {})
     };
-    saveProjectConfigs(configs);
+    await saveProjectConfigs(configs);
     res.json({ ok: true });
   }
 });
@@ -1350,7 +1417,7 @@ app.get('/api/system-events', (req, res) => {
 // ==================== CRON: PROACTIVE CHECKS ====================
 cron.schedule('* * * * *', async () => {
   console.log('[cron] Checking proactive triggers...');
-  const configs = loadProjectConfigs();
+  const configs = await loadProjectConfigs();
   for (const [pid, cfg] of Object.entries(configs)) {
     if (!cfg.enabled || !cfg.apiKey) continue;
     try {
@@ -1373,16 +1440,11 @@ async function checkProjectTodos(pid, cfg) {
 }
 
 async function checkProjectDesires(pid, cfg) {
-  // Desire values live in the frontend localStorage.
-  // The frontend syncs desire state periodically.
-  // When a drive crosses threshold while app is closed,
-  // the frontend will have already synced via sync-configs.
-  // This stub processes the backed-up desire state.
-  const configs = loadProjectConfigs();
-  const projCfg = configs[pid];
-  if (!projCfg || !projCfg._desireState) return;
+  // cfg is the full project config (apiKey, endpoint, _desireState, _chatId, etc.)
+  // _desireState is synced from frontend every 60s via syncDesireStateToBackend()
+  if (!cfg || !cfg._desireState) return;
 
-  const ds = projCfg._desireState;
+  const ds = cfg._desireState;
   const drives = ds.drives || {};
   const triggered = Object.entries(drives).find(([k, v]) => v >= DESIRE_THRESHOLD);
   if (!triggered) return;
@@ -1423,7 +1485,7 @@ async function checkProjectDesires(pid, cfg) {
 
     // Store as system event for frontend polling
     const events = loadSystemEvents();
-    const chatId = projCfg._chatId || '';
+    const chatId = cfg._chatId || '';
     events.push({
       id: 'evt_' + Date.now().toString(36),
       projectId: pid,
@@ -1467,19 +1529,21 @@ async function checkProjectDesires(pid, cfg) {
         });
         // Update daily count
         const today = new Date().toISOString().slice(0, 10);
-        const configs2 = loadProjectConfigs();
+        const configs2 = await loadProjectConfigs();
         if (configs2[pid]) {
           if (configs2[pid].emailSentDate !== today) { configs2[pid].emailSentToday = 0; configs2[pid].emailSentDate = today; }
           configs2[pid].emailSentToday++;
-          saveProjectConfigs(configs2);
+          await saveProjectConfigs(configs2);
         }
       } catch (e) { console.error('[email] Proactive send error:', e.message); }
     }
 
-    // Reset desire after trigger
-    if (projCfg._desireState && projCfg._desireState.drives) {
-      projCfg._desireState.drives[driveKey] = Math.floor(driveValue * 0.2);
-      saveProjectConfigs(configs);
+    // Reset desire after trigger (reload configs to get latest, then update)
+    if (cfg._desireState && cfg._desireState.drives) {
+      cfg._desireState.drives[driveKey] = Math.floor(driveValue * 0.2);
+      const latestConfigs = await loadProjectConfigs();
+      latestConfigs[pid] = cfg;
+      await saveProjectConfigs(latestConfigs);
     }
 
     console.log(`[cron] Project ${pid}: triggered ${actionType} (${driveLabel}=${driveValue})`);
