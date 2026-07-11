@@ -1292,10 +1292,12 @@ async function loadEmailConfig() {
     return data.value || null;
   } catch (e) { return null; }
 }
-function saveEmailConfig() {
+async function saveEmailConfig() {
   if (!supabase) return;
-  var cfg = { recipient: emailState.recipient, senderName: emailState.senderName, enabled: emailState.enabled, maxPerDay: emailState.maxPerDay };
-  supabase.from('app_state').upsert({ key: 'email_config', value: cfg, updated_at: new Date().toISOString() }, { onConflict: 'key' }).catch(function(){});
+  try {
+    var cfg = { recipient: emailState.recipient, senderName: emailState.senderName, enabled: emailState.enabled, maxPerDay: emailState.maxPerDay };
+    await supabase.from('app_state').upsert({ key: 'email_config', value: cfg, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  } catch (e) { console.error('[supabase] saveEmailConfig error:', e.message); }
 }
 
 function resetEmailDaily() {
