@@ -1627,7 +1627,9 @@ function createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker) 
   };
   cml.aiEmotionalMemories.unshift(aem);
   if (cml.aiEmotionalMemories.length > 200) cml.aiEmotionalMemories.length = 200;
-  writeMemoryFile(store.activeProject, store.activeChat, { aiEmotionalMemories: [aem] }, 'core_memory_added');
+  // v2.5 fix: flush FULL cml state, not just the single new AEM
+  // (writeMemoryFile with partial data would overwrite the per-window file, losing all previous AEMs)
+  flushMemoryFile(store.activeProject, store.activeChat, 'core_memory_added');
 
   // System notification in chat
   if (chat) chat.messages.push({ role: 'system', text: '有什么被记住了', time: nowTime() });
@@ -3677,6 +3679,9 @@ function importMemoriesJSON(data) {
     const total = aemCount + usmCount + dlbCount;
     if (total === 0) { toast('No new memories to import (all duplicates)'); return; }
     toast(`已导入：AI情绪记忆 ${aemCount}条、星标记忆 ${usmCount}条、日记 ${dlbCount}条`);
+    // v2.5 fix: flush full cml to per-window file BEFORE syncing,
+    // otherwise syncProjectMemories would overwrite the imported data with stale per-window files
+    flushMemoryFile(store.activeProject, store.activeChat, 'import');
     syncProjectMemories(store.activeProject);
     saveStore();
     renderMemoryPanelBody();
