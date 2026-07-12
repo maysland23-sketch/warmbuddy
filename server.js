@@ -1617,12 +1617,22 @@ async function checkProjectDesires(pid, cfg) {
     if (v > maxDriveValue) { maxDriveKey = k; maxDriveValue = v; }
   }
 
-  // Diagnostic log: only when approaching threshold (≥42 = 0.7 × 60)
+  // Diagnostic log: when approaching threshold (≥42) OR every 30 min as heartbeat
+  const elapsed = ds._lastBackendGrowth
+    ? ((Date.now() - new Date(ds._lastBackendGrowth).getTime()) / 3600000).toFixed(1)
+    : '?';
   if (maxDriveValue >= DESIRE_THRESHOLD * 0.7) {
-    const elapsed = ds._lastBackendGrowth
-      ? ((Date.now() - new Date(ds._lastBackendGrowth).getTime()) / 3600000).toFixed(1)
-      : '?';
     console.log(`[cron] ${pid}: max=${maxDriveKey}=${maxDriveValue}, threshold=${DESIRE_THRESHOLD}, elapsed=${elapsed}h`);
+  } else {
+    // Periodic heartbeat: log current state every ~30 min even if below threshold
+    // _lastHeartbeatLog lives inside _desireState so saveDesireStateOnly can persist it.
+    const lastHeartbeat = ds._lastHeartbeatLog ? new Date(ds._lastHeartbeatLog).getTime() : 0;
+    if (Date.now() - lastHeartbeat > 30 * 60 * 1000) {
+      ds._lastHeartbeatLog = new Date().toISOString();
+      // Persist heartbeat timestamp atomically
+      saveDesireStateOnly(pid, ds, ds._lastBackendGrowth).catch(() => {});
+      console.log(`[cron] ${pid}: alive — max=${maxDriveKey}=${maxDriveValue}, threshold=${DESIRE_THRESHOLD}, elapsed=${elapsed}h`);
+    }
   }
 
   const triggered = Object.entries(drives).find(([k, v]) => v >= DESIRE_THRESHOLD);
