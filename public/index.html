@@ -2731,6 +2731,9 @@ function updateDesireDrives(reflection) {
 
   // Check thresholds
   checkDesireThresholds();
+
+  // Fire pending actions immediately (not waiting for user message or 15s timer)
+  executePendingDesireActions();
 }
 
 function checkPassiveDrives() {
@@ -2773,6 +2776,9 @@ function checkPassiveDrives() {
 
   // Check thresholds after passive update
   if (hoursPassed >= 1) checkDesireThresholds();
+
+  // Fire pending actions immediately (not waiting for user message or 15s timer)
+  executePendingDesireActions();
 }
 
 function checkDesireThresholds() {
@@ -8279,6 +8285,7 @@ setInterval(saveStore, 2000);
 setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
 setInterval(pollSystemEvents, 30000);      // backend proactive events every 30s
 setInterval(syncDesireStateToBackend, 60000); // sync desire state to backend every 60s
+setInterval(executePendingDesireActions, 15000); // autonomous proactive messages every 15s
 syncProjectConfigToBackend();              // sync on startup
 
 // ── Weekly memory file write ──
