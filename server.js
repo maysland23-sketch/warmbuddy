@@ -613,7 +613,7 @@ async function saveDesireStateOnly(pid, desireState, lastBackendGrowth, triggerI
 }
 
 // project config: { [pid]: { apiKey, endpoint, model, enabled, recipient?, emailEnabled?: true, emailMaxPerDay?: 2, emailSentToday?: 0, emailSentDate?: '', _desireState?: { drives, lastCheck }, _lastBackendGrowth?, _lastTriggerTime?, _lastTriggerDrive?, _chatId?: '' } }
-// system events: [{ id, projectId, chatId, type: 'message'|'todo'|'email'|'litter'|'diary', content, timestamp, pushSent: false }]
+// system events: [{ id, projectId, chatId, type: 'message'|'todo'|'email'|'litter'|'diary', driveKey?, content, timestamp, pushSent: false }]
 
 function loadSystemEvents() {
   try { return JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf-8')); } catch { return []; }
@@ -1628,8 +1628,23 @@ async function checkProjectDesires(pid, cfg) {
   const triggered = Object.entries(drives).find(([k, v]) => v >= DESIRE_THRESHOLD);
   if (!triggered) return;
 
-  // ── Step 4: Trigger action ──
   const [driveKey, driveValue] = triggered;
+
+  // ── Cooldown guard: prevent re-triggering the same drive within 60 min ──
+  // This is critical because frontend syncDesireStateToBackend() may overwrite
+  // the reset value with its own local (pre-decay) copy, causing an infinite
+  // trigger loop. _lastTriggerTime is preserved via atomic saveDesireStateOnly
+  // and is NOT touched by frontend syncs (it's not in the deep-merge list).
+  const BACKEND_COOLDOWN_MIN = 60;
+  if (cfg._lastTriggerTime && cfg._lastTriggerDrive === driveKey) {
+    const minutesSinceTrigger = (Date.now() - new Date(cfg._lastTriggerTime).getTime()) / 60000;
+    if (minutesSinceTrigger < BACKEND_COOLDOWN_MIN) {
+      console.log(`[cron] ${pid}: ${driveKey}=${driveValue} ≥ threshold but in cooldown (${minutesSinceTrigger.toFixed(0)}m since last trigger), skipping`);
+      return;
+    }
+  }
+
+  // ── Step 4: Trigger action ──
   const labels = {
     resonance: '共鸣欲', exploration: '探索欲', possession: '占有欲',
     guardianship: '守护欲', intimacy: '亲近欲', confirmation: '确认欲', devotion: '献祭欲'
@@ -1671,6 +1686,7 @@ async function checkProjectDesires(pid, cfg) {
       projectId: pid,
       chatId: chatId,
       type: actionType,
+      driveKey: driveKey,  // tells frontend which drive to decay locally
       content: content.replace(/^(MESSAGE|LITTER|DIARY):/i, '').trim(),
       timestamp: new Date().toISOString(),
       pushSent: false

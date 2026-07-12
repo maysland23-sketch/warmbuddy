@@ -7471,6 +7471,15 @@ function pollSystemEvents(){
         }else if(evt.type==='diary'){
           chat.messages.push({role:'system',text:'日记里偷偷写了点什么',time:nowTime()});
         }
+        // When backend triggers a proactive action, decay the corresponding drive
+        // locally to stay in sync with the backend's reset (mirrors applyDesireDecay).
+        var driveKey = evt.driveKey;
+        if (driveKey && proj.desireSystem && proj.desireSystem.drives) {
+          var drives = proj.desireSystem.drives;
+          if (typeof drives[driveKey] === 'number' && drives[driveKey] > 10) {
+            drives[driveKey] = Math.floor(drives[driveKey] * 0.2);
+          }
+        }
       }
       saveStore();renderChatMessages();
     }).catch(function(){});
