@@ -6881,6 +6881,9 @@ ${recentMsgIds}` });
 
   // Track last interaction time for next-session context injection
   chat.lastInteractionTime = new Date().toISOString();
+
+  // Sync chat context (summary + AEM) to backend for proactive shadow messages
+  syncProjectConfigToBackend();
 }
 
 // ── Multi-bubble draft management ──
@@ -7438,6 +7441,41 @@ function saveBook(){
   store._importing = true; closeModal(); renderBookshelf(); toast('Book added');
 }
 // ==================== BACKEND SYNC + POLLING ====================
+function buildChatContextSummary(){
+  var proj=getActiveProject(); if(!proj)return'';
+  var chat=getActiveChatObj();
+  var parts=[];
+
+  // 1. Last 3 AI Emotional Memories
+  var cml=proj.coreMemoryLayers;
+  if(cml&&cml.aiEmotionalMemories&&cml.aiEmotionalMemories.length>0){
+    var recentAEM=cml.aiEmotionalMemories.slice(0,3);
+    var aemLines=[];
+    for(var i=0;i<recentAEM.length;i++){
+      var a=recentAEM[i];
+      aemLines.push('- '+(a.summary||a.content||'').slice(0,60));
+    }
+    if(aemLines.length>0)parts.push('最近情绪记忆：\n'+aemLines.join('\n'));
+  }
+
+  // 2. Recent conversation (last 8 rounds)
+  if(chat&&chat.messages&&chat.messages.length>0){
+    var recent=chat.messages.filter(function(m){return m.role==='user'||m.role==='ai';}).slice(-16);
+    if(recent.length>0){
+      var lines=[];
+      for(var i=0;i<recent.length;i++){
+        var m=recent[i];
+        var role=m.role==='user'?'用户':'暖伴';
+        var text=(m.text||'').slice(0,80).replace(/\n/g,' ');
+        lines.push(role+': '+text);
+      }
+      parts.push('最近对话：\n'+lines.join('\n'));
+    }
+  }
+
+  return parts.join('\n\n');
+}
+
 function syncProjectConfigToBackend(){
   var proj=getActiveProject(); if(!proj)return;
   var cfg=getActiveApiConfig();
@@ -7453,7 +7491,10 @@ function syncProjectConfigToBackend(){
       projectId:proj.id,
       config:{
         apiKey:apiKey,endpoint:endpoint,model:cfg.model||'deepseek-chat',
-        enabled:!!apiKey
+        enabled:!!apiKey,
+        systemPrompt:proj.preference||'',
+        chatSummary:buildChatContextSummary(),
+        chatSummaryUpdatedAt:new Date().toISOString()
       }
     })
   }).catch(function(e){ console.warn('[sync-config] Failed:', e.message); });
