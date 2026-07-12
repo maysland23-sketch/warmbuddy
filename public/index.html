@@ -2825,12 +2825,28 @@ function getDesireTone(driveValue, threshold) {
 }
 
 // ==================== DESIRE ACTION EXECUTOR (EDA-3) ====================
+const PROACTIVE_CHECK_INTERVAL = 3 * 60 * 1000;    // 3 min poll
+const PROACTIVE_MIN_INTERVAL  = 30 * 60 * 1000;    // 30 min between actual triggers
+
 async function executePendingDesireActions() {
   const ds = getDesireSystem(); if (!ds) return;
   if (!ds.pendingActions || ds.pendingActions.length === 0) return;
   const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
+
+  // ── Cooldown lock (persisted in store, effective across tabs/instances) ──
+  const now = Date.now();
+  const lastTrigger = ds._lastProactiveTrigger || 0;
+  if (now - lastTrigger < PROACTIVE_MIN_INTERVAL) return;
+
+  // Set lock BEFORE LLM call (prevents concurrent execution)
+  ds._lastProactiveTrigger = now;
+  saveStore();
+
   const action = ds.pendingActions.shift();
   await executeDesireAction(action);
+
+  // ── After successful execution, force immediate sync ──
+  syncDesireStateToBackend(true);
   saveStore();
 }
 
@@ -2899,6 +2915,12 @@ async function executeDesireAction(action) {
   }
 
   applyDesireDecay(action.driveType);
+
+  // ── Mark that frontend just triggered (for sync coordination with backend) ──
+  ds._frontendTriggerTime = new Date().toISOString();
+  ds._frontendTriggerDrive = action.driveType;
+  ds._justTriggered = true;  // cleared after confirmed sync
+
   ds.lastAction = new Date().toISOString();
   ds.cooldownUntil = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString();
   ds.actionHistory.unshift({
@@ -7437,18 +7459,37 @@ function syncProjectConfigToBackend(){
   }).catch(function(e){ console.warn('[sync-config] Failed:', e.message); });
 }
 
-function syncDesireStateToBackend(){
+function syncDesireStateToBackend(force){
   var proj=getActiveProject(); if(!proj||!proj.desireSystem)return;
+  var ds=proj.desireSystem;
   var chat=getActiveChatObj();
+
+  // Build desire state payload
+  var desireState={
+    drives:ds.drives,
+    lastCheck:ds.lastPassiveCheck
+  };
+
+  // Always include frontend trigger metadata if it exists, so backend
+  // cooldown can check it even on subsequent normal syncs. These persist
+  // inside _desireState (deep-merged by backend) until cooldown expires.
+  if (ds._frontendTriggerTime) {
+    desireState._frontendTriggerTime = ds._frontendTriggerTime;
+    desireState._frontendTriggerDrive = ds._frontendTriggerDrive;
+  }
+
   fetch(BACKEND_URL+'/api/projects/sync-configs',{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
       projectId:proj.id,
       config:{
-        _desireState:{drives:proj.desireSystem.drives,lastCheck:proj.desireSystem.lastPassiveCheck},
+        _desireState:desireState,
         _chatId:chat?chat.id:''
       }
     })
+  }).then(function(r){
+    // On confirmed sync, clear the _justTriggered flag
+    if (ds._justTriggered) { ds._justTriggered = false; saveStore(); }
   }).catch(function(e){ console.warn('[sync-desire] Failed:', e.message); });
 }
 
@@ -8285,7 +8326,7 @@ setInterval(saveStore, 2000);
 setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
 setInterval(pollSystemEvents, 30000);      // backend proactive events every 30s
 setInterval(syncDesireStateToBackend, 60000); // sync desire state to backend every 60s
-setInterval(executePendingDesireActions, 15000); // autonomous proactive messages every 15s
+setInterval(executePendingDesireActions, PROACTIVE_CHECK_INTERVAL); // autonomous proactive every 3 min
 syncProjectConfigToBackend();              // sync on startup
 
 // ── Weekly memory file write ──

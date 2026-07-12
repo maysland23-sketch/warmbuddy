@@ -1631,15 +1631,28 @@ async function checkProjectDesires(pid, cfg) {
   const [driveKey, driveValue] = triggered;
 
   // ── Cooldown guard: prevent re-triggering the same drive within 60 min ──
-  // This is critical because frontend syncDesireStateToBackend() may overwrite
-  // the reset value with its own local (pre-decay) copy, causing an infinite
-  // trigger loop. _lastTriggerTime is preserved via atomic saveDesireStateOnly
-  // and is NOT touched by frontend syncs (it's not in the deep-merge list).
+  // Checks both backend's own _lastTriggerTime (set by backend after triggering)
+  // and frontend's _frontendTriggerTime (synced via _desireState after frontend triggers).
+  // Both are needed because frontend syncDesireStateToBackend() may overwrite the
+  // backend's reset value with its pre-decay local copy before self-decaying.
   const BACKEND_COOLDOWN_MIN = 60;
+  const now = Date.now();
+
+  // Check backend's own last trigger (atomic partial update, never overwritten by frontend)
   if (cfg._lastTriggerTime && cfg._lastTriggerDrive === driveKey) {
-    const minutesSinceTrigger = (Date.now() - new Date(cfg._lastTriggerTime).getTime()) / 60000;
-    if (minutesSinceTrigger < BACKEND_COOLDOWN_MIN) {
-      console.log(`[cron] ${pid}: ${driveKey}=${driveValue} ≥ threshold but in cooldown (${minutesSinceTrigger.toFixed(0)}m since last trigger), skipping`);
+    const minsSince = (now - new Date(cfg._lastTriggerTime).getTime()) / 60000;
+    if (minsSince < BACKEND_COOLDOWN_MIN) {
+      console.log(`[cron] ${pid}: ${driveKey}=${driveValue} ≥ threshold but backend cooldown (${minsSince.toFixed(0)}m), skipping`);
+      return;
+    }
+  }
+
+  // Check frontend's last trigger (synced via _desireState._frontendTriggerTime)
+  const ftt = ds._frontendTriggerTime;
+  if (ftt && ds._frontendTriggerDrive === driveKey) {
+    const minsSince = (now - new Date(ftt).getTime()) / 60000;
+    if (minsSince < BACKEND_COOLDOWN_MIN) {
+      console.log(`[cron] ${pid}: ${driveKey}=${driveValue} ≥ threshold but frontend cooldown (${minsSince.toFixed(0)}m), skipping`);
       return;
     }
   }
