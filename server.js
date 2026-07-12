@@ -579,12 +579,15 @@ async function saveProjectConfigs(configs) {
 async function saveDesireStateOnly(pid, desireState, lastBackendGrowth, triggerInfo) {
   if (supabase) {
     try {
+      // Single JSONB payload — avoids Supabase RPC alphabetic parameter reordering
       const { error } = await supabase.rpc('atomic_update_desire_state', {
-        p_project_id: pid,
-        p_desire_state: desireState,
-        p_last_backend_growth: lastBackendGrowth,
-        p_last_trigger_time: triggerInfo?.lastTriggerTime || null,
-        p_last_trigger_drive: triggerInfo?.lastTriggerDrive || null
+        payload: {
+          p_project_id: pid,
+          p_desire_state: desireState,
+          p_last_backend_growth: lastBackendGrowth,
+          p_last_trigger_time: triggerInfo?.lastTriggerTime || '',
+          p_last_trigger_drive: triggerInfo?.lastTriggerDrive || ''
+        }
       });
       if (error) throw error;
 
