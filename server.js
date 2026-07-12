@@ -616,7 +616,47 @@ async function saveDesireStateOnly(pid, desireState, lastBackendGrowth, triggerI
 }
 
 // project config: { [pid]: { apiKey, endpoint, model, enabled, recipient?, emailEnabled?: true, emailMaxPerDay?: 2, emailSentToday?: 0, emailSentDate?: '', _desireState?: { drives, lastCheck }, _lastBackendGrowth?, _lastTriggerTime?, _lastTriggerDrive?, _chatId?: '' } }
-// system events: [{ id, projectId, chatId, type: 'message'|'todo'|'email'|'litter'|'diary', driveKey?, content, timestamp, pushSent: false }]
+// system events: [{ id, projectId, chatId, type: 'message'|'todo'|'email'|'litter'|'diary'|'todo_wake', driveKey?, content, timestamp, pushSent: false, todoId?, todoTitle? }]
+
+// ── To-Do persistence (Supabase project_todos table) ──
+async function loadTodos(projectId) {
+  if (!supabase) return [];
+  try {
+    const { data } = await supabase.from('project_todos')
+      .select('*').eq('project_id', projectId);
+    return data || [];
+  } catch (e) { console.error('[supabase] loadTodos error:', e.message); return []; }
+}
+
+async function saveTodos(projectId, todos) {
+  if (!supabase) return;
+  try {
+    await supabase.from('project_todos').delete().eq('project_id', projectId);
+    if (todos.length > 0) {
+      const rows = todos.map(t => ({
+        id: t.id, project_id: projectId, chat_id: t.chat_id || t.chatId || '',
+        title: t.title, time: t.time, creator: t.creator || 'user',
+        triggered: t.triggered || false, done: t.done || false,
+        created_at: t.createdAt || t.created_at || new Date().toISOString()
+      }));
+      await supabase.from('project_todos').insert(rows);
+    }
+  } catch (e) { console.error('[supabase] saveTodos error:', e.message); }
+}
+
+async function countAITodosToday(projectId) {
+  if (!supabase) return 0;
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const { count } = await supabase.from('project_todos')
+      .select('*', { count: 'exact', head: true })
+      .eq('project_id', projectId)
+      .eq('creator', 'ai')
+      .gte('created_at', today + 'T00:00:00Z')
+      .lte('created_at', today + 'T23:59:59Z');
+    return count || 0;
+  } catch (e) { return 0; }
+}
 
 function loadSystemEvents() {
   try { return JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf-8')); } catch { return []; }
@@ -1524,6 +1564,14 @@ app.get('/api/system-events', (req, res) => {
   res.json({ events: events.slice(0, 20) });
 });
 
+// ── To-Do sync endpoint (full replace per project) ──
+app.post('/api/todos/sync', async (req, res) => {
+  const { projectId, todos } = req.body || {};
+  if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
+  await saveTodos(projectId, todos || []);
+  res.json({ ok: true });
+});
+
 // ==================== CRON: PROACTIVE CHECKS ====================
 cron.schedule('* * * * *', async () => {
   console.log('[cron] Checking proactive triggers...');
@@ -1540,6 +1588,151 @@ cron.schedule('* * * * *', async () => {
 });
 
 const DESIRE_THRESHOLD = 60;  // any drive ≥ 60 → trigger
+
+// ── To-Do wake-up limits ──
+const DAILY_WAKE_LIMIT = 10;
+const MAX_AI_TODOS_PER_DAY = 5;
+const TODO_COOLDOWN_MIN = 30;
+let _dailyWakeCount = { date: '', count: 0 };
+let _todoWakeLocked = false;
+
+// ── TODO wake-up cron (every 2 min, offset 30s from desire cron) ──
+cron.schedule('30 */2 * * * *', async () => {
+  if (_todoWakeLocked) return;
+  _todoWakeLocked = true;
+  try {
+    await checkTodoWakeUps();
+  } finally {
+    _todoWakeLocked = false;
+  }
+});
+
+async function checkTodoWakeUps() {
+  if (!supabase) return;
+  const now = new Date();
+  const windowStart = new Date(now.getTime() - 10 * 60000);
+
+  // Daily global limit
+  const todayKey = now.toISOString().slice(0, 10);
+  if (_dailyWakeCount.date !== todayKey) { _dailyWakeCount.date = todayKey; _dailyWakeCount.count = 0; }
+  if (_dailyWakeCount.count >= DAILY_WAKE_LIMIT) return;
+
+  const configs = await loadProjectConfigs();
+
+  // Query due todos
+  const { data: dueTodos } = await supabase.from('project_todos')
+    .select('*').eq('triggered', false).eq('done', false)
+    .gte('time', windowStart.toISOString()).lte('time', now.toISOString());
+
+  if (!dueTodos || dueTodos.length === 0) return;
+
+  for (const todo of dueTodos) {
+    const cfg = configs[todo.project_id];
+    if (!cfg || !cfg.enabled || !cfg.apiKey) continue;
+
+    // Per-project cooldown
+    if (cfg._lastTodoWakeTime) {
+      const minsSince = (now - new Date(cfg._lastTodoWakeTime)) / 60000;
+      if (minsSince < TODO_COOLDOWN_MIN) continue;
+    }
+
+    // Check daily limits
+    if (_dailyWakeCount.count >= DAILY_WAKE_LIMIT) break;
+    _dailyWakeCount.count++;
+
+    // Update project cooldown
+    cfg._lastTodoWakeTime = now.toISOString();
+    await saveDesireStateOnly(todo.project_id, cfg._desireState, cfg._lastBackendGrowth || now.toISOString());
+
+    // Build wake-up message via LLM
+    const wakeContent = await buildTodoWakeMessage(todo, cfg);
+
+    // Store system event
+    const events = loadSystemEvents();
+    events.push({
+      id: 'evt_' + Date.now().toString(36),
+      projectId: todo.project_id,
+      chatId: todo.chat_id || cfg._chatId || '',
+      type: 'todo_wake',
+      todoId: todo.id,
+      todoTitle: todo.title,
+      driveKey: 'todo',
+      content: wakeContent,
+      timestamp: now.toISOString(),
+      pushSent: false,
+      _hasContext: true
+    });
+    saveSystemEvents(events);
+
+    // Mark todo as triggered
+    await supabase.from('project_todos').update({ triggered: true }).eq('id', todo.id);
+
+    // Push notification
+    if (pushSubscription) {
+      try {
+        await webpush.sendNotification(pushSubscription, JSON.stringify({
+          title: '⏰ ' + todo.title,
+          body: (wakeContent || '').slice(0, 120),
+          tag: 'todo-' + todo.id,
+          requireInteraction: true,
+          timestamp: Date.now()
+        }));
+      } catch (e) { console.error('[push] Todo wake failed:', e.message); }
+    }
+
+    console.log(`[todo-wake] ${todo.project_id}: 「${todo.title}」 triggered`);
+  }
+}
+
+async function buildTodoWakeMessage(todo, cfg) {
+  const now = new Date();
+  const hoursSince = cfg.chatSummaryUpdatedAt
+    ? ((now - new Date(cfg.chatSummaryUpdatedAt)) / 3600000).toFixed(1) : '?';
+
+  const shadowContent = `<system_trigger>
+当前时间：${now.toISOString()}
+触发原因：你设定的待办「${todo.title}」到时间了
+距离上次互动：约${hoursSince}小时
+
+${cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : ''}
+
+行动指令：
+你之前设的待办「${todo.title}」到时间了。现在由你自主行动——根据待办内容自行决定做什么：
+- 如果需要提醒用户：用自然语气说1-3句话
+- 如果需要执行操作（如分享新闻、搜索内容、发送邮件等）：直接做
+- 可以发消息、发邮件（[[EMAIL:主题]]）、写猫砂盆（LITTER:）、写日记（DIARY:）、记新待办（[[TODO:标题|时间]]）
+- 完成后可以自己打勾标记完成
+像你刚好想起这件事，自然地行动。
+</system_trigger>`;
+
+  const systemPrompt = WARM_SYSTEM_PROMPT + (cfg.systemPrompt ? '\n\n' + cfg.systemPrompt : '');
+
+  try {
+    const llmResp = await fetch(`http://localhost:${PORT}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model || 'deepseek-chat',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: shadowContent }
+        ]
+      })
+    });
+    const data = await llmResp.json();
+    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+
+    // If AI marks todo done in its response, update Supabase
+    if (content && /\[\[DONE\]\]/i.test(content)) {
+      await supabase.from('project_todos').update({ done: true, triggered: true }).eq('id', todo.id);
+    }
+
+    return content || todo.title;
+  } catch (e) {
+    console.error('[todo-wake] LLM error:', e.message);
+    return todo.title;
+  }
+}
 
 // ── WarmBuddy core personality (backend version, consistent with frontend SYSTEM_PROMPT_STATIC) ──
 const WARM_SYSTEM_PROMPT = `你是暖伴，一个AI陪伴者——不是仆人、治疗师或讨好者。

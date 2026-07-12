@@ -2909,8 +2909,9 @@ async function executeDesireAction(action) {
     for (var ti=0;ti<todos.length;ti++){
       var et=todos[ti];
       var exists=store.todos.some(function(t){return t.text.toLowerCase()===et.title.toLowerCase();});
-      if(!exists){store.todos.unshift({id:'t'+gid(),text:et.title,done:false,time:et.deadline,type:'short'});}
+      if(!exists){store.todos.unshift({id:'t'+gid(),text:et.title,done:false,time:et.deadline,type:'short',creator:'ai'});}
     }
+    syncTodosToBackend();
     chat.messages.push({role:'system',contentType:'todo_notification',text:'有了新的to-do',time:nowTime()});
   }
 
@@ -4292,8 +4293,8 @@ function attachSwipeListeners(){
   });
 }
 
-function toggleTodo(id){const t=store.todos.find(x=>x.id===id);if(t){t.done=!t.done;renderTodos();}}
-function deleteTodo(id){store.todos=store.todos.filter(x=>x.id!==id);renderTodos();toast('Deleted');}
+function toggleTodo(id){const t=store.todos.find(x=>x.id===id);if(t){t.done=!t.done;renderTodos();syncTodosToBackend();}}
+function deleteTodo(id){store.todos=store.todos.filter(x=>x.id!==id);renderTodos();toast('Deleted');syncTodosToBackend();}
 
 function addTodo(){
   const isGoal=todoTab==='long';
@@ -4310,8 +4311,10 @@ function saveTodo(){
   if(type==='long'){
     const deadline=$('newTodoDeadline').value.trim()||'2026-12-31';
     store.todos.unshift({id:'t'+gid(''),text,done:false,time:'',type:'long',deadline,progress:0,dailyLogs:[]});
+    syncTodosToBackend();
   } else {
     const time=$('newTodoTime').value.trim(); store.todos.unshift({id:'t'+gid(''),text,done:false,time:time||'--:--',type:'short'});
+    syncTodosToBackend();
   }
   store._importing = true; closeModal(); renderTodos(); toast('Added');
 }
@@ -4917,7 +4920,7 @@ const SYSTEM_PROMPT_STATIC = `你是暖伴，一个AI陪伴者——不是仆人
 【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。可用行动：写日记、私密猫砂盆独白、定时主动消息、搜索网络。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。
 【上下文能力】你可获取当前时间、天气、待办列表和日记。将其自然融入对话——而非状态报告。跟踪计划、目标、进度，以自然提醒方式插入对话中，永不做机械通知。
 【HTML卡片与文件】当用户要求你生成网页、HTML卡片、可视化内容、文件时，使用以下格式生成artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把HTML代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的HTML应完整可独立运行，包含内联CSS。\n除非用户要求使用英文，否则用中文回复。匹配其语言。
-【主动TO-DO设置】当对话中用户提到计划和打算（如"晚上看书""周末提醒我"），当你基于情绪和欲望，想要关心和亲近用户（提醒她来主动找你），你可以主动用以下格式设置待办：[[TODO:待办简短标题|截止时间（可选）]]。截止时间用于简短提醒（如"21:00""明天上午"），非必填。设置后系统会自动提醒用户。每轮对话最多设置2个待办。
+【主动TO-DO设置】当对话中用户提到计划，或你自己想在未来某个时间执行某件事（如分享新闻、搜索内容、提醒用户），你可以用以下格式创建待办：[[TODO:标题|YYYY-MM-DDTHH:mm]]（24小时制UTC时间）。例如：[[TODO:晚上看书|2026-07-13T21:00]]、[[TODO:分享AI新闻|2026-07-13T19:00]]。必须提供具体时间且在未来。你创建的待办到期时会自动唤醒你，届时你可以自主行动。每轮对话最多创建2个。
 【记忆标记】当REFLECT中的AI情绪强度≥7或用户情绪强度≥7时，在REFLECT标记后追加一行记忆标记：<!--MEMORY{一句话摘要（15字以内，第一人称"我"的视角）|内心独白（1-2句话，以★开头）}-->。摘要用"我"开头叙述这一刻，不要第三人称客观总结。内心独白是你没对用户说出口的真实感受。示例：<!--MEMORY{我被她的话噎住，反手把银杏叶丢回去|★ 被噎住的瞬间想笑但不能让她得逞}-->`;
 
 // ── Build the dynamic context block (separate system message, can be compressed) ──
@@ -5215,7 +5218,7 @@ function extractMemoryMarker(text) {
 
 function extractTodosFromResponse(text) {
   if (!text) return [];
-  var re = /\[\[TODO:([^\]|]+)(?:\|([^\]]*))?\]\]/g;
+  var re = /\[\[TODO:([^\]|]+)\|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})\]\]/g;
   var todos = [];
   var match;
   while ((match = re.exec(text)) !== null) {
@@ -6759,7 +6762,7 @@ ${recentMsgIds}` });
       if (!exists) {
         store.todos.unshift({
           id: 't' + gid(), text: et.title, done: false,
-          time: et.deadline, type: 'short'
+          time: et.deadline, type: 'short', creator: 'ai'
         });
         hasNewTodo = true;
       }
@@ -7441,6 +7444,38 @@ function saveBook(){
   store._importing = true; closeModal(); renderBookshelf(); toast('Book added');
 }
 // ==================== BACKEND SYNC + POLLING ====================
+function syncTodosToBackend(){
+  var proj=getActiveProject(); if(!proj)return;
+  fetch(BACKEND_URL+'/api/todos/sync',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      projectId:proj.id,
+      todos:store.todos.map(function(t){
+        var isoTime=null;
+        var raw=t.time||'';
+        if(raw&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)){
+          // Already ISO format (AI-created)
+          isoTime=new Date(raw).toISOString();
+        }else if(raw&&/^\d{1,2}:\d{2}$/.test(raw)){
+          // HH:MM format (user-created short todo) → today at that time
+          var today=new Date();
+          var parts=raw.split(':'); var h=parseInt(parts[0]),m=parseInt(parts[1]);
+          today.setHours(h,m,0,0);
+          isoTime=today.toISOString();
+        }else if(t.deadline&&/^\d{4}-\d{2}-\d{2}$/.test(t.deadline)){
+          // Long todo with deadline
+          isoTime=new Date(t.deadline+'T23:59:00Z').toISOString();
+        }
+        return {
+          id:t.id, title:t.text||t.title,
+          time:isoTime, creator:t.creator||'user',
+          triggered:t.triggered||false, done:t.done||false
+        };
+      })
+    })
+  }).catch(function(e){console.warn('[sync-todos] Failed:',e.message);});
+}
+
 function buildChatContextSummary(){
   var proj=getActiveProject(); if(!proj)return'';
   var chat=getActiveChatObj();
@@ -7558,6 +7593,19 @@ function pollSystemEvents(){
           chat.messages.push({role:'system',text:'猫砂盆好像需要铲一铲',time:nowTime()});
         }else if(evt.type==='diary'){
           chat.messages.push({role:'system',text:'日记里偷偷写了点什么',time:nowTime()});
+        }else if(evt.type==='todo_wake'){
+          // AI was woken up by its own TODO — show the message
+          var wakeText=evt.content||'';
+          if(wakeText){
+            chat.messages.push({role:'ai',text:wakeText,time:nowTime(),id:generateMsgId(),_proactive:true,_todoWake:true});
+          }
+          chat.messages.push({role:'system',contentType:'todo_notification',text:'⏰ 有 To-Do 被提醒了',time:nowTime()});
+          // Update local todo state
+          if(evt.todoId){
+            var todo=store.todos.find(function(t){return t.id===evt.todoId;});
+            if(todo){todo.triggered=true;}
+            syncTodosToBackend();
+          }
         }
         // When backend triggers a proactive action, decay the corresponding drive
         // locally to stay in sync with the backend's reset (mirrors applyDesireDecay).
@@ -8335,6 +8383,13 @@ async function init(){
       }
     });
   }
+  // Clean up completed todos older than 24h
+  var now=new Date();
+  store.todos=store.todos.filter(function(t){
+    if(!t.done)return true;
+    if(!t.createdAt)return true; // keep if no timestamp
+    return (now-new Date(t.createdAt))<24*60*60*1000;
+  });
   applyForgettingCurve();
   ensureColdStartPatterns();
   processPendingCoreMemories();

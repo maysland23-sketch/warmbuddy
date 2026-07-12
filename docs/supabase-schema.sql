@@ -15,9 +15,24 @@ CREATE TABLE IF NOT EXISTS app_state (
   updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Table 3: Per-project To-Do items (for cron todo wake-up)
+CREATE TABLE IF NOT EXISTS project_todos (
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL,
+  chat_id     TEXT DEFAULT '',
+  title       TEXT NOT NULL,
+  time        TIMESTAMPTZ,
+  creator     TEXT DEFAULT 'user',
+  triggered   BOOLEAN DEFAULT false,
+  done        BOOLEAN DEFAULT false,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_todos_wake ON project_todos(project_id, triggered, time);
+
 -- Disable RLS (backend-only access via service_role key)
 ALTER TABLE project_configs DISABLE ROW LEVEL SECURITY;
 ALTER TABLE app_state DISABLE ROW LEVEL SECURITY;
+ALTER TABLE project_todos DISABLE ROW LEVEL SECURITY;
 
 -- Table 3: Atomic partial update of desire state fields within project_configs JSONB
 -- This function only touches _desireState, _lastBackendGrowth, _lastTriggerTime, _lastTriggerDrive
@@ -51,4 +66,5 @@ $$ LANGUAGE plpgsql;
 -- Grant access
 GRANT ALL ON project_configs TO PUBLIC;
 GRANT ALL ON app_state TO PUBLIC;
+GRANT ALL ON project_todos TO PUBLIC;
 GRANT USAGE ON SCHEMA public TO PUBLIC;
