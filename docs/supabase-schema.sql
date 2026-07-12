@@ -19,6 +19,32 @@ CREATE TABLE IF NOT EXISTS app_state (
 ALTER TABLE project_configs DISABLE ROW LEVEL SECURITY;
 ALTER TABLE app_state DISABLE ROW LEVEL SECURITY;
 
+-- Table 3: Atomic partial update of desire state fields within project_configs JSONB
+-- This function only touches _desireState, _lastBackendGrowth, _lastTriggerTime, _lastTriggerDrive
+-- without affecting other keys (apiKey, endpoint, etc.) — eliminating read-modify-write races.
+CREATE OR REPLACE FUNCTION atomic_update_desire_state(
+  p_project_id TEXT,
+  p_desire_state JSONB,
+  p_last_backend_growth TEXT,
+  p_last_trigger_time TEXT DEFAULT NULL,
+  p_last_trigger_drive TEXT DEFAULT NULL
+) RETURNS VOID AS $$
+BEGIN
+  UPDATE project_configs
+  SET config = config
+    || jsonb_build_object('_desireState', p_desire_state)
+    || jsonb_build_object('_lastBackendGrowth', to_jsonb(p_last_backend_growth))
+    || CASE WHEN p_last_trigger_time IS NOT NULL
+       THEN jsonb_build_object('_lastTriggerTime', to_jsonb(p_last_trigger_time))
+       ELSE '{}'::jsonb END
+    || CASE WHEN p_last_trigger_drive IS NOT NULL
+       THEN jsonb_build_object('_lastTriggerDrive', to_jsonb(p_last_trigger_drive))
+       ELSE '{}'::jsonb END,
+    updated_at = NOW()
+  WHERE project_id = p_project_id;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Grant access
 GRANT ALL ON project_configs TO PUBLIC;
 GRANT ALL ON app_state TO PUBLIC;

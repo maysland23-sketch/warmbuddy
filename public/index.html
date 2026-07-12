@@ -7416,25 +7416,19 @@ function syncProjectConfigToBackend(){
   // Fallback to store-level apiKey: proj.apiConfig may exist with empty apiKey
   var apiKey = cfg.apiKey || store.apiKey || '';
   var endpoint = cfg.endpoint || store.apiEndpoint || 'https://api.deepseek.com/v1/chat/completions';
-  var emailStatus={};
-  // Get email status for this project
-  try {
-    fetch(BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
-      emailStatus={recipient:s.recipient||'',emailEnabled:s.enabled,emailMaxPerDay:s.maxPerDay,emailSentToday:s.sentToday,emailSentDate:''};
-    }).catch(function(){});
-  }catch(_){}
+  // NOTE: email config is persisted separately via app_state table + /api/email/config endpoint.
+  // We no longer include email fields here (they caused a race condition where
+  // fetch(/api/email/status) was not awaited before POST /sync-configs).
   fetch(BACKEND_URL+'/api/projects/sync-configs',{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
       projectId:proj.id,
       config:{
         apiKey:apiKey,endpoint:endpoint,model:cfg.model||'deepseek-chat',
-        enabled:!!apiKey,
-        recipient:emailStatus.recipient,emailEnabled:emailStatus.emailEnabled,
-        emailMaxPerDay:emailStatus.emailMaxPerDay,emailSentToday:emailStatus.emailSentToday
+        enabled:!!apiKey
       }
     })
-  }).catch(function(){});
+  }).catch(function(e){ console.warn('[sync-config] Failed:', e.message); });
 }
 
 function syncDesireStateToBackend(){
@@ -7449,7 +7443,7 @@ function syncDesireStateToBackend(){
         _chatId:chat?chat.id:''
       }
     })
-  }).catch(function(){});
+  }).catch(function(e){ console.warn('[sync-desire] Failed:', e.message); });
 }
 
 function pollSystemEvents(){

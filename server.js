@@ -567,7 +567,52 @@ async function saveProjectConfigs(configs) {
   fs.writeFileSync(CONFIGS_FILE, JSON.stringify(configs, null, 2), 'utf-8');
 }
 
-// project config: { [pid]: { apiKey, endpoint, model, enabled, recipient?, emailEnabled?: true, emailMaxPerDay?: 2, emailSentToday?: 0, emailSentDate?: '', _desireState?: { drives, lastCheck }, _chatId?: '' } }
+/**
+ * Atomically save ONLY the desire-state-related fields to Supabase.
+ * Uses the PostgreSQL RPC function atomic_update_desire_state which does
+ * jsonb || jsonb_build_object — only touches _desireState, _lastBackendGrowth,
+ * _lastTriggerTime, _lastTriggerDrive. Other keys (apiKey, endpoint, etc.)
+ * are left untouched, eliminating read-modify-write races with frontend syncs.
+ *
+ * Falls back to full saveProjectConfigs when Supabase is not configured.
+ */
+async function saveDesireStateOnly(pid, desireState, lastBackendGrowth, triggerInfo) {
+  if (supabase) {
+    try {
+      const { error } = await supabase.rpc('atomic_update_desire_state', {
+        p_project_id: pid,
+        p_desire_state: desireState,
+        p_last_backend_growth: lastBackendGrowth,
+        p_last_trigger_time: triggerInfo?.lastTriggerTime || null,
+        p_last_trigger_drive: triggerInfo?.lastTriggerDrive || null
+      });
+      if (error) throw error;
+
+      // Update in-memory cache for this project
+      if (_configsCache && _configsCache[pid]) {
+        _configsCache[pid]._desireState = desireState;
+        _configsCache[pid]._lastBackendGrowth = lastBackendGrowth;
+        if (triggerInfo?.lastTriggerTime) _configsCache[pid]._lastTriggerTime = triggerInfo.lastTriggerTime;
+        if (triggerInfo?.lastTriggerDrive) _configsCache[pid]._lastTriggerDrive = triggerInfo.lastTriggerDrive;
+      }
+      return;
+    } catch (e) {
+      console.error('[supabase] saveDesireStateOnly error:', e.message);
+      // Fall through to file-based fallback
+    }
+  }
+
+  // File-based fallback: full save (no concurrency concern without Supabase)
+  const configs = await loadProjectConfigs();
+  if (!configs[pid]) configs[pid] = {};
+  configs[pid]._desireState = desireState;
+  configs[pid]._lastBackendGrowth = lastBackendGrowth;
+  if (triggerInfo?.lastTriggerTime) configs[pid]._lastTriggerTime = triggerInfo.lastTriggerTime;
+  if (triggerInfo?.lastTriggerDrive) configs[pid]._lastTriggerDrive = triggerInfo.lastTriggerDrive;
+  await saveProjectConfigs(configs);
+}
+
+// project config: { [pid]: { apiKey, endpoint, model, enabled, recipient?, emailEnabled?: true, emailMaxPerDay?: 2, emailSentToday?: 0, emailSentDate?: '', _desireState?: { drives, lastCheck }, _lastBackendGrowth?, _lastTriggerTime?, _lastTriggerDrive?, _chatId?: '' } }
 // system events: [{ id, projectId, chatId, type: 'message'|'todo'|'email'|'litter'|'diary', content, timestamp, pushSent: false }]
 
 function loadSystemEvents() {
@@ -1449,9 +1494,15 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       ...(config.emailSentToday !== undefined ? { emailSentToday: config.emailSentToday } : {}),
       ...(config.emailSentDate !== undefined ? { emailSentDate: config.emailSentDate } : {}),
       // Preserve underscore-prefixed internal state (_desireState, _chatId)
+      // Note: _lastBackendGrowth, _lastTriggerTime, _lastTriggerDrive are backend-only
+      // and preserved naturally via ...existing (frontend never sends them).
       ...(config._desireState !== undefined ? { _desireState: config._desireState } : {}),
       ...(config._chatId !== undefined ? { _chatId: config._chatId } : {})
     };
+    // Diagnostic log: confirm what's being synced
+    const ds = config._desireState;
+    const desireInfo = ds ? 'confirmation=' + ((ds.drives && ds.drives.confirmation) || 0) : 'no-desire';
+    console.log(`[sync] ${projectId}: apiKey=${!!config.apiKey} endpoint=${!!config.endpoint} ${desireInfo}`);
     await saveProjectConfigs(configs);
     res.json({ ok: true });
   }
@@ -1491,16 +1542,93 @@ async function checkProjectTodos(pid, cfg) {
   // This stub is ready for future direct backend todo storage.
 }
 
+/**
+ * Apply backend-side passive desire growth (mirrors frontend checkPassiveDrives).
+ * Only confirmation grows passively (+5/hour "悬置"); all drives decay -10 if >24h.
+ * Uses _lastBackendGrowth (independent from frontend's lastPassiveCheck).
+ * Returns the updated desireState object, or null if no change was made.
+ */
+function applyBackendDesireGrowth(ds, pid) {
+  const now = new Date();
+  const lastGrowth = ds._lastBackendGrowth
+    ? new Date(ds._lastBackendGrowth)
+    : (ds.lastCheck ? new Date(ds.lastCheck) : null);  // fallback for existing projects
+  const fallback = lastGrowth || now;
+  const hoursPassed = (now - fallback) / (1000 * 60 * 60);
+
+  // Check at most every 30 min (mirrors frontend's 0.5h guard)
+  if (hoursPassed < 0.5) return null;
+
+  const drives = ds.drives || {};
+  let changed = false;
+
+  // 悬置: confirmation +5 per hour (capped at 100)
+  if (hoursPassed >= 1) {
+    const suspensionInc = Math.floor(hoursPassed) * 5;
+    if (suspensionInc > 0) {
+      const oldVal = drives.confirmation || 0;
+      drives.confirmation = Math.min(100, oldVal + suspensionInc);
+      changed = true;
+      console.log(`[cron] ${pid}: confirmation +${suspensionInc} (${hoursPassed.toFixed(1)}h elapsed) → ${drives.confirmation}`);
+    }
+  }
+
+  // Decay: all drives -10 if >24h since last check (floor at 0)
+  if (hoursPassed >= 24) {
+    for (const k of Object.keys(drives)) {
+      drives[k] = Math.max(0, (drives[k] || 0) - 10);
+    }
+    changed = true;
+  }
+
+  ds._lastBackendGrowth = now.toISOString();
+  return changed ? ds : null;
+}
+
 async function checkProjectDesires(pid, cfg) {
   // cfg is the full project config (apiKey, endpoint, _desireState, _chatId, etc.)
   // _desireState is synced from frontend every 60s via syncDesireStateToBackend()
-  if (!cfg || !cfg._desireState) return;
+
+  // ── Step 1: Cold start — initialize if _desireState doesn't exist ──
+  if (!cfg || !cfg._desireState) {
+    const defaultDS = {
+      drives: { resonance: 0, exploration: 0, possession: 0, guardianship: 0, intimacy: 0, confirmation: 0, devotion: 0 },
+      lastCheck: new Date().toISOString(),
+      _lastBackendGrowth: new Date().toISOString()
+    };
+    await saveDesireStateOnly(pid, defaultDS, defaultDS._lastBackendGrowth);
+    console.log(`[cron] ${pid}: cold start — initialized _desireState`);
+    return;
+  }
 
   const ds = cfg._desireState;
   const drives = ds.drives || {};
+
+  // ── Step 2: Passive growth (backend-side, mirrors frontend checkPassiveDrives) ──
+  const grown = applyBackendDesireGrowth(ds, pid);
+  if (grown) {
+    // Atomically save only the desire state fields (no race with frontend syncs)
+    await saveDesireStateOnly(pid, grown, ds._lastBackendGrowth);
+  }
+
+  // ── Step 3: Threshold check ──
+  let maxDriveKey = null, maxDriveValue = 0;
+  for (const [k, v] of Object.entries(drives)) {
+    if (v > maxDriveValue) { maxDriveKey = k; maxDriveValue = v; }
+  }
+
+  // Diagnostic log: only when approaching threshold (≥42 = 0.7 × 60)
+  if (maxDriveValue >= DESIRE_THRESHOLD * 0.7) {
+    const elapsed = ds._lastBackendGrowth
+      ? ((Date.now() - new Date(ds._lastBackendGrowth).getTime()) / 3600000).toFixed(1)
+      : '?';
+    console.log(`[cron] ${pid}: max=${maxDriveKey}=${maxDriveValue}, threshold=${DESIRE_THRESHOLD}, elapsed=${elapsed}h`);
+  }
+
   const triggered = Object.entries(drives).find(([k, v]) => v >= DESIRE_THRESHOLD);
   if (!triggered) return;
 
+  // ── Step 4: Trigger action ──
   const [driveKey, driveValue] = triggered;
   const labels = {
     resonance: '共鸣欲', exploration: '探索欲', possession: '占有欲',
@@ -1590,13 +1718,13 @@ async function checkProjectDesires(pid, cfg) {
       } catch (e) { console.error('[email] Proactive send error:', e.message); }
     }
 
-    // Reset desire after trigger (reload configs to get latest, then update)
-    if (cfg._desireState && cfg._desireState.drives) {
-      cfg._desireState.drives[driveKey] = Math.floor(driveValue * 0.2);
-      const latestConfigs = await loadProjectConfigs();
-      latestConfigs[pid] = cfg;
-      await saveProjectConfigs(latestConfigs);
-    }
+    // ── Step 5: Reset desire after trigger (mirrors frontend's applyDesireDecay) ──
+    drives[driveKey] = Math.floor(driveValue * 0.2);
+    // Atomically save: only touches _desireState, _lastBackendGrowth, _lastTrigger*
+    await saveDesireStateOnly(pid, ds, ds._lastBackendGrowth, {
+      lastTriggerTime: new Date().toISOString(),
+      lastTriggerDrive: driveKey
+    });
 
     console.log(`[cron] Project ${pid}: triggered ${actionType} (${driveLabel}=${driveValue})`);
   } catch (e) {
