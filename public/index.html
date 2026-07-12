@@ -5218,7 +5218,7 @@ function extractMemoryMarker(text) {
 
 function extractTodosFromResponse(text) {
   if (!text) return [];
-  var re = /\[\[TODO:([^\]|]+)\|(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})\]\]/g;
+  var re = /\[\[TODO:([^\]|]+)\|(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)\]\]/g;
   var todos = [];
   var match;
   while ((match = re.exec(text)) !== null) {
@@ -7453,9 +7453,9 @@ function syncTodosToBackend(){
       todos:store.todos.map(function(t){
         var isoTime=null;
         var raw=t.time||'';
-        if(raw&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)){
-          // Already ISO format (AI-created)
-          isoTime=new Date(raw).toISOString();
+        if(raw&&/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(raw)){
+          // Already ISO format (AI-created) — normalize space→T for Date parsing
+          isoTime=new Date(raw.replace(' ','T')).toISOString();
         }else if(raw&&/^\d{1,2}:\d{2}$/.test(raw)){
           // HH:MM format (user-created short todo) → today at that time
           var today=new Date();
