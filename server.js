@@ -1580,7 +1580,7 @@ app.post('/api/sync-messages', async (req, res) => {
         token_usage: msg.token_usage || 0,
         created_at: msg.created_at || new Date().toISOString(),
         metadata: msg.metadata || {}
-      }, { onConflict: 'message_id', ignoreDuplicates: true });
+      }, { onConflict: 'message_id' });
       if (!error) synced++;
     }
     if (synced > 0) console.log(`[sync-msgs] Synced ${synced} messages`);
