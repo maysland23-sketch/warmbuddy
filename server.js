@@ -1570,8 +1570,12 @@ app.post('/api/sync-messages', async (req, res) => {
 
     let synced = 0;
     for (const msg of messages) {
-      if (!msg.message_id || !msg.project_id || !msg.window_id) continue;
-      const { error } = await supabase.from('chat_messages').upsert({
+      if (!msg.message_id || !msg.project_id || !msg.window_id) {
+        console.log('[sync-msgs] Skipping msg (missing fields):', JSON.stringify({ id: msg.message_id, pid: msg.project_id, wid: msg.window_id }));
+        continue;
+      }
+      console.log('[sync-msgs] Upserting:', msg.message_id, 'role:', msg.role);
+      const { data, error } = await supabase.from('chat_messages').upsert({
         project_id: msg.project_id,
         window_id: msg.window_id,
         message_id: msg.message_id,
@@ -1581,7 +1585,11 @@ app.post('/api/sync-messages', async (req, res) => {
         created_at: msg.created_at || new Date().toISOString(),
         metadata: msg.metadata || {}
       }, { onConflict: 'message_id' });
-      if (!error) synced++;
+      if (error) {
+        console.error('[sync-msgs] Upsert error for', msg.message_id, ':', error.message, error.code, error.details);
+      } else {
+        synced++;
+      }
     }
     if (synced > 0) console.log(`[sync-msgs] Synced ${synced} messages`);
     res.json({ synced });
