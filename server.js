@@ -1769,34 +1769,60 @@ async function checkTodoWakeUps() {
 }
 
 /**
- * Pull recent messages from Supabase chat_messages for proactive context.
- * Falls back to chatSummary text if no messages exist yet (pre-migration state).
+ * Pull messages from Supabase chat_messages for proactive context.
+ * If `aroundTime` is provided, pulls messages closest to that time (for TODO creation context).
+ * Otherwise pulls the most recent messages (for shadow/desire context).
  * @param {string} projectId
  * @param {string} windowId
  * @param {number} limit — max messages to fetch
+ * @param {string} aroundTime — optional ISO time; if set, pulls messages around this moment
  * @returns {string} formatted conversation context, or empty string
  */
-async function fetchRecentMessages(projectId, windowId, limit) {
+async function fetchRecentMessages(projectId, windowId, limit, aroundTime) {
   if (!supabase || !projectId || !windowId) return '';
   try {
-    let query = supabase.from('chat_messages')
-      .select('role, content, created_at')
-      .eq('project_id', projectId)
-      .eq('window_id', windowId)
-      .order('created_at', { ascending: false })
-      .limit(limit);
-    const { data } = await query;
+    let data;
+    if (aroundTime) {
+      // Pull messages around a specific moment (TODO creation context)
+      // Half before, half after, ordered chronologically
+      const halfLimit = Math.ceil(limit / 2);
+      const { data: before } = await supabase.from('chat_messages')
+        .select('role, content, created_at')
+        .eq('project_id', projectId)
+        .eq('window_id', windowId)
+        .lte('created_at', aroundTime)
+        .order('created_at', { ascending: false })
+        .limit(halfLimit);
+      const { data: after } = await supabase.from('chat_messages')
+        .select('role, content, created_at')
+        .eq('project_id', projectId)
+        .eq('window_id', windowId)
+        .gt('created_at', aroundTime)
+        .order('created_at', { ascending: true })
+        .limit(halfLimit);
+      // Merge: before (reversed → chronological) + after (already chronological)
+      data = [...(before || []).reverse(), ...(after || [])];
+    } else {
+      // Pull most recent messages (general context)
+      const { data: recent } = await supabase.from('chat_messages')
+        .select('role, content, created_at')
+        .eq('project_id', projectId)
+        .eq('window_id', windowId)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+      data = (recent || []).reverse();
+    }
+
     if (!data || data.length === 0) return '';
 
-    // Sort chronologically (oldest first) for natural conversation flow
-    const sorted = data.reverse();
     const lines = [];
-    for (const m of sorted) {
+    for (const m of data) {
       const roleLabel = m.role === 'user' ? '用户' : (m.role === 'assistant' ? '暖伴' : '系统');
-      const text = (m.content || '').slice(0, 200).replace(/\n/g, ' ');  // cap per message
+      const text = (m.content || '').slice(0, 200).replace(/\n/g, ' ');
       lines.push(roleLabel + ': ' + text);
     }
-    return '最近对话：\n' + lines.join('\n');
+    const label = aroundTime ? '待办创建时的对话：' : '最近对话：';
+    return label + '\n' + lines.join('\n');
   } catch (e) {
     console.error('[fetch-msgs] Error:', e.message);
     return '';
@@ -1810,9 +1836,10 @@ async function buildTodoWakeMessage(todo, cfg) {
   const tzOffset = getTimezoneOffset(cfg);
   const localTimeStr = getUserLocalTimeString(tzOffset);
 
-  // Pull real conversation context from Supabase; fall back to summary
+  // Pull TODO creation context (3 rounds ≈ 6 messages around created_at); fall back to summary
   const windowId = todo.chat_id || cfg._chatId || '';
-  const realCtx = await fetchRecentMessages(todo.project_id, windowId, 16);
+  const aroundTime = todo.created_at || null;
+  const realCtx = await fetchRecentMessages(todo.project_id, windowId, 6, aroundTime);
   const contextBlock = realCtx
     ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.chatSummary : '')
     : (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '');
