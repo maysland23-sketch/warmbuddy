@@ -6904,6 +6904,8 @@ ${recentMsgIds}` });
 
   // Sync chat context (summary + AEM) to backend for proactive shadow messages
   syncProjectConfigToBackend();
+  // Sync messages to Supabase for real conversation context in Cron
+  scheduleMessageSync();
 }
 
 // ── Multi-bubble draft management ──
@@ -7553,6 +7555,67 @@ function syncProjectConfigToBackend(){
       }
     })
   }).catch(function(e){ console.warn('[sync-config] Failed:', e.message); });
+}
+
+/**
+ * Sync unsynced chat messages to Supabase chat_messages table.
+ * Uses _synced flag on each message for dedup; message_id UNIQUE constraint as safety net.
+ * Called with debounce after conversation rounds.
+ */
+var _syncMessagesTimer = null;
+function syncMessagesToBackend(){
+  var proj = getActiveProject(); if (!proj) return;
+  var chat = getActiveChatObj(); if (!chat || !chat.messages) return;
+
+  // Collect unsynced user + AI messages (skip system, notifications, handoff notes)
+  var unsynced = [];
+  for (var i = 0; i < chat.messages.length; i++) {
+    var m = chat.messages[i];
+    if (m._synced || !m.id) continue;
+    if (m.role !== 'user' && m.role !== 'ai') continue;
+    if (m._isHandoffNote) continue;
+    unsynced.push({
+      project_id: proj.id,
+      window_id: chat.id,
+      message_id: m.id,
+      role: m.role === 'ai' ? 'assistant' : 'user',
+      content: m.text || '',
+      token_usage: m._tokenUsage || 0,
+      created_at: m.time ? new Date().toISOString() : new Date().toISOString(), // message time may not be ISO
+      metadata: { contentType: m.contentType || '' }
+    });
+  }
+  if (unsynced.length === 0) return;
+
+  fetch(BACKEND_URL + '/api/sync-messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages: unsynced })
+  }).then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.synced > 0) {
+        // Mark as synced
+        for (var i = 0; i < chat.messages.length; i++) {
+          var m = chat.messages[i];
+          if (m._synced || !m.id) continue;
+          // Mark all that were just sent (simple approach: mark last N unsynced)
+          // We check against the sent set
+          for (var j = 0; j < unsynced.length; j++) {
+            if (m.id === unsynced[j].message_id) { m._synced = true; break; }
+          }
+        }
+        saveStore();
+      }
+    }).catch(function(e) { console.warn('[sync-msgs] Failed:', e.message); });
+}
+
+/**
+ * Debounced trigger for message sync — called after each conversation round.
+ * Waits 2s of inactivity before syncing to batch rapid messages together.
+ */
+function scheduleMessageSync() {
+  if (_syncMessagesTimer) clearTimeout(_syncMessagesTimer);
+  _syncMessagesTimer = setTimeout(syncMessagesToBackend, 2000);
 }
 
 function syncDesireStateToBackend(force){

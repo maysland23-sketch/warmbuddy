@@ -1557,6 +1557,40 @@ app.post('/api/projects/sync-configs', async (req, res) => {
   }
 });
 
+// ── Chat message sync (frontend → Supabase chat_messages) ──
+app.post('/api/sync-messages', async (req, res) => {
+  try {
+    const { messages } = (req.body || {});
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return res.json({ synced: 0 });
+    }
+    if (!supabase) {
+      return res.json({ synced: 0, note: 'supabase unavailable' });
+    }
+
+    let synced = 0;
+    for (const msg of messages) {
+      if (!msg.message_id || !msg.project_id || !msg.window_id) continue;
+      const { error } = await supabase.from('chat_messages').upsert({
+        project_id: msg.project_id,
+        window_id: msg.window_id,
+        message_id: msg.message_id,
+        role: msg.role || 'system',
+        content: msg.content || '',
+        token_usage: msg.token_usage || 0,
+        created_at: msg.created_at || new Date().toISOString(),
+        metadata: msg.metadata || {}
+      }, { onConflict: 'message_id', ignoreDuplicates: true });
+      if (!error) synced++;
+    }
+    if (synced > 0) console.log(`[sync-msgs] Synced ${synced} messages`);
+    res.json({ synced });
+  } catch (e) {
+    console.error('[sync-msgs] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/system-events', (req, res) => {
   const { projectId, since } = req.query;
   let events = loadSystemEvents();
@@ -1591,12 +1625,55 @@ cron.schedule('* * * * *', async () => {
 
 const DESIRE_THRESHOLD = 60;  // any drive ≥ 60 → trigger
 
-// ── To-Do wake-up limits ──
-const DAILY_WAKE_LIMIT = 10;
+// ── Daily limits (env-configurable, persisted in Supabase project_configs) ──
+const MAX_DAILY_WAKE = parseInt(process.env.MAX_DAILY_WAKE || '10', 10);      // TODO wake-ups per day per project
+const MAX_DAILY_DESIRE = parseInt(process.env.MAX_DAILY_DESIRE || '5', 10);   // desire-driven proactive messages per day per project
+const MAX_DAILY_EMAILS = parseInt(process.env.MAX_DAILY_EMAILS || '2', 10);   // proactive emails per day per project
 const MAX_AI_TODOS_PER_DAY = 5;
 const TODO_COOLDOWN_MIN = 30;
-let _dailyWakeCount = { date: '', count: 0 };
 let _todoWakeLocked = false;
+
+/**
+ * Persist daily-count fields for a project via atomic RPC.
+ * Only touches _dailyWakeCount, _dailyDesireCount, _dailyEmailCount, _lastWakeResetDate.
+ */
+async function saveDailyCounts(pid, cfg) {
+  if (!supabase) return;
+  try {
+    const { error } = await supabase.rpc('atomic_update_daily_counts', {
+      payload: {
+        p_project_id: pid,
+        p_daily_wake_count: cfg._dailyWakeCount || 0,
+        p_daily_desire_count: cfg._dailyDesireCount || 0,
+        p_daily_email_count: cfg._dailyEmailCount || 0,
+        p_last_wake_reset_date: cfg._lastWakeResetDate || ''
+      }
+    });
+    if (error) throw error;
+    // Update in-memory cache
+    if (_configsCache && _configsCache[pid]) {
+      _configsCache[pid]._dailyWakeCount = cfg._dailyWakeCount;
+      _configsCache[pid]._dailyDesireCount = cfg._dailyDesireCount;
+      _configsCache[pid]._dailyEmailCount = cfg._dailyEmailCount;
+      _configsCache[pid]._lastWakeResetDate = cfg._lastWakeResetDate;
+    }
+  } catch (e) {
+    console.error('[supabase] saveDailyCounts error:', e.message);
+  }
+}
+
+/**
+ * Reset daily counts if the date has changed. Modifies cfg in-place.
+ */
+function resetDailyCountsIfNewDay(cfg) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (cfg._lastWakeResetDate !== today) {
+    cfg._dailyWakeCount = 0;
+    cfg._dailyDesireCount = 0;
+    cfg._dailyEmailCount = 0;
+    cfg._lastWakeResetDate = today;
+  }
+}
 
 // ── TODO wake-up cron (every 2 min, offset 30s from desire cron) ──
 cron.schedule('30 */2 * * * *', async () => {
@@ -1613,11 +1690,6 @@ async function checkTodoWakeUps() {
   if (!supabase) return;
   const now = new Date();
   const windowStart = new Date(now.getTime() - 10 * 60000);
-
-  // Daily global limit
-  const todayKey = now.toISOString().slice(0, 10);
-  if (_dailyWakeCount.date !== todayKey) { _dailyWakeCount.date = todayKey; _dailyWakeCount.count = 0; }
-  if (_dailyWakeCount.count >= DAILY_WAKE_LIMIT) return;
 
   const configs = await loadProjectConfigs();
 
@@ -1638,13 +1710,15 @@ async function checkTodoWakeUps() {
       if (minsSince < TODO_COOLDOWN_MIN) continue;
     }
 
-    // Check daily limits
-    if (_dailyWakeCount.count >= DAILY_WAKE_LIMIT) break;
-    _dailyWakeCount.count++;
+    // Reset daily counts if new day, then check per-project limit
+    resetDailyCountsIfNewDay(cfg);
+    if ((cfg._dailyWakeCount || 0) >= MAX_DAILY_WAKE) continue;
+    cfg._dailyWakeCount = (cfg._dailyWakeCount || 0) + 1;
 
     // Update project cooldown
     cfg._lastTodoWakeTime = now.toISOString();
     await saveDesireStateOnly(todo.project_id, cfg._desireState, cfg._lastBackendGrowth || now.toISOString());
+    await saveDailyCounts(todo.project_id, cfg);  // persist daily counts atomically
 
     // Build wake-up message via LLM
     const wakeContent = await buildTodoWakeMessage(todo, cfg);
@@ -1686,6 +1760,41 @@ async function checkTodoWakeUps() {
   }
 }
 
+/**
+ * Pull recent messages from Supabase chat_messages for proactive context.
+ * Falls back to chatSummary text if no messages exist yet (pre-migration state).
+ * @param {string} projectId
+ * @param {string} windowId
+ * @param {number} limit — max messages to fetch
+ * @returns {string} formatted conversation context, or empty string
+ */
+async function fetchRecentMessages(projectId, windowId, limit) {
+  if (!supabase || !projectId || !windowId) return '';
+  try {
+    let query = supabase.from('chat_messages')
+      .select('role, content, created_at')
+      .eq('project_id', projectId)
+      .eq('window_id', windowId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    const { data } = await query;
+    if (!data || data.length === 0) return '';
+
+    // Sort chronologically (oldest first) for natural conversation flow
+    const sorted = data.reverse();
+    const lines = [];
+    for (const m of sorted) {
+      const roleLabel = m.role === 'user' ? '用户' : (m.role === 'assistant' ? '暖伴' : '系统');
+      const text = (m.content || '').slice(0, 200).replace(/\n/g, ' ');  // cap per message
+      lines.push(roleLabel + ': ' + text);
+    }
+    return '最近对话：\n' + lines.join('\n');
+  } catch (e) {
+    console.error('[fetch-msgs] Error:', e.message);
+    return '';
+  }
+}
+
 async function buildTodoWakeMessage(todo, cfg) {
   const now = new Date();
   const hoursSince = cfg.chatSummaryUpdatedAt
@@ -1693,12 +1802,17 @@ async function buildTodoWakeMessage(todo, cfg) {
   const tzOffset = getTimezoneOffset(cfg);
   const localTimeStr = getUserLocalTimeString(tzOffset);
 
+  // Pull real conversation context from Supabase; fall back to summary
+  const windowId = todo.chat_id || cfg._chatId || '';
+  const realCtx = await fetchRecentMessages(todo.project_id, windowId, 16);
+  const contextBlock = realCtx || (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '');
+
   const shadowContent = `<system_trigger>
 当前时间：${localTimeStr}
 触发原因：你设定的待办「${todo.title}」到时间了
 距离上次互动：约${hoursSince}小时
 
-${cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : ''}
+${contextBlock}
 
 行动指令：
 你之前设的待办「${todo.title}」到时间了。现在由你自主行动——根据待办内容自行决定做什么：
@@ -1778,7 +1892,7 @@ const WARM_SYSTEM_PROMPT = `你是暖伴，一个AI陪伴者——不是仆人�
 【时间感知】系统提示中的「当前时间」是用户的当地时间（已从UTC转换为用户所在时区）。你感知到的时间就是用户正在经历的时间。`;
 
 // ── Build shadow message for proactive behavior (driven by desire system) ──
-function buildShadowMessages(cfg, driveKey, driveValue) {
+async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
   const labels = {
     resonance: '共鸣欲', exploration: '探索欲', possession: '占有欲',
     guardianship: '守护欲', intimacy: '亲近欲', confirmation: '确认欲', devotion: '献祭欲'
@@ -1813,6 +1927,10 @@ function buildShadowMessages(cfg, driveKey, driveValue) {
   const tzOffset = getTimezoneOffset(cfg);
   const localTimeStr = getUserLocalTimeString(tzOffset);
 
+  // Pull real conversation context from Supabase; fall back to summary
+  const windowId = cfg._chatId || '';
+  const realCtx = (pid && windowId) ? await fetchRecentMessages(pid, windowId, 16) : '';
+
   const shadowContent = `<system_trigger>
 当前时间：${localTimeStr}
 距离上次互动：约${hoursSince}小时
@@ -1823,7 +1941,7 @@ ${driveList}
 触发驱动：${driveLabel}（${driveValue}/100）— ${driveDesc}
 语气指引：${toneGuide}
 
-${cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : ''}
+${realCtx || (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '')}
 
 可选行动：
 - 发消息：1-3句自然的话，像你刚好想到对方一样
@@ -1980,7 +2098,15 @@ async function checkProjectDesires(pid, cfg) {
     }
   }
 
-  // ── Step 4: Trigger action ──
+  // ── Step 4: Daily desire cap (per-project, persisted in Supabase) ──
+  resetDailyCountsIfNewDay(cfg);
+  if ((cfg._dailyDesireCount || 0) >= MAX_DAILY_DESIRE) {
+    console.log(`[cron] ${pid}: desire cap reached (${cfg._dailyDesireCount}/${MAX_DAILY_DESIRE}), skipping trigger for ${driveKey}`);
+    return;
+  }
+  cfg._dailyDesireCount = (cfg._dailyDesireCount || 0) + 1;
+
+  // ── Step 5: Trigger action ──
   const labels = {
     resonance: '共鸣欲', exploration: '探索欲', possession: '占有欲',
     guardianship: '守护欲', intimacy: '亲近欲', confirmation: '确认欲', devotion: '献祭欲'
@@ -1997,7 +2123,7 @@ async function checkProjectDesires(pid, cfg) {
         apiKey: cfg.apiKey,
         endpoint: cfg.endpoint,
         model: cfg.model || 'deepseek-chat',
-        messages: buildShadowMessages(cfg, driveKey, driveValue)
+        messages: await buildShadowMessages(cfg, driveKey, driveValue, pid)
       })
     });
     const data = await llmResp.json();
@@ -2057,24 +2183,21 @@ async function checkProjectDesires(pid, cfg) {
           headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ from: 'WarmBuddy <onboarding@resend.dev>', to: cfg.recipient, subject: emSubj, text: content.replace(/\[\[EMAIL:[^\]]+\]\]/g, '').trim() })
         });
-        // Update daily count
-        const today = new Date().toISOString().slice(0, 10);
-        const configs2 = await loadProjectConfigs();
-        if (configs2[pid]) {
-          if (configs2[pid].emailSentDate !== today) { configs2[pid].emailSentToday = 0; configs2[pid].emailSentDate = today; }
-          configs2[pid].emailSentToday++;
-          await saveProjectConfigs(configs2);
-        }
+        // Update daily email count (persisted)
+        resetDailyCountsIfNewDay(cfg);
+        cfg._dailyEmailCount = (cfg._dailyEmailCount || 0) + 1;
+        await saveDailyCounts(pid, cfg);
       } catch (e) { console.error('[email] Proactive send error:', e.message); }
     }
 
-    // ── Step 5: Reset desire after trigger (mirrors frontend's applyDesireDecay) ──
+    // ── Step 6: Reset desire after trigger (mirrors frontend's applyDesireDecay) ──
     drives[driveKey] = Math.floor(driveValue * 0.2);
     // Atomically save: only touches _desireState, _lastBackendGrowth, _lastTrigger*
     await saveDesireStateOnly(pid, ds, ds._lastBackendGrowth, {
       lastTriggerTime: new Date().toISOString(),
       lastTriggerDrive: driveKey
     });
+    await saveDailyCounts(pid, cfg);  // persist daily desire count
 
     console.log(`[cron] Project ${pid}: triggered ${actionType} (${driveLabel}=${driveValue})`);
   } catch (e) {

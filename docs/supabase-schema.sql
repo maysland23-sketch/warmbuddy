@@ -63,6 +63,47 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Table 4: Chat messages for cloud-synced conversation history
+-- Frontend syncs messages after each round; Cron pulls real messages for proactive context.
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  window_id TEXT NOT NULL,
+  message_id TEXT NOT NULL UNIQUE,  -- frontend-generated msg id, dedup key
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  content TEXT NOT NULL,
+  token_usage INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  metadata JSONB DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_project_window ON chat_messages(project_id, window_id, created_at);
+ALTER TABLE chat_messages DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON chat_messages TO PUBLIC;
+
+-- RPC: Atomic partial update of daily-count fields within project_configs JSONB.
+-- Touches only _dailyWakeCount, _dailyDesireCount, _dailyEmailCount, _lastWakeResetDate
+-- without affecting other keys — eliminating read-modify-write races with frontend syncs.
+CREATE OR REPLACE FUNCTION atomic_update_daily_counts(
+  payload JSONB
+) RETURNS VOID AS $$
+DECLARE
+  p_project_id           TEXT  := payload->>'p_project_id';
+  p_daily_wake_count     INT   := (payload->>'p_daily_wake_count')::INT;
+  p_daily_desire_count   INT   := (payload->>'p_daily_desire_count')::INT;
+  p_daily_email_count    INT   := (payload->>'p_daily_email_count')::INT;
+  p_last_wake_reset_date TEXT  := payload->>'p_last_wake_reset_date';
+BEGIN
+  UPDATE project_configs
+  SET config = config
+    || jsonb_build_object('_dailyWakeCount', to_jsonb(p_daily_wake_count))
+    || jsonb_build_object('_dailyDesireCount', to_jsonb(p_daily_desire_count))
+    || jsonb_build_object('_dailyEmailCount', to_jsonb(p_daily_email_count))
+    || jsonb_build_object('_lastWakeResetDate', to_jsonb(p_last_wake_reset_date)),
+    updated_at = NOW()
+  WHERE project_id = p_project_id;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Grant access
 GRANT ALL ON project_configs TO PUBLIC;
 GRANT ALL ON app_state TO PUBLIC;
