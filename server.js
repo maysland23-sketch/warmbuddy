@@ -1813,7 +1813,9 @@ async function buildTodoWakeMessage(todo, cfg) {
   // Pull real conversation context from Supabase; fall back to summary
   const windowId = todo.chat_id || cfg._chatId || '';
   const realCtx = await fetchRecentMessages(todo.project_id, windowId, 16);
-  const contextBlock = realCtx || (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '');
+  const contextBlock = realCtx
+    ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.chatSummary : '')
+    : (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '');
 
   const shadowContent = `<system_trigger>
 当前时间：${localTimeStr}
@@ -1949,7 +1951,7 @@ ${driveList}
 触发驱动：${driveLabel}（${driveValue}/100）— ${driveDesc}
 语气指引：${toneGuide}
 
-${realCtx || (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '')}
+${realCtx ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.chatSummary : '') : (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '')}
 
 可选行动：
 - 发消息：1-3句自然的话，像你刚好想到对方一样
