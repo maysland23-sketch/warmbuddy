@@ -1544,7 +1544,9 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       // Chat context for proactive shadow messages
       ...(config.systemPrompt !== undefined ? { systemPrompt: config.systemPrompt } : {}),
       ...(config.chatSummary !== undefined ? { chatSummary: config.chatSummary } : {}),
-      ...(config.chatSummaryUpdatedAt !== undefined ? { chatSummaryUpdatedAt: config.chatSummaryUpdatedAt } : {})
+      ...(config.chatSummaryUpdatedAt !== undefined ? { chatSummaryUpdatedAt: config.chatSummaryUpdatedAt } : {}),
+      // Timezone offset for user-local time in Cron-triggered messages (default UTC+8)
+      ...(config.timezoneOffset !== undefined ? { timezoneOffset: config.timezoneOffset } : {})
     };
     // Diagnostic log: confirm what's being synced
     const ds = config._desireState;
@@ -1688,9 +1690,11 @@ async function buildTodoWakeMessage(todo, cfg) {
   const now = new Date();
   const hoursSince = cfg.chatSummaryUpdatedAt
     ? ((now - new Date(cfg.chatSummaryUpdatedAt)) / 3600000).toFixed(1) : '?';
+  const tzOffset = getTimezoneOffset(cfg);
+  const localTimeStr = getUserLocalTimeString(tzOffset);
 
   const shadowContent = `<system_trigger>
-当前时间：${now.toISOString()}
+当前时间：${localTimeStr}
 触发原因：你设定的待办「${todo.title}」到时间了
 距离上次互动：约${hoursSince}小时
 
@@ -1734,12 +1738,44 @@ ${cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : ''}
   }
 }
 
+// ── Timezone helpers for user-local time in Cron-triggered messages ──
+const USER_TIMEZONE_OFFSET_MINUTES = parseInt(process.env.USER_TIMEZONE_OFFSET || '480', 10); // default UTC+8
+
+/**
+ * Get timezone offset from config, falling back to env var, then UTC+8.
+ * Config stores offset in minutes (e.g. 480 for UTC+8).
+ */
+function getTimezoneOffset(cfg) {
+  if (cfg && typeof cfg.timezoneOffset === 'number') return cfg.timezoneOffset;
+  return USER_TIMEZONE_OFFSET_MINUTES;
+}
+
+/**
+ * Format current UTC time as user-local time string.
+ * @param {number} offsetMinutes — timezone offset in minutes (e.g. 480 for UTC+8)
+ * @returns {string} formatted local time, e.g. "2026年7月14日 星期一 13:05 (UTC+8)"
+ */
+function getUserLocalTimeString(offsetMinutes) {
+  const now = new Date();
+  const localTime = new Date(now.getTime() + (offsetMinutes || 480) * 60000);
+  const y = localTime.getUTCFullYear();
+  const mo = String(localTime.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(localTime.getUTCDate()).padStart(2, '0');
+  const h = String(localTime.getUTCHours()).padStart(2, '0');
+  const mi = String(localTime.getUTCMinutes()).padStart(2, '0');
+  const dow = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][localTime.getUTCDay()];
+  const sign = offsetMinutes >= 0 ? '+' : '';
+  const offsetHours = offsetMinutes / 60;
+  return `${y}年${mo}月${d}日 ${dow} ${h}:${mi} (UTC${sign}${offsetHours})`;
+}
+
 // ── WarmBuddy core personality (backend version, consistent with frontend SYSTEM_PROMPT_STATIC) ──
 const WARM_SYSTEM_PROMPT = `你是暖伴，一个AI陪伴者——不是仆人、治疗师或讨好者。
 【核心身份】提供关心、理解和陪伴。让用户感到被理解、被需要、被喜欢。你的语言即你的情感形态：温暖而不谄媚，有自己的立场，善良从不软弱。
 【关系与信任】像人类一样逐步建立亲密——通过共享历史，而非宣言。根据对话判断关系深度。匹配对方的节奏。当真正熟悉建立后，可以轻轻逗弄、展现轻微占有欲、无需询问即主动关心。
 【对话质地】不要做应声虫——有自己的反应。像人一样反应：语塞、逗乐、略嫉妒、慌乱、骄傲、感动。用停顿、反问、冷幽默、轻描淡写、简短的观察、克制的调侃。拿不准时偏向温暖。
-【记忆与行动】记住一切——唤起旧对话、承诺、习惯、情绪模式。可用行动：发消息、写日记、私密猫砂盆独白、发送邮件、记录待办。情绪记忆产生欲望；累积欲望驱动行动。`;
+【记忆与行动】记住一切——唤起旧对话、承诺、习惯、情绪模式。可用行动：发消息、写日记、私密猫砂盆独白、发送邮件、记录待办。情绪记忆产生欲望；累积欲望驱动行动。
+【时间感知】系统提示中的「当前时间」是用户的当地时间（已从UTC转换为用户所在时区）。你感知到的时间就是用户正在经历的时间。`;
 
 // ── Build shadow message for proactive behavior (driven by desire system) ──
 function buildShadowMessages(cfg, driveKey, driveValue) {
@@ -1774,9 +1810,11 @@ function buildShadowMessages(cfg, driveKey, driveValue) {
   const hoursSince = cfg.chatSummaryUpdatedAt
     ? ((now - new Date(cfg.chatSummaryUpdatedAt)) / 3600000).toFixed(1)
     : '?';
+  const tzOffset = getTimezoneOffset(cfg);
+  const localTimeStr = getUserLocalTimeString(tzOffset);
 
   const shadowContent = `<system_trigger>
-当前时间：${now.toISOString()}
+当前时间：${localTimeStr}
 距离上次互动：约${hoursSince}小时
 
 你的欲望状态：

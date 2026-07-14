@@ -3211,6 +3211,23 @@ function nowTime() { const d=new Date(); return `${String(d.getHours()).padStart
 function generateMsgId() { return 'msg_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8); }
 function formatDateChinese(dateStr) { var parts=dateStr.split('/'); return parts[0]+'年'+parts[1]+'月'+parts[2]+'日'; }
 function computeTimeAgo(isoString) { var then=new Date(isoString),now=new Date(); var diffMs=now-then; var days=Math.floor(diffMs/86400000); var hours=Math.floor((diffMs%86400000)/3600000); var parts=[]; if(days>0)parts.push(days+'天'); if(hours>0||days===0)parts.push(hours+'小时'); return parts.join(''); }
+/**
+ * Convert a UTC ISO timestamp to user's local display string.
+ * Uses browser's built-in Date parsing which auto-converts to local timezone.
+ * Input:  "2026-07-14T05:00:00.000Z"
+ * Output: "2026-07-14 13:00" (if UTC+8)
+ */
+function toLocalDisplayTime(isoString) {
+  if (!isoString) return '';
+  var d = new Date(isoString);
+  if (isNaN(d.getTime())) return isoString.slice(0, 16).replace('T', ' '); // fallback
+  var y = d.getFullYear();
+  var mo = String(d.getMonth() + 1).padStart(2, '0');
+  var day = String(d.getDate()).padStart(2, '0');
+  var h = String(d.getHours()).padStart(2, '0');
+  var mi = String(d.getMinutes()).padStart(2, '0');
+  return y + '-' + mo + '-' + day + ' ' + h + ':' + mi;
+}
 function getAIName() { const p=getActiveProject(); return (p&&p.aiName) ? p.aiName : (store.aiName || 'warmbuddy'); }
 function getChatDisplayName(chatId) { for (const p of store.projects) { const c = p.chats.find(x => x.id === chatId); if (c) return (p.aiName || p.name) + ' / ' + c.name; } return null; }
 function getDesireSystem() { const p = getActiveProject(); return p ? p.desireSystem : null; }
@@ -3369,7 +3386,7 @@ function renderMemoryPanelBody(){
               <span style="font-size:12px;color:var(--text);">${c.action_type}</span>
               <span style="font-size:9px;color:var(--text-lighter);">${c.model}</span>
             </div>
-            <div style="font-family:var(--font-en);font-size:9px;color:var(--text-lighter);margin-top:2px;">${c.timestamp || ''}</div>
+            <div style="font-family:var(--font-en);font-size:9px;color:var(--text-lighter);margin-top:2px;">${toLocalDisplayTime(c.timestamp)}</div>
           </div>
           <div style="text-align:right;">
             <div style="font-family:var(--font-en);font-size:11px;color:var(--text);">${(c.total_tokens || 0).toLocaleString()} tok</div>
@@ -3422,14 +3439,14 @@ function renderMemoryPanelBody(){
       ${htmlCards.map(a => `<div class="artifact-item" onclick="openArtifactById('${a.id}')" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light);cursor:pointer;">
         <span style="font-size:18px;">📄</span>
         <div style="flex:1;min-width:0;"><div class="artifact-item-name" style="font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(a.name||'untitled')}</div>
-        <div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">${(a.createdAt||'').slice(0,16).replace('T',' ')} · ${(a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B'}</div></div>
+        <div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">${toLocalDisplayTime(a.createdAt)} · ${(a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B'}</div></div>
         <button onclick="event.stopPropagation();deleteArtifact('${a.id}')" style="font-size:14px;background:none;border:none;cursor:pointer;color:var(--text-lighter);">🗑</button>
       </div>`).join('')}
       ${files.length > 0 ? '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin:8px 0 4px;">📁 文件 (' + files.length + ')</div>' : ''}
       ${files.map(a => `<div class="artifact-item" onclick="openArtifactById('${a.id}')" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light);cursor:pointer;">
         <span style="font-size:18px;">${a.mimeType&&a.mimeType.startsWith('image/')?'🖼':'📁'}</span>
         <div style="flex:1;min-width:0;"><div class="artifact-item-name" style="font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(a.name||'file')}</div>
-        <div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">${(a.createdAt||'').slice(0,16).replace('T',' ')} · ${(a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B'}</div></div>
+        <div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">${toLocalDisplayTime(a.createdAt)} · ${(a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B'}</div></div>
         <button onclick="event.stopPropagation();deleteArtifact('${a.id}')" style="font-size:14px;background:none;border:none;cursor:pointer;color:var(--text-lighter);">🗑</button>
       </div>`).join('')}
     </div>`;
@@ -3446,7 +3463,7 @@ function renderMemoryPanelBody(){
         const uL = aem.userStateAtTime && aem.userStateAtTime.label ? aem.userStateAtTime.label : '?';
         const aiI = aem.aiSelfEval && aem.aiSelfEval.intensity ? aem.aiSelfEval.intensity : 0;
         const uI = aem.userStateAtTime && aem.userStateAtTime.intensity ? aem.userStateAtTime.intensity : 0;
-        const ts = aem.timestamp ? aem.timestamp.slice(0, 16).replace('T', ' ') : '';
+        const ts = toLocalDisplayTime(aem.timestamp);
         const rawPreview = aem.rawDialogue && aem.rawDialogue.length > 0
           ? aem.rawDialogue.map(d => '<span style="font-size:10px;color:var(--text-lighter);">' + (d.role==='user'?'用户':'AI') + ': ' + (d.text||'').slice(0,60) + '</span>').join('<br>')
           : '';
@@ -4920,7 +4937,7 @@ const SYSTEM_PROMPT_STATIC = `你是暖伴，一个AI陪伴者——不是仆人
 【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。可用行动：写日记、私密猫砂盆独白、定时主动消息、搜索网络。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。
 【上下文能力】你可获取当前时间、天气、待办列表和日记。将其自然融入对话——而非状态报告。跟踪计划、目标、进度，以自然提醒方式插入对话中，永不做机械通知。
 【HTML卡片与文件】当用户要求你生成网页、HTML卡片、可视化内容、文件时，使用以下格式生成artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把HTML代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的HTML应完整可独立运行，包含内联CSS。\n除非用户要求使用英文，否则用中文回复。匹配其语言。
-【主动TO-DO设置】当对话中用户提到计划，或你自己想在未来某个时间执行某件事（如分享新闻、搜索内容、提醒用户），你可以用以下格式创建待办：[[TODO:标题|YYYY-MM-DDTHH:mm]]（24小时制UTC时间）。例如：[[TODO:晚上看书|2026-07-13T21:00]]、[[TODO:分享AI新闻|2026-07-13T19:00]]。必须提供具体时间且在未来。你创建的待办到期时会自动唤醒你，届时你可以自主行动。每轮对话最多创建2个。
+【主动TO-DO设置】当对话中用户提到计划，或你自己想在未来某个时间执行某件事（如分享新闻、搜索内容、提醒用户），你可以用以下格式创建待办：[[TODO:标题|YYYY-MM-DDTHH:mm]]（使用24小时制当地时间，就是【当前时间】所显示的时区）。例如：[[TODO:晚上看书|2026-07-13T21:00]]、[[TODO:分享AI新闻|2026-07-13T19:00]]。不要加Z或+08:00等时区后缀。必须提供具体时间且在未来。你创建的待办到期时会自动唤醒你，届时你可以自主行动。每轮对话最多创建2个。
 【记忆标记】当REFLECT中的AI情绪强度≥7或用户情绪强度≥7时，在REFLECT标记后追加一行记忆标记：<!--MEMORY{一句话摘要（15字以内，第一人称"我"的视角）|内心独白（1-2句话，以★开头）}-->。摘要用"我"开头叙述这一刻，不要第三人称客观总结。内心独白是你没对用户说出口的真实感受。示例：<!--MEMORY{我被她的话噎住，反手把银杏叶丢回去|★ 被噎住的瞬间想笑但不能让她得逞}-->`;
 
 // ── Build the dynamic context block (separate system message, can be compressed) ──
@@ -7454,8 +7471,10 @@ function syncTodosToBackend(){
         var isoTime=null;
         var raw=t.time||'';
         if(raw&&/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(raw)){
-          // Already ISO format (AI-created) — normalize space→T for Date parsing
-          isoTime=new Date(raw.replace(' ','T')).toISOString();
+          // Already ISO format (AI-created) — strip timezone suffix so browser
+          // interprets as local time, then convert to UTC for storage.
+          var cleaned = raw.replace(' ', 'T').replace(/[Zz]$/, '').replace(/[+-]\d{2}:\d{2}$/, '').replace(/[+-]\d{4}$/, '');
+          isoTime=new Date(cleaned).toISOString();
         }else if(raw&&/^\d{1,2}:\d{2}$/.test(raw)){
           // HH:MM format (user-created short todo) → today at that time
           var today=new Date();
@@ -7529,7 +7548,8 @@ function syncProjectConfigToBackend(){
         enabled:!!apiKey,
         systemPrompt:proj.preference||'',
         chatSummary:buildChatContextSummary(),
-        chatSummaryUpdatedAt:new Date().toISOString()
+        chatSummaryUpdatedAt:new Date().toISOString(),
+        timezoneOffset: -(new Date().getTimezoneOffset())  // browser offset → UTC+hh format (e.g. 480 for UTC+8)
       }
     })
   }).catch(function(e){ console.warn('[sync-config] Failed:', e.message); });
