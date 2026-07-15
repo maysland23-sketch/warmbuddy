@@ -8087,6 +8087,12 @@ async function registerServiceWorker() {
     const registration = await navigator.serviceWorker.register('/service-worker.js');
     console.log('[PWA] SW registered:', registration.scope);
 
+    // Request persistent storage to reduce chance of SW/data being cleared
+    if (navigator.storage && navigator.storage.persist) {
+      const isPersisted = await navigator.storage.persist();
+      console.log('[PWA] Persistent storage:', isPersisted ? 'granted' : 'denied');
+    }
+
     // Check if already subscribed
     const existingSubscription = await registration.pushManager.getSubscription();
     if (existingSubscription) {
