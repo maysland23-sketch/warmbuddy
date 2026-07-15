@@ -8186,6 +8186,8 @@ async function init(){
   loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
   updateSettingsUI();
   renderAll();
+  updateChatInputEnabledState();  // must be after renderAll + loadStore; inside init() so store is loaded
+  syncProjectConfigToBackend();   // push latest config to backend on startup
   // Pull latest desire state + system events from backend (Cron may have triggered while app was closed)
   reconcileFromBackend();
   // v2.1: chat input auto-resize + Enter/Shift+Enter handling
@@ -8242,7 +8244,6 @@ setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
 setInterval(pollSystemEvents, 30000);      // backend proactive events every 30s
 setInterval(syncDesireStateToBackend, 60000); // sync desire state to backend every 60s
 syncProjectConfigToBackend();              // sync on startup
-updateChatInputEnabledState();            // set initial API enabled state on input bar
 
 // ── Weekly memory file write ──
 async function checkWeeklyMemoryWrite() {
