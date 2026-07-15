@@ -482,7 +482,6 @@ function extractResponseContent(provider, data) {
 const DATA_DIR = process.env.RENDER_DISK_MOUNT_PATH || path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const CONFIGS_FILE = path.join(DATA_DIR, 'projectConfigs.json');
-const EVENTS_FILE = path.join(DATA_DIR, 'systemEvents.json');
 
 // ── Supabase client (project configs persisted in DB, not ephemeral filesystem) ──
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -651,7 +650,7 @@ async function saveDesireStateOnly(pid, desireState, lastBackendGrowth, triggerI
 }
 
 // project config: { [pid]: { apiKey, endpoint, model, enabled, recipient?, emailEnabled?: true, emailMaxPerDay?: 2, emailSentToday?: 0, emailSentDate?: '', _desireState?: { drives, lastCheck }, _lastBackendGrowth?, _lastTriggerTime?, _lastTriggerDrive?, _chatId?: '' } }
-// system events: [{ id, projectId, chatId, type: 'message'|'todo'|'email'|'litter'|'diary'|'todo_wake', driveKey?, content, timestamp, pushSent: false, todoId?, todoTitle? }]
+// system events: persisted in Supabase system_events table (survives Render restarts)
 
 // ── To-Do persistence (Supabase project_todos table) ──
 async function loadTodos(projectId) {
@@ -693,13 +692,57 @@ async function countAITodosToday(projectId) {
   } catch (e) { return 0; }
 }
 
-function loadSystemEvents() {
-  try { return JSON.parse(fs.readFileSync(EVENTS_FILE, 'utf-8')); } catch { return []; }
+// ── System events persisted in Supabase (survives Render restarts) ──
+async function loadSystemEvents(projectId, since) {
+  if (!supabase) return [];
+  try {
+    let query = supabase.from('system_events').select('*');
+    if (projectId) query = query.eq('project_id', projectId);
+    if (since) query = query.gt('created_at', since);
+    query = query.order('created_at', { ascending: true }).limit(100);
+    const { data } = await query;
+    return (data || []).map(row => ({
+      id: row.id,
+      projectId: row.project_id,
+      chatId: row.chat_id || '',
+      type: row.type,
+      driveKey: row.drive_key || null,
+      content: row.content || '',
+      timestamp: row.created_at,
+      pushSent: row.push_sent || false,
+      todoId: row.todo_id || null,
+      todoTitle: row.todo_title || null,
+      postDecayValue: row.post_decay_value || null,
+      _hasContext: row.has_context || false
+    }));
+  } catch (e) { console.error('[supabase] loadSystemEvents error:', e.message); return []; }
 }
-function saveSystemEvents(events) {
-  // Keep last 200 events max
-  if (events.length > 200) events = events.slice(-200);
-  fs.writeFileSync(EVENTS_FILE, JSON.stringify(events, null, 2), 'utf-8');
+
+async function saveSystemEvent(event) {
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase.from('system_events').insert({
+      project_id: event.projectId,
+      chat_id: event.chatId || '',
+      type: event.type,
+      drive_key: event.driveKey || null,
+      content: event.content || '',
+      push_sent: event.pushSent || false,
+      todo_id: event.todoId || null,
+      todo_title: event.todoTitle || null,
+      post_decay_value: event.postDecayValue || null,
+      has_context: event._hasContext || false,
+      created_at: event.timestamp || new Date().toISOString()
+    }).select('id').single();
+    return data || null;
+  } catch (e) { console.error('[supabase] saveSystemEvent error:', e.message); return null; }
+}
+
+async function markEventPushSent(eventId) {
+  if (!supabase || !eventId) return;
+  try {
+    await supabase.from('system_events').update({ push_sent: true }).eq('id', eventId);
+  } catch (e) { console.error('[supabase] markEventPushSent error:', e.message); }
 }
 
 // ==================== API ENDPOINTS ====================
@@ -1580,12 +1623,13 @@ app.get('/api/cron/check', async (req, res) => {
 app.post('/api/projects/sync-configs', async (req, res) => {
   const { projectId, config } = req.body || {};
   if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
-  const configs = await loadProjectConfigs();
   if (!config) {
-    // GET mode: return config for this project
-    res.json({ config: configs[projectId] || null });
+    // GET mode: return config for this project (bypass cache — always fresh)
+    const freshConfig = await loadProjectConfig(projectId);
+    res.json({ config: freshConfig || null });
   } else {
     // SET mode: DEEP MERGE — preserve existing fields not in the request
+    const configs = await loadProjectConfigs();
     const existing = configs[projectId] || {};
     configs[projectId] = {
       // Preserve all existing fields
@@ -1663,12 +1707,9 @@ app.post('/api/sync-messages', async (req, res) => {
   }
 });
 
-app.get('/api/system-events', (req, res) => {
+app.get('/api/system-events', async (req, res) => {
   const { projectId, since } = req.query;
-  let events = loadSystemEvents();
-  if (projectId) events = events.filter(e => e.projectId === projectId);
-  if (since) events = events.filter(e => e.timestamp > since);
-  // Mark returned events as delivered (they'll be cleaned up on next save)
+  const events = await loadSystemEvents(projectId, since);
   res.json({ events: events.slice(0, 20) });
 });
 
@@ -1805,10 +1846,8 @@ async function checkTodoWakeUps() {
     // Build wake-up message via LLM
     const wakeContent = await buildTodoWakeMessage(todo, cfg);
 
-    // Store system event
-    const events = loadSystemEvents();
-    events.push({
-      id: 'evt_' + Date.now().toString(36),
+    // Store system event in Supabase
+    await saveSystemEvent({
       projectId: todo.project_id,
       chatId: todo.chat_id || cfg._chatId || '',
       type: 'todo_wake',
@@ -1820,7 +1859,6 @@ async function checkTodoWakeUps() {
       pushSent: false,
       _hasContext: true
     });
-    saveSystemEvents(events);
 
     // Mark todo as triggered
     await supabase.from('project_todos').update({ triggered: true }).eq('id', todo.id);
@@ -2250,21 +2288,22 @@ async function checkProjectDesires(pid, cfg) {
     else if (/LITTER/i.test(content)) actionType = 'litter';
     else if (/DIARY/i.test(content)) actionType = 'diary';
 
-    // Store as system event for frontend polling
-    const events = loadSystemEvents();
+    // Compute post-decay value so frontend can sync desire state immediately
+    const postDecayValue = Math.floor(driveValue * 0.2);
+
+    // Store as system event in Supabase for frontend polling
     const chatId = cfg._chatId || '';
-    events.push({
-      id: 'evt_' + Date.now().toString(36),
+    const savedEvent = await saveSystemEvent({
       projectId: pid,
       chatId: chatId,
       type: actionType,
-      driveKey: driveKey,  // tells frontend which drive to decay locally
+      driveKey: driveKey,
+      postDecayValue: postDecayValue,  // frontend uses this to sync desire state
       content: content.replace(/^(MESSAGE|LITTER|DIARY):/i, '').trim(),
       timestamp: new Date().toISOString(),
       pushSent: false,
-      _hasContext: true    // shadow-message-aware, shares chat personality
+      _hasContext: true
     });
-    saveSystemEvents(events);
 
     // Send push notification
     if (pushSubscription) {
@@ -2278,10 +2317,10 @@ async function checkProjectDesires(pid, cfg) {
           requireInteraction: actionType === 'message' || actionType === 'todo',
           timestamp: Date.now()
         }));
-        // Mark push as sent
-        const evts = loadSystemEvents();
-        const evt = evts.find(e => e.id === events[events.length - 1].id);
-        if (evt) { evt.pushSent = true; saveSystemEvents(evts); }
+        // Mark push as sent in Supabase
+        if (savedEvent && savedEvent.id) {
+          await markEventPushSent(savedEvent.id);
+        }
       } catch (e) {
         console.error('[push] Desire notification failed:', e.message);
       }
