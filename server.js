@@ -542,6 +542,41 @@ async function loadProjectConfigs() {
   try { return JSON.parse(fs.readFileSync(CONFIGS_FILE, 'utf-8')); } catch { return {}; }
 }
 
+/**
+ * Load a single project's config directly from Supabase, bypassing the in-memory cache.
+ * Used for enabled-state checks where stale cache is unacceptable.
+ * @param {string} projectId
+ * @returns {object|null} the project config, or null if not found
+ */
+async function loadProjectConfig(projectId) {
+  if (!supabase || !projectId) return null;
+  try {
+    const { data, error } = await supabase
+      .from('project_configs')
+      .select('config')
+      .eq('project_id', projectId)
+      .single();
+    if (error || !data) return null;
+    return data.config || {};
+  } catch (e) {
+    console.error('[supabase] loadProjectConfig error:', e.message);
+    return null;
+  }
+}
+
+/**
+ * Check if a project's AI API is enabled.
+ * Bypasses all caches — queries Supabase directly each time.
+ * Defaults to enabled (true) when the enabled field is missing (backward compatibility).
+ * @param {string} projectId
+ * @returns {boolean}
+ */
+async function isProjectApiEnabled(projectId) {
+  const config = await loadProjectConfig(projectId);
+  // Default to enabled if config is missing or enabled field is absent
+  return !config || config.enabled !== false;
+}
+
 async function saveProjectConfigs(configs) {
   // Update cache
   _configsCache = configs;
@@ -678,6 +713,12 @@ app.post('/api/test-connection', async (req, res) => {
   const b = req.body || {};
   const { apiKey, endpoint, model: preferredModel } = b;
   if (!apiKey) return res.status(400).json({ error: 'Missing API key' });
+
+  // Check project-level API enabled status
+  const projectId = b.projectId;
+  if (projectId && !(await isProjectApiEnabled(projectId))) {
+    return res.status(403).json({ error: '该项目的 AI 功能已被禁用，请先开启后再尝试。' });
+  }
 
   // Resolve model to determine format + endpoint for the test call
   const testModel = preferredModel || 'deepseek-chat';
@@ -981,6 +1022,12 @@ app.post('/api/chat/stream', async (req, res) => {
       return res.status(400).json({ error: 'Missing messages' });
     }
 
+    // Check project-level API enabled status
+    const projectId = body.projectId;
+    if (projectId && !(await isProjectApiEnabled(projectId))) {
+      return res.status(403).json({ error: '该项目的 AI 功能已被禁用，请先开启后再尝试。' });
+    }
+
     // Resolve model → provider + format + endpoint
     const resolved = resolveModel(model, endpoint);
     const format = resolved.format;
@@ -1199,6 +1246,12 @@ app.post('/api/chat', async (req, res) => {
 
     if (!apiKey) {
       return res.status(400).json({ error: 'Missing API key — please configure your API key in Settings' });
+    }
+
+    // Check project-level API enabled status
+    const projectId = body.projectId;
+    if (projectId && !(await isProjectApiEnabled(projectId))) {
+      return res.status(403).json({ error: '该项目的 AI 功能已被禁用，请先开启后再尝试。' });
     }
 
     // Resolve model → provider + format + endpoint
@@ -1437,6 +1490,12 @@ app.post('/api/email/send', async (req, res) => {
   const { subject, messages, apiConfig } = req.body || {};
   if (!subject) return res.status(400).json({ error: '缺少邮件主题' });
 
+  // Check project-level API enabled status (email generation uses LLM via apiConfig)
+  const projectId = req.body.projectId;
+  if (projectId && !(await isProjectApiEnabled(projectId))) {
+    return res.status(403).json({ error: '该项目的 AI 功能已被禁用，无法发送 AI 生成的邮件。' });
+  }
+
   try {
     // Step 1: Generate email body via LLM
     let body = '';
@@ -1504,9 +1563,14 @@ app.get('/api/cron/check', async (req, res) => {
   const configs = await loadProjectConfigs();
   let triggered = 0;
   for (const [pid, cfg] of Object.entries(configs)) {
-    if (!cfg.enabled || !cfg.apiKey) continue;
+    // Re-load latest config to get current enabled state (bypass 15s cache)
+    const freshCfg = await loadProjectConfig(pid);
+    if (!freshCfg || freshCfg.enabled === false || !freshCfg.apiKey) {
+      console.log(`[cron/check] Project ${pid} is disabled or missing API key, skipping`);
+      continue;
+    }
     try {
-      await checkProjectDesires(pid, cfg);
+      await checkProjectDesires(pid, freshCfg);
       triggered++;
     } catch (e) { console.error(`[cron] Check error ${pid}:`, e.message); }
   }
@@ -1621,10 +1685,15 @@ cron.schedule('* * * * *', async () => {
   console.log('[cron] Checking proactive triggers...');
   const configs = await loadProjectConfigs();
   for (const [pid, cfg] of Object.entries(configs)) {
-    if (!cfg.enabled || !cfg.apiKey) continue;
+    // Re-load latest config to get current enabled state (bypass 15s cache)
+    const freshCfg = await loadProjectConfig(pid);
+    if (!freshCfg || freshCfg.enabled === false || !freshCfg.apiKey) {
+      console.log(`[cron] Project ${pid} is disabled or missing API key, skipping`);
+      continue;
+    }
     try {
-      await checkProjectTodos(pid, cfg);
-      await checkProjectDesires(pid, cfg);
+      await checkProjectTodos(pid, freshCfg);
+      await checkProjectDesires(pid, freshCfg);
     } catch (e) {
       console.error(`[cron] Error for project ${pid}:`, e.message);
     }
@@ -1710,7 +1779,12 @@ async function checkTodoWakeUps() {
 
   for (const todo of dueTodos) {
     const cfg = configs[todo.project_id];
-    if (!cfg || !cfg.enabled || !cfg.apiKey) continue;
+    // Re-load latest config to get current enabled state (bypass 15s cache)
+    const freshTodoCfg = await loadProjectConfig(todo.project_id);
+    if (!cfg || !freshTodoCfg || freshTodoCfg.enabled === false || !cfg.apiKey) {
+      console.log(`[todo-wake] Project ${todo.project_id} is disabled or missing API key, skipping`);
+      continue;
+    }
 
     // Per-project cooldown
     if (cfg._lastTodoWakeTime) {
@@ -1868,6 +1942,7 @@ ${contextBlock}
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model || 'deepseek-chat',
+        projectId: todo.project_id,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: shadowContent }
@@ -2160,6 +2235,7 @@ async function checkProjectDesires(pid, cfg) {
         apiKey: cfg.apiKey,
         endpoint: cfg.endpoint,
         model: cfg.model || 'deepseek-chat',
+        projectId: pid,
         messages: await buildShadowMessages(cfg, driveKey, driveValue, pid)
       })
     });

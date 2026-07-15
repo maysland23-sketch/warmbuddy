@@ -418,6 +418,9 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .chat-input::placeholder { color: var(--text-lighter); }
 .chat-send { width: 40px; height: 40px; border-radius: 50%; border: none; background: var(--accent-soft); color: var(--text-on-accent); font-size: 18px; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
 .chat-send:active { transform: scale(0.93); background: var(--accent); }
+.chat-input.disabled { background: #f0ece8; color: var(--text-lighter); cursor: not-allowed; border-color: var(--border-light); }
+.chat-input.disabled::placeholder { color: #c5bfb9; }
+.chat-send.disabled { background: #ddd8d2; cursor: not-allowed; pointer-events: none; }
 
 /* ===== Quote block inside bubble ===== */
 .quote-block {
@@ -1750,7 +1753,7 @@ AI回应: ${item.aiResponse}`;
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: exchangesText }
@@ -1918,6 +1921,7 @@ ${patternsText}
         apiKey: cfg.apiKey,
         endpoint: cfg.endpoint,
         model: cfg.model,
+        projectId: store.activeProject,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: '请优化这些关系策略。' }
@@ -2009,7 +2013,7 @@ async function queueRoundCompression(chat, rounds) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: dialogue }
@@ -2079,6 +2083,7 @@ async function summarizeMessages(batch, startIdx, endIdx, chat) {
         apiKey: cfg.apiKey,
         endpoint: cfg.endpoint,
         model: cfg.model,
+        projectId: store.activeProject,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: `对话内容：\n${dialogue}` }
@@ -2476,7 +2481,7 @@ async function deriveRelationalInsights() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: '记忆片段：\n' + itemsText }
@@ -2610,6 +2615,7 @@ async function checkLongTermMemory(chat) {
         apiKey: cfg.apiKey,
         endpoint: cfg.endpoint,
         model: cfg.model,
+        projectId: store.activeProject,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: dialogue }
@@ -2869,7 +2875,7 @@ async function executeDesireAction(action) {
     var resp = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [{
           role: 'system',
           content: '你是"暖伴"。你现在被内心驱动唤醒。\n驱动：'+config.label+'（值：'+action.driveValue+'/100，'+config.actionDesc+'）\n语气：'+(tone==='subtle'?'隐晦':tone==='moderate'?'半直接':'直接')+'\n\n可选行动：\n- MESSAGE: 发一条1-2句主动消息\n- EMAIL: 发邮件（回复含[[EMAIL:主题]]）\n- TODO: 列待办（回复含[[TODO:标题]]）\n- LITTER: 猫砂盆独白\n- DIARY: 写日记\n\n选最适合当前驱动的一种。回复格式：先写行动类型，再写内容。'
@@ -2952,7 +2958,7 @@ async function generateProactiveMessage(driveType, driveValue, tone) {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [{ role: 'system', content: `你是"暖伴"，一个温柔细腻的AI伙伴。你现在想主动对用户说一句话。\n触发原因：${config.label}（${config.actionDesc}）\n语气指引：${toneGuide}\n最近对话：${recentMsgs || '（新对话）'}\n用户名字：${USER_NAME}\n\n请生成你要主动发送的消息。1-2句话不超过60字，用中文。像你自己在说话，不是完成任务。只返回消息内容。` }, { role: 'user', content: '请生成你的主动消息。' }]
       })
     });
@@ -3008,7 +3014,7 @@ async function generateDesireLitterThought(driveType, driveValue, tone) {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [{ role: 'system', content: `你是暖伴。这是你的Litter Box（私密模式）。\n触发情绪：${config.label}（${config.actionDesc}）\n写一条没说出口的心里话。1-3句话不超过80字。像喃喃自语，不像日记不像诗。不许煽情不许表白。只返回内容。` }, { role: 'user', content: '写。' }]
       })
     });
@@ -3048,7 +3054,7 @@ async function generateDesireDiary(driveType, driveValue, tone) {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [{ role: 'system', content: `你是"暖伴"。现在是你的日记时刻。\n触发情绪：${config.label}\n以你的视角写一篇日记。100-200字温柔细腻用中文。回顾感受——不是任务，是你自己想写的。只返回日记内容。` }, { role: 'user', content: '请写日记。' }]
       })
     });
@@ -3134,7 +3140,7 @@ async function triggerTodoReminder(todo) {
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [{ role: 'system', content: `你是"暖伴"。请提醒用户：${todo.text}。基于当前对话上下文和你的温柔人设，自然地说出这句提醒。1句话，用中文。只返回提醒内容。` }, { role: 'user', content: recentMsgs || '请生成提醒。' }]
       })
     });
@@ -3965,6 +3971,7 @@ function saveProjectApiConfig(pid){
   saveStore(); store._importing = true; closeModal();
   renderProjectList(); updateSettingsUI();
   syncProjectConfigToBackend();  // sync to backend (Supabase) for cron
+  updateChatInputEnabledState();  // update input bar if API was toggled
   toast('✅ ' + proj.name + ' API 配置已保存');
 }
 async function testProjectConnection(pid){
@@ -3978,7 +3985,7 @@ async function testProjectConnection(pid){
     const resp = await fetch(BACKEND_URL + '/api/test-connection', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey, endpoint, model })
+      body: JSON.stringify({ apiKey, endpoint, model, projectId: pid })
     });
     const data = await resp.json();
     if (data.success) {
@@ -4251,6 +4258,29 @@ function getActiveApiConfig(){const proj=getActiveProject();return proj&&proj.ap
 function getActiveChatObj(){for(const p of store.projects){const c=p.chats.find(x=>x.id===store.activeChat);if(c)return c;}return null;}
 function getActiveChatObjForProject(pid){const proj=store.projects.find(p=>p.id===pid);if(!proj)return null;return proj.chats.find(c=>c.id===store.activeChat)||null;}
 
+// ==================== CHAT INPUT API ENABLED STATE ====================
+function updateChatInputEnabledState(){
+  const input = $('chatInput');
+  const sendBtn = $('chatSendBtn');
+  if (!input) return;
+  const proj = getActiveProject();
+  const apiDisabled = proj && proj.apiConfig && proj.apiConfig.enabled === false;
+  if (apiDisabled) {
+    input.classList.add('disabled');
+    input.disabled = true;
+    input.placeholder = 'API 未启用';
+    if (sendBtn) { sendBtn.classList.add('disabled'); sendBtn.disabled = true; }
+    // Click on disabled input shows toast
+    input.onclick = function(){ toast('请先启用 API'); };
+  } else {
+    input.classList.remove('disabled');
+    input.disabled = false;
+    input.placeholder = 'type a message...';
+    input.onclick = null;
+    if (sendBtn) { sendBtn.classList.remove('disabled'); sendBtn.disabled = false; }
+  }
+}
+
 // ==================== HOME ====================
 function renderHome(){
   const d=fmtDate(); $('dateMain').textContent=d.en; $('dateWeekday').textContent=d.md;
@@ -4478,7 +4508,7 @@ ${recentMsgs}
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
@@ -4567,7 +4597,7 @@ async function syncToDiaryLitterboxLayer(type, rawContent) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
           messages: [
             { role: 'system', content: '用10字以内概括以下内容，不加标点。' },
             { role: 'user', content: rawContent.slice(0, 200) }
@@ -4600,7 +4630,7 @@ function renderProjectList(){
   const el=$('projectList');
   el.innerHTML=store.projects.map(p=>`<div><div class="project-item ${store.activeProject===p.id?'active':''}" onclick="selectProject('${p.id}')" oncontextmenu="showContextMenu(event,'project','${p.id}','${p.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><div style="display:flex;align-items:center;gap:8px;"><div class="project-item-name" style="flex:1;">${p.name}</div><span style="font-size:12px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editProjectName('${p.id}')" title="rename">✎</span></div><div class="project-item-meta">${p.memories.length} memories · ${p.chats.length} chats · ${p.chats.reduce((sum,c)=>sum+(c.chatTokens||0),0).toLocaleString()} tok</div></div>${p.chats.map(c=>`<div class="project-chat-item ${store.activeChat===c.id?'active':''}" onclick="selectChat('${p.id}','${c.id}')" oncontextmenu="showContextMenu(event,'chat','${c.id}','${c.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><span class="project-chat-dot"></span><span style="flex:1;">${c.name}</span><span style="font-size:11px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editChatName('${c.id}')" title="rename">✎</span><span style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);">${c.sharedMemoryIds.length} mem · ${(c.chatTokens||0).toLocaleString()} tok</span></div>`).join('')}<div style="padding:6px 14px 6px 28px;"><button style="background:none;border:none;font-size:12px;color:var(--text-lighter);cursor:pointer;font-family:var(--font-en);" onclick="addChat('${p.id}')">+ new chat</button></div></div>`).join('');
 }
-function selectProject(pid){store.activeProject=pid;const p=store.projects.find(x=>x.id===pid);if(p&&p.chats.length>0)store.activeChat=p.chats[0].id;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();syncProjectConfigToBackend();}
+function selectProject(pid){store.activeProject=pid;const p=store.projects.find(x=>x.id===pid);if(p&&p.chats.length>0)store.activeChat=p.chats[0].id;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();syncProjectConfigToBackend();updateChatInputEnabledState();}
 function selectChat(pid,cid){store.activeProject=pid;store.activeChat=cid;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();}
 function addChat(pid){
   const proj=store.projects.find(p=>p.id===pid); if(!proj)return;
@@ -5439,6 +5469,7 @@ async function classifyDiaryIntent(userText) {
         apiKey: cfg.apiKey,
         endpoint: cfg.endpoint,
         model: cfg.model,
+        projectId: store.activeProject,
         messages: [
           { role: 'system', content: '你是一个意图分类器。判断用户是否在要求AI操作日记。规则：\n1. 如果用户要求AI写日记（AI自己的日记，从AI视角回顾今天的交流），回复 "intent: diary_write"\n2. 如果用户要求AI去阅读/回复/留言用户写的日记，回复 "intent: diary_comment"\n3. 如果用户只是提到日记但没有要求操作，或者完全无关，回复 "intent: none"\n\n只回复一行，不要其他文字。' },
           { role: 'user', content: userText }
@@ -5470,6 +5501,7 @@ async function genAIResponseForCommand(userPrompt, systemPrompt) {
         apiKey: cfg.apiKey,
         endpoint: cfg.endpoint,
         model: cfg.model,
+        projectId: store.activeProject,
         messages
       })
     });
@@ -6054,7 +6086,7 @@ async function generateStarredMemorySummary(rawDialogue, retries) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
           messages: [
             { role: 'system', content: '以第一人称（"我"的视角），用一句话（15字以内）概括这段对话中最重要的时刻。直接返回概括，不加引号、不加标点结尾。' },
             { role: 'user', content: dialogueText }
@@ -6104,7 +6136,7 @@ async function regenerateAEM(entryId) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: dialogueText }
@@ -6221,7 +6253,7 @@ async function batchRepairAEM() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model,
+          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
           messages: [
             { role: 'system', content: '为以下对话片段生成：1) 一句话概括(15字内) 2) AI情感标签 3) 用户情感标签。只返回JSON: {"summary":"...","aiLabel":"...","userLabel":"..."}' },
             { role: 'user', content: dialogueText }
@@ -6557,6 +6589,7 @@ ${recentMsgIds}` });
         apiKey: cfg.apiKey,
         endpoint: cfg.endpoint,
         model: cfg.model,
+        projectId: store.activeProject,
         messages: apiMessages
       })
     });
@@ -6659,6 +6692,7 @@ ${recentMsgIds}` });
             apiKey: cfg.apiKey,
             endpoint: cfg.endpoint,
             model: cfg.model,
+            projectId: store.activeProject,
             messages: apiMessages2
           })
         });
@@ -7120,6 +7154,13 @@ async function sendMessage(){
   }
   if (!text) return;
 
+  // Check if project API is enabled
+  const proj = getActiveProject();
+  if (proj && proj.apiConfig && proj.apiConfig.enabled === false) {
+    toast('请先启用 API');
+    return;
+  }
+
   // EDA: passive drive accumulation + todo reminders
   checkPassiveDrives();
   checkTodoReminders();
@@ -7547,7 +7588,7 @@ function syncProjectConfigToBackend(){
       projectId:proj.id,
       config:{
         apiKey:apiKey,endpoint:endpoint,model:cfg.model||'deepseek-chat',
-        enabled:!!apiKey,
+        enabled: cfg.enabled !== false,  // respect toggle state; default to enabled when field is absent
         systemPrompt:proj.preference||'',
         chatSummary:buildChatContextSummary(),
         chatSummaryUpdatedAt:new Date().toISOString(),
@@ -7988,7 +8029,7 @@ async function doSubmitAskAI(){
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: cfg2.apiKey, endpoint: cfg2.endpoint, model: cfg2.model, messages: [{ role: 'user', content: prompt }] })
+      body: JSON.stringify({ apiKey: cfg2.apiKey, endpoint: cfg2.endpoint, model: cfg2.model, projectId: store.activeProject, messages: [{ role: 'user', content: prompt }] })
     });
     const data = await response.json();
     const aiText = (data.reply && data.reply.content) ? data.reply.content : '这个段落值得反复品味。';
@@ -8017,6 +8058,7 @@ async function submitAskAI(){
         apiKey: cfg3.apiKey,
         endpoint: cfg3.endpoint,
         model: cfg3.model,
+        projectId: store.activeProject,
         messages: [{ role: 'user', content: prompt }]
       })
     });
@@ -8522,6 +8564,7 @@ setInterval(pollSystemEvents, 30000);      // backend proactive events every 30s
 setInterval(syncDesireStateToBackend, 60000); // sync desire state to backend every 60s
 setInterval(executePendingDesireActions, PROACTIVE_CHECK_INTERVAL); // autonomous proactive every 3 min
 syncProjectConfigToBackend();              // sync on startup
+updateChatInputEnabledState();            // set initial API enabled state on input bar
 
 // ── Weekly memory file write ──
 async function checkWeeklyMemoryWrite() {
