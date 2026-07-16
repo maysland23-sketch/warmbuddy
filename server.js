@@ -1645,12 +1645,13 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       ...(config.emailSentToday !== undefined ? { emailSentToday: config.emailSentToday } : {}),
       ...(config.emailSentDate !== undefined ? { emailSentDate: config.emailSentDate } : {}),
       // Preserve underscore-prefixed internal state (_desireState, _chatId)
-      // Note: _lastBackendGrowth, _lastTriggerTime, _lastTriggerDrive are backend-only
-      // and preserved naturally via ...existing (frontend never sends them).
-      ...(config._desireState !== undefined ? { _desireState: config._desireState } : {}),
+      // Deep-merge _desireState: frontend sends {drives, lastCheck}, backend owns
+      // _lastBackendGrowth and _lastHeartbeatLog — must not be wiped by frontend sync.
+      ...(config._desireState !== undefined ? { _desireState: { ...existing._desireState, ...config._desireState } } : {}),
       ...(config._chatId !== undefined ? { _chatId: config._chatId } : {}),
       // Chat context for proactive shadow messages
       ...(config.systemPrompt !== undefined ? { systemPrompt: config.systemPrompt } : {}),
+      ...(config.aiName !== undefined ? { aiName: config.aiName } : {}),
       ...(config.chatSummary !== undefined ? { chatSummary: config.chatSummary } : {}),
       ...(config.chatSummaryUpdatedAt !== undefined ? { chatSummaryUpdatedAt: config.chatSummaryUpdatedAt } : {}),
       // Timezone offset for user-local time in Cron-triggered messages (default UTC+8)
@@ -1903,11 +1904,13 @@ async function checkTodoWakeUps() {
 
     // Push notification
     if (pushSubscription) {
+      const aiName = (cfg && cfg.aiName) || '暖伴';
       try {
         await webpush.sendNotification(pushSubscription, JSON.stringify({
-          title: '⏰ ' + todo.title,
-          body: (wakeContent || '').slice(0, 120),
+          title: aiName,
+          body: (wakeContent || '⏰ ' + todo.title).slice(0, 120),
           tag: 'todo-' + todo.id,
+          data: { url: '/?project=' + todo.project_id + '&chat=' + (todo.chat_id || cfg._chatId || ''), projectId: todo.project_id, chatId: todo.chat_id || cfg._chatId || '', type: 'todo_wake' },
           requireInteraction: true,
           timestamp: Date.now()
         }));
@@ -2345,13 +2348,18 @@ async function checkProjectDesires(pid, cfg) {
 
     // Send push notification
     if (pushSubscription) {
-      const pushLabels = { message: '发来一条消息', email: '给你发了邮件', todo: '有了新的to-do', litter: '猫砂盆好像需要铲一铲', diary: '日记里偷偷写了点什么' };
+      // Body: show actual content for message/todo, hint for litter/diary/email (matching chat UI)
+      const cleanContent = content.replace(/^(MESSAGE|LITTER|DIARY):/i, '').trim();
+      const chatHints = { message: cleanContent, todo: cleanContent, todo_wake: cleanContent, litter: '🐾 猫砂盆好像需要铲一铲', diary: '📖 日记里偷偷写了点什么', email: '📧 邮件已发送' };
+      const pushBody = (chatHints[actionType] || cleanContent).slice(0, 120);
+      // Title: use project's AI name
+      const aiName = cfg.aiName || '暖伴';
       try {
         await webpush.sendNotification(pushSubscription, JSON.stringify({
-          title: '暖伴',
-          body: pushLabels[actionType] || '有新的动态',
+          title: aiName,
+          body: pushBody,
           tag: 'desire-' + driveKey,
-          data: { url: '/' },
+          data: { url: '/?project=' + pid + '&chat=' + (cfg._chatId || ''), projectId: pid, chatId: cfg._chatId || '', type: actionType },
           requireInteraction: actionType === 'message' || actionType === 'todo',
           timestamp: Date.now()
         }));

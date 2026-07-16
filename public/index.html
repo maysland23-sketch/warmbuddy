@@ -7262,6 +7262,7 @@ function syncProjectConfigToBackend(){
       config:{
         apiKey:apiKey,endpoint:endpoint,model:cfg.model||'deepseek-chat',
         enabled: enabledVal,  // respect toggle state; default to enabled when field is absent
+        aiName: getAIName(),  // for push notification title
         systemPrompt:proj.preference||'',
         chatSummary:buildChatContextSummary(),
         chatSummaryUpdatedAt:new Date().toISOString(),
@@ -7444,54 +7445,68 @@ function syncDesireStateToBackend(force){
 }
 
 function pollSystemEvents(){
-  var proj=getActiveProject(); if(!proj)return;
+  if(!store.projects.length)return;
   var since=store._lastEventPoll||'';
-  fetch(BACKEND_URL+'/api/system-events?projectId='+encodeURIComponent(proj.id)+'&since='+encodeURIComponent(since))
-    .then(function(r){return r.json()})
-    .then(function(data){
-      if(!data.events||!data.events.length)return;
-      store._lastEventPoll=new Date().toISOString();
-      var driveLabels = { resonance:'共鸣欲', exploration:'探索欲', possession:'占有欲', guardianship:'守护欲', intimacy:'亲近欲', confirmation:'确认欲', devotion:'献祭欲', todo:'待办提醒' };
-      for(var i=0;i<data.events.length;i++){
-        var evt=data.events[i];
-        // Format real event timestamp for display
-        var evtTime = toLocalDisplayTime(evt.timestamp);
-        var driveLabel = evt.driveKey ? (driveLabels[evt.driveKey] || evt.driveKey) : '';
-        var timeLabel = evtTime + (driveLabel ? ' · ' + driveLabel : '');
-        var chat=proj.chats.find(function(c){return c.id===evt.chatId;});
-        if(!chat) chat=proj.chats[proj.chats.length-1]; // fallback: last active window
-        if(!chat)continue;
-        var text=evt.type==='message'?evt.content:null;
-        if(evt.type==='message'&&text){
-          chat.messages.push({role:'ai',text:text,time:timeLabel,id:generateMsgId(),_proactive:true,_desireType:evt.driveKey});
-        }else if(evt.type==='email'){
-          chat.messages.push({role:'system',contentType:'email_notification',text:'📧 邮件已发送',time:timeLabel});
-        }else if(evt.type==='todo'){
-          chat.messages.push({role:'system',contentType:'todo_notification',text:'📋 有了新的 To-Do',time:timeLabel});
-        }else if(evt.type==='litter'){
-          chat.messages.push({role:'system',contentType:'litter_notification',text:'🐾 猫砂盆好像需要铲一铲',time:timeLabel});
-        }else if(evt.type==='diary'){
-          chat.messages.push({role:'system',contentType:'diary_notification',text:'📖 日记里偷偷写了点什么',time:timeLabel});
-        }else if(evt.type==='todo_wake'){
-          var wakeText=evt.content||'';
-          if(wakeText){
-            chat.messages.push({role:'ai',text:wakeText,time:timeLabel,id:generateMsgId(),_proactive:true,_todoWake:true,_desireType:'todo'});
-          }
-          chat.messages.push({role:'system',contentType:'todo_notification',text:'⏰ To-Do 被提醒了',time:timeLabel});
-          if(evt.todoId){
-            var todo=store.todos.find(function(t){return t.id===evt.todoId;});
-            if(todo){todo.triggered=true;}
-            syncTodosToBackend();
-          }
+  var activeProj=getActiveProject();
+  var activeChanged=false;
+  var pending=store.projects.length;
+  var driveLabels = { resonance:'共鸣欲', exploration:'探索欲', possession:'占有欲', guardianship:'守护欲', intimacy:'亲近欲', confirmation:'确认欲', devotion:'献祭欲', todo:'待办提醒' };
+
+  function processEvents(proj, events){
+    for(var i=0;i<events.length;i++){
+      var evt=events[i];
+      var evtTime = toLocalDisplayTime(evt.timestamp);
+      var driveLabel = evt.driveKey ? (driveLabels[evt.driveKey] || evt.driveKey) : '';
+      var timeLabel = evtTime + (driveLabel ? ' · ' + driveLabel : '');
+      var chat=proj.chats.find(function(c){return c.id===evt.chatId;});
+      if(!chat) chat=proj.chats[proj.chats.length-1];
+      if(!chat)continue;
+      if(evt.type==='message'&&evt.content){
+        chat.messages.push({role:'ai',text:evt.content,time:timeLabel,id:generateMsgId(),_proactive:true,_desireType:evt.driveKey});
+      }else if(evt.type==='email'){
+        chat.messages.push({role:'system',contentType:'email_notification',text:'📧 邮件已发送',time:timeLabel});
+      }else if(evt.type==='todo'){
+        chat.messages.push({role:'system',contentType:'todo_notification',text:'📋 有了新的 To-Do',time:timeLabel});
+      }else if(evt.type==='litter'){
+        chat.messages.push({role:'system',contentType:'litter_notification',text:'🐾 猫砂盆好像需要铲一铲',time:timeLabel});
+      }else if(evt.type==='diary'){
+        chat.messages.push({role:'system',contentType:'diary_notification',text:'📖 日记里偷偷写了点什么',time:timeLabel});
+      }else if(evt.type==='todo_wake'){
+        var wakeText=evt.content||'';
+        if(wakeText){
+          chat.messages.push({role:'ai',text:wakeText,time:timeLabel,id:generateMsgId(),_proactive:true,_todoWake:true,_desireType:'todo'});
         }
-        // Sync desire state using backend's exact post-decay value (no local calculation)
-        if (evt.driveKey && evt.postDecayValue !== undefined && evt.postDecayValue !== null && proj.desireSystem && proj.desireSystem.drives) {
-          proj.desireSystem.drives[evt.driveKey] = evt.postDecayValue;
-          console.log('[poll-events] Desire synced from backend:', evt.driveKey, '→', evt.postDecayValue);
+        chat.messages.push({role:'system',contentType:'todo_notification',text:'⏰ To-Do 被提醒了',time:timeLabel});
+        if(evt.todoId){
+          var todo=store.todos.find(function(t){return t.id===evt.todoId;});
+          if(todo){todo.triggered=true;}
+          syncTodosToBackend();
         }
       }
-      saveStore();renderChatMessages();
-    }).catch(function(){});
+      if (evt.driveKey && evt.postDecayValue !== undefined && evt.postDecayValue !== null && proj.desireSystem && proj.desireSystem.drives) {
+        proj.desireSystem.drives[evt.driveKey] = evt.postDecayValue;
+      }
+      if(proj===activeProj) activeChanged=true;
+    }
+  }
+
+  for(var i=0;i<store.projects.length;i++){
+    (function(proj){
+      fetch(BACKEND_URL+'/api/system-events?projectId='+encodeURIComponent(proj.id)+'&since='+encodeURIComponent(since))
+        .then(function(r){return r.json()})
+        .then(function(data){
+          if(data.events&&data.events.length) processEvents(proj, data.events);
+        }).catch(function(){})
+        .finally(function(){
+          pending--;
+          if(pending===0){
+            store._lastEventPoll=new Date().toISOString();
+            saveStore();
+            if(activeChanged) renderChatMessages();
+          }
+        });
+    })(store.projects[i]);
+  }
 }
 
 function handleFileImport(event){
@@ -8280,6 +8295,31 @@ async function init(){
   processPendingCoreMemories();
   rebuildBM25Index();
   registerServiceWorker();
+  // Listen for notification clicks from service worker (when app is already open)
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', function(event) {
+      if (event.data && event.data.type === 'NOTIFICATION_CLICK') {
+        var d = event.data.data || {};
+        if (d.projectId) {
+          selectProject(d.projectId);
+          if (d.chatId) selectChat(d.projectId, d.chatId);
+        }
+      }
+    });
+  }
+  // Handle notification click via URL params (when app was closed, SW opens new window)
+  var urlParams = new URLSearchParams(window.location.search);
+  var notifProject = urlParams.get('project');
+  var notifChat = urlParams.get('chat');
+  if (notifProject) {
+    // Delay to ensure renderAll has completed
+    setTimeout(function() {
+      if (store.projects.find(function(p){return p.id===notifProject;})) {
+        selectProject(notifProject);
+        if (notifChat) selectChat(notifProject, notifChat);
+      }
+    }, 500);
+  }
   // Phase 2: sync project memories on startup
   if (store.activeProject) syncProjectMemories(store.activeProject);
   // Phase 2: weekly memory file write check
