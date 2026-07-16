@@ -3897,7 +3897,7 @@ async function doWeatherFetch(lat, lon) {
 // ==================== PROJECT HELPERS ====================
 function getActiveProject(){return store.projects.find(p=>p.id===store.activeProject)||null;}
 function getProjectById(pid){return store.projects.find(p=>p.id===pid)||null;}
-function getActiveApiConfig(){const proj=getActiveProject();return proj&&proj.apiConfig?proj.apiConfig:{apiKey:store.apiKey||'',endpoint:store.apiEndpoint||'https://api.deepseek.com/v1/chat/completions',model:store.aiSettings&&store.aiSettings.model||'deepseek-chat',enabled:false};}
+function getActiveApiConfig(){const proj=getActiveProject();return proj&&proj.apiConfig?proj.apiConfig:{apiKey:store.apiKey||'',endpoint:store.apiEndpoint||'https://api.deepseek.com/v1/chat/completions',model:store.aiSettings&&store.aiSettings.model||'deepseek-chat',enabled:true};}
 function getActiveChatObj(){for(const p of store.projects){const c=p.chats.find(x=>x.id===store.activeChat);if(c)return c;}return null;}
 function getActiveChatObjForProject(pid){const proj=store.projects.find(p=>p.id===pid);if(!proj)return null;return proj.chats.find(c=>c.id===store.activeChat)||null;}
 
@@ -4273,7 +4273,7 @@ function renderProjectList(){
   const el=$('projectList');
   el.innerHTML=store.projects.map(p=>`<div><div class="project-item ${store.activeProject===p.id?'active':''}" onclick="selectProject('${p.id}')" oncontextmenu="showContextMenu(event,'project','${p.id}','${p.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><div style="display:flex;align-items:center;gap:8px;"><div class="project-item-name" style="flex:1;">${p.name}</div><span style="font-size:12px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editProjectName('${p.id}')" title="rename">✎</span></div><div class="project-item-meta">${p.memories.length} memories · ${p.chats.length} chats · ${p.chats.reduce((sum,c)=>sum+(c.chatTokens||0),0).toLocaleString()} tok</div></div>${p.chats.map(c=>`<div class="project-chat-item ${store.activeChat===c.id?'active':''}" onclick="selectChat('${p.id}','${c.id}')" oncontextmenu="showContextMenu(event,'chat','${c.id}','${c.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><span class="project-chat-dot"></span><span style="flex:1;">${c.name}</span><span style="font-size:11px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editChatName('${c.id}')" title="rename">✎</span><span style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);">${c.sharedMemoryIds.length} mem · ${(c.chatTokens||0).toLocaleString()} tok</span></div>`).join('')}<div style="padding:6px 14px 6px 28px;"><button style="background:none;border:none;font-size:12px;color:var(--text-lighter);cursor:pointer;font-family:var(--font-en);" onclick="addChat('${p.id}')">+ new chat</button></div></div>`).join('');
 }
-function selectProject(pid){store.activeProject=pid;const p=store.projects.find(x=>x.id===pid);if(p&&p.chats.length>0)store.activeChat=p.chats[0].id;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();syncProjectConfigToBackend();updateChatInputEnabledState();}
+function selectProject(pid){store.activeProject=pid;const p=store.projects.find(x=>x.id===pid);if(p&&p.chats.length>0)store.activeChat=p.chats[0].id;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();updateChatInputEnabledState();}
 function selectChat(pid,cid){store.activeProject=pid;store.activeChat=cid;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();}
 function addChat(pid){
   const proj=store.projects.find(p=>p.id===pid); if(!proj)return;
@@ -4329,7 +4329,7 @@ function addProject(){
 }
 function saveProject(){
   const name=$('newProjectInput').value.trim(); if(!name){toast('Please enter a name');return;}
-  const pid='p'+gid(''); store.projects.push({id:pid,name,preference:'',memories:[],chats:[]}); store.activeProject=pid;
+  const pid='p'+gid(''); store.projects.push({id:pid,name,preference:'',apiConfig:{apiKey:store.apiKey||'',endpoint:store.apiEndpoint||'https://api.deepseek.com/v1/chat/completions',model:(store.aiSettings&&store.aiSettings.model)||'deepseek-chat',enabled:true},memories:[],chats:[]}); store.activeProject=pid;
   store._importing = true; closeModal(); renderProjectList(); toast('Project created');
 }
 
@@ -7315,6 +7315,26 @@ function scheduleMessageSync() {
   _syncMessagesTimer = setTimeout(syncMessagesToBackend, 2000);
 }
 
+// ── Pull authoritative enabled state from backend for ALL projects ──
+async function pullAllProjectEnabledStates() {
+  try {
+    const resp = await fetch(BACKEND_URL + '/api/projects/configs');
+    const data = await resp.json();
+    if (data.configs) {
+      for (const proj of store.projects) {
+        const backendCfg = data.configs[proj.id];
+        if (backendCfg) {
+          if (!proj.apiConfig) proj.apiConfig = {};
+          proj.apiConfig.enabled = backendCfg.enabled;
+        }
+      }
+      console.log('[pull] Project enabled states synced from backend:', JSON.stringify(data.configs));
+    }
+  } catch (e) {
+    console.warn('[pull] Failed to pull project configs:', e.message);
+  }
+}
+
 // ── Startup reconcile: pull latest desire state + system events from backend ──
 async function reconcileFromBackend() {
   const proj = getActiveProject();
@@ -7327,6 +7347,11 @@ async function reconcileFromBackend() {
       body: JSON.stringify({ projectId: proj.id })
     });
     const data = await resp.json();
+    // Also apply enabled state from backend (authoritative source)
+    if (data.config && data.config.enabled !== undefined) {
+      if (!proj.apiConfig) proj.apiConfig = {};
+      proj.apiConfig.enabled = data.config.enabled;
+    }
     if (data.config && data.config._desireState) {
       const backendDS = data.config._desireState;
       // Initialize desire system if needed
@@ -8192,6 +8217,7 @@ async function init(){
   loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
   updateSettingsUI();
   renderAll();
+  await pullAllProjectEnabledStates();  // pull authoritative enabled state from backend before UI check
   updateChatInputEnabledState();  // must be after renderAll + loadStore; inside init() so store is loaded
   syncProjectConfigToBackend();   // push latest config to backend on startup
   // Pull latest desire state + system events from backend (Cron may have triggered while app was closed)
@@ -8249,7 +8275,6 @@ setInterval(saveStore, 2000);
 setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
 setInterval(pollSystemEvents, 30000);      // backend proactive events every 30s
 setInterval(syncDesireStateToBackend, 60000); // sync desire state to backend every 60s
-syncProjectConfigToBackend();              // sync on startup
 
 // ── Weekly memory file write ──
 async function checkWeeklyMemoryWrite() {

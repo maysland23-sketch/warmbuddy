@@ -1628,10 +1628,10 @@ app.post('/api/projects/sync-configs', async (req, res) => {
     const freshConfig = await loadProjectConfig(projectId);
     res.json({ config: freshConfig || null });
   } else {
-    // SET mode: DEEP MERGE — preserve existing fields not in the request
-    const configs = await loadProjectConfigs();
-    const existing = configs[projectId] || {};
-    configs[projectId] = {
+    // SET mode: single-row upsert (not read-all→save-all — prevents cross-project corruption)
+    const freshExisting = await loadProjectConfig(projectId);
+    const existing = freshExisting || {};
+    const merged = {
       // Preserve all existing fields
       ...existing,
       // Override only the fields present in the request (non-undefined)
@@ -1659,9 +1659,47 @@ app.post('/api/projects/sync-configs', async (req, res) => {
     // Diagnostic log: confirm what's being synced
     const ds = config._desireState;
     const desireInfo = ds ? 'confirmation=' + ((ds.drives && ds.drives.confirmation) || 0) : 'no-desire';
-    console.log(`[sync] ${projectId}: apiKey=${!!config.apiKey} endpoint=${!!config.endpoint} ${desireInfo}`);
-    await saveProjectConfigs(configs);
+    console.log(`[sync] ${projectId}: apiKey=${!!config.apiKey} endpoint=${!!config.endpoint} enabled=${merged.enabled} ${desireInfo}`);
+
+    // Single-row upsert — only touches this project, no cross-contamination
+    if (supabase) {
+      try {
+        await supabase.from('project_configs').upsert({
+          project_id: projectId,
+          config: merged,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'project_id' });
+        // Update in-memory cache for this single project
+        if (_configsCache) { _configsCache[projectId] = merged; _configsCacheTime = Date.now(); }
+      } catch (e) {
+        console.error('[sync] Supabase upsert error:', e.message);
+        _configsCacheTime = 0; // invalidate cache so next read is fresh
+      }
+    } else {
+      // File-based fallback
+      const configs = await loadProjectConfigs();
+      configs[projectId] = merged;
+      await saveProjectConfigs(configs);
+    }
     res.json({ ok: true });
+  }
+});
+
+// ── Batch read: return configs for ALL projects (used by frontend on startup) ──
+app.get('/api/projects/configs', async (req, res) => {
+  try {
+    const configs = await loadProjectConfigs();
+    const result = {};
+    for (const [pid, cfg] of Object.entries(configs)) {
+      result[pid] = {
+        enabled: cfg.enabled !== false,
+        hasApiKey: !!cfg.apiKey
+      };
+    }
+    res.json({ configs: result });
+  } catch (e) {
+    console.error('[api] GET /api/projects/configs error:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
