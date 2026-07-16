@@ -1481,6 +1481,25 @@ function migrateStore() {
     }
   }
 
+  // v2.4: migrate aiSettings + emailEnabled to per-chat, model to per-project
+  for (const proj of store.projects) {
+    for (const chat of proj.chats) {
+      if (!chat.aiSettings) {
+        chat.aiSettings = {
+          autoDateTime: (store.aiSettings && store.aiSettings.autoDateTime !== undefined) ? store.aiSettings.autoDateTime : true,
+          autoWeather: (store.aiSettings && store.aiSettings.autoWeather !== undefined) ? store.aiSettings.autoWeather : false,
+          aiVoice: (store.aiSettings && store.aiSettings.aiVoice !== undefined) ? store.aiSettings.aiVoice : false,
+          webSearch: (store.aiSettings && store.aiSettings.webSearch !== undefined) ? store.aiSettings.webSearch : false
+        };
+      }
+      if (chat.emailEnabled === undefined) chat.emailEnabled = false;
+    }
+    // Migrate model from global aiSettings to per-project apiConfig
+    if (proj.apiConfig && !proj.apiConfig.model) {
+      proj.apiConfig.model = (store.aiSettings && store.aiSettings.model) || 'deepseek-chat';
+    }
+  }
+
   // ============ Extend project memories with fields ============
   for (const proj of store.projects) {
     for (const mem of proj.memories) {
@@ -3521,11 +3540,12 @@ function selectPreset(presetId) {
   store.selectedPreset = presetId;
   store.apiEndpoint = preset.endpoint;
   $('apiEndpointInput').value = preset.endpoint;
-  // Auto-select first model from this preset
+  // Auto-select first model from this preset for active project
   if (preset.models && preset.models.length > 0) {
-    const currentInPreset = preset.models.includes(store.aiSettings.model);
-    if (!currentInPreset) {
-      store.aiSettings.model = preset.models[0];
+    const proj=getActiveProject();
+    const currentModel = (proj&&proj.apiConfig&&proj.apiConfig.model) || 'deepseek-chat';
+    if (!preset.models.includes(currentModel)) {
+      if(proj){if(!proj.apiConfig)proj.apiConfig={};proj.apiConfig.model=preset.models[0];}
       $('modelVal').textContent = preset.models[0];
     }
   }
@@ -3605,17 +3625,16 @@ function showProjectApiModal(pid){
 }
 function saveProjectApiConfig(pid){
   const proj = getProjectById(pid);
-  if (!proj) { console.warn('[api-config] Save failed: project not found:', pid); return; }
+  if (!proj) return;
   if (!proj.apiConfig) proj.apiConfig = { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true };
   proj.apiConfig.apiKey = document.getElementById('pjApiKey')?.value || '';
   proj.apiConfig.endpoint = document.getElementById('pjApiEndpoint')?.value || 'https://api.deepseek.com/v1/chat/completions';
   proj.apiConfig.model = document.getElementById('pjApiModel')?.value || 'deepseek-chat';
   proj.apiConfig.enabled = document.getElementById('pjApiEnabled')?.classList.contains('on') !== false;
-  console.log('[api-config] SAVED project:', pid, proj.name, 'enabled:', proj.apiConfig.enabled, 'apiConfig keys:', Object.keys(proj.apiConfig));
   saveStore(); store._importing = true; closeModal();
   renderProjectList(); updateSettingsUI();
-  syncProjectConfigToBackend();  // sync to backend (Supabase) for cron
-  updateChatInputEnabledState();  // update input bar if API was toggled
+  syncProjectConfigToBackend();
+  updateChatInputEnabledState();
   toast('✅ ' + proj.name + ' API 配置已保存');
 }
 async function testProjectConnection(pid){
@@ -3645,7 +3664,8 @@ async function testProjectConnection(pid){
 async function testConnection() {
   const apiKey = $('apiKeyInput').value.trim();
   const endpoint = $('apiEndpointInput').value.trim();
-  const model = store.aiSettings.model;
+  const proj=getActiveProject();
+  const model = (proj&&proj.apiConfig&&proj.apiConfig.model) || (store.aiSettings&&store.aiSettings.model) || 'deepseek-chat';
 
   if (!apiKey) { toast('Please enter an API key first'); return; }
 
@@ -3671,10 +3691,12 @@ async function testConnection() {
 
     if (data.success && data.models && data.models.length > 0) {
       store.availableModels = data.models;
-      // Auto-select first model if current not in list
-      const currentExists = data.models.find(m => m.id === store.aiSettings.model);
+      // Auto-select first model if current not in list (per-project)
+      const proj=getActiveProject();
+      const currentModel = (proj&&proj.apiConfig&&proj.apiConfig.model) || 'deepseek-chat';
+      const currentExists = data.models.find(m => m.id === currentModel);
       if (!currentExists && data.models.length > 0) {
-        store.aiSettings.model = data.models[0].id;
+        if(proj){if(!proj.apiConfig)proj.apiConfig={};proj.apiConfig.model=data.models[0].id;}
       }
     }
 
@@ -3739,16 +3761,19 @@ function showModelModal(){
       </div>`;
   }
 
+  const proj=getActiveProject();
+  const currentModel = (proj&&proj.apiConfig&&proj.apiConfig.model) || 'deepseek-chat';
+
   for (const [provider, providerModels] of Object.entries(groups)) {
     bodyHtml += `
       <div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);margin:12px 0 6px;letter-spacing:0.04em;padding-left:2px;">${PROVIDER_NAMES[provider] || provider.toUpperCase()}</div>`;
     for (const m of providerModels) {
       const formatLabel = m.format ? ` · ${FORMAT_NAMES[m.format] || m.format}` : '';
       bodyHtml += `
-        <div class="model-select-item ${m.id===store.aiSettings.model?'selected':''}" onclick="store.aiSettings.model='${m.id}';$('modelVal').textContent='${m.label||m.id}';store._importing = true; closeModal();toast('模型: ${m.label||m.id}')">
+        <div class="model-select-item ${m.id===currentModel?'selected':''}" onclick="setActiveModel('${m.id}');closeModal();toast('模型: ${m.label||m.id}')">
           <span class="model-select-name">${m.label||m.id}</span>
           <span class="model-select-id">${m.id}${formatLabel}</span>
-          ${m.id===store.aiSettings.model?'<span style="font-size:12px;color:var(--accent);">✓</span>':''}
+          ${m.id===currentModel?'<span style="font-size:12px;color:var(--accent);">✓</span>':''}
         </div>`;
     }
   }
@@ -3760,30 +3785,32 @@ function showModelModal(){
 
 // ==================== SETTINGS ====================
 function updateSettingsUI(){
-  $('toggleDateTime').classList.toggle('on',store.aiSettings.autoDateTime);
-  $('toggleWeather').classList.toggle('on',store.aiSettings.autoWeather);
-  $('toggleVoice').classList.toggle('on',store.aiSettings.aiVoice);
-  $('toggleSearch').classList.toggle('on',store.aiSettings.webSearch);
-  // Show model label if available, otherwise ID
-  const modelEntry = store.availableModels.find(m => m.id === store.aiSettings.model);
-  $('modelVal').textContent = modelEntry ? (modelEntry.label || modelEntry.id) : store.aiSettings.model;
+  const ais = getActiveChatAiSettings();
+  $('toggleDateTime').classList.toggle('on', ais.autoDateTime);
+  $('toggleWeather').classList.toggle('on', ais.autoWeather);
+  $('toggleVoice').classList.toggle('on', ais.aiVoice);
+  $('toggleSearch').classList.toggle('on', ais.webSearch);
+  // Show model from active project's apiConfig
+  const proj=getActiveProject();
+  const currentModel = (proj&&proj.apiConfig&&proj.apiConfig.model) || 'deepseek-chat';
+  const modelEntry = store.availableModels.find(m => m.id === currentModel);
+  $('modelVal').textContent = modelEntry ? (modelEntry.label || modelEntry.id) : currentModel;
   // Show provider label for endpoint
-const preset = store.providerPresets.find(p => p.id === store.selectedPreset);
+  const preset = store.providerPresets.find(p => p.id === store.selectedPreset);
   const ac = getActiveApiConfig(); $('apiEndpointVal').textContent = ac.model || 'not set';
-  const proj=getActiveProject(); const pref=proj?proj.preference||'':'';
+  const pref=proj?proj.preference||'':'';
   $('prefVal').textContent=pref?pref.slice(0,20)+(pref.length>20?'…':''):'edit';
   $('aiNameVal').textContent = getAIName();
   renderThemePicker();
   updateEmailSettingsUI();
 }
 function toggleAiSetting(k){
-  store.aiSettings[k]=!store.aiSettings[k]; updateSettingsUI();
+  const chat=getActiveChatObj(); if(!chat)return;
+  if(!chat.aiSettings)chat.aiSettings={autoDateTime:true,autoWeather:false,aiVoice:false,webSearch:false};
+  chat.aiSettings[k]=!chat.aiSettings[k]; updateSettingsUI();
   const lb={autoDateTime:'自动时间日期',autoWeather:'天气信息',aiVoice:'AI 语音',webSearch:'联网搜索'};
-  toast(`${lb[k]}: ${store.aiSettings[k]?'ON':'OFF'}`);
-  // Trigger weather fetch when toggled ON
-  if (k === 'autoWeather' && store.aiSettings[k]) {
-    fetchWeather();
-  }
+  toast(`${lb[k]}: ${chat.aiSettings[k]?'ON':'OFF'}`);
+  if (k === 'autoWeather' && chat.aiSettings[k]) { fetchWeather(); }
 }
 // ==================== THEME SYSTEM ====================
 const THEMES = {
@@ -3857,7 +3884,7 @@ function renderThemePicker() {
 
 // ==================== WEATHER FETCH (Phase 3) ====================
 async function fetchWeather() {
-  if (!store.aiSettings.autoWeather) return;
+  if (!getActiveChatAiSettings().autoWeather) return;
   let loc = null;
   try { loc = await localforage.getItem('userLocation'); } catch {}
 
@@ -3901,6 +3928,9 @@ function getProjectById(pid){return store.projects.find(p=>p.id===pid)||null;}
 function getActiveApiConfig(){const proj=getActiveProject();return proj&&proj.apiConfig?proj.apiConfig:{apiKey:store.apiKey||'',endpoint:store.apiEndpoint||'https://api.deepseek.com/v1/chat/completions',model:store.aiSettings&&store.aiSettings.model||'deepseek-chat',enabled:true};}
 function getActiveChatObj(){for(const p of store.projects){const c=p.chats.find(x=>x.id===store.activeChat);if(c)return c;}return null;}
 function getActiveChatObjForProject(pid){const proj=store.projects.find(p=>p.id===pid);if(!proj)return null;return proj.chats.find(c=>c.id===store.activeChat)||null;}
+function getActiveChatAiSettings(){const chat=getActiveChatObj();if(chat&&chat.aiSettings)return chat.aiSettings;return{autoDateTime:store.aiSettings&&store.aiSettings.autoDateTime!==undefined?store.aiSettings.autoDateTime:true,autoWeather:store.aiSettings&&store.aiSettings.autoWeather!==undefined?store.aiSettings.autoWeather:false,aiVoice:store.aiSettings&&store.aiSettings.aiVoice!==undefined?store.aiSettings.aiVoice:false,webSearch:store.aiSettings&&store.aiSettings.webSearch!==undefined?store.aiSettings.webSearch:false};}
+function setActiveModel(modelId){const proj=getActiveProject();if(!proj)return;if(!proj.apiConfig)proj.apiConfig={};proj.apiConfig.model=modelId;saveStore();store._importing=true;updateSettingsUI();}
+function newChatDefaults(){const ais=getActiveChatAiSettings();return{aiSettings:{autoDateTime:ais.autoDateTime,autoWeather:ais.autoWeather,aiVoice:ais.aiVoice,webSearch:ais.webSearch},emailEnabled:false};}
 
 // ==================== CHAT INPUT API ENABLED STATE ====================
 function updateChatInputEnabledState(){
@@ -3909,7 +3939,6 @@ function updateChatInputEnabledState(){
   if (!input) return;
   const proj = getActiveProject();
   const apiDisabled = proj && proj.apiConfig && proj.apiConfig.enabled === false;
-  console.log('[api-ui] updateChatInputEnabledState: project=', proj?.id, proj?.name, 'hasApiConfig=', !!proj?.apiConfig, 'enabled=', proj?.apiConfig?.enabled, 'apiDisabled=', apiDisabled);
   if (apiDisabled) {
     input.classList.add('disabled');
     input.disabled = true;
@@ -4275,8 +4304,8 @@ function renderProjectList(){
   const el=$('projectList');
   el.innerHTML=store.projects.map(p=>`<div><div class="project-item ${store.activeProject===p.id?'active':''}" onclick="selectProject('${p.id}')" oncontextmenu="showContextMenu(event,'project','${p.id}','${p.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><div style="display:flex;align-items:center;gap:8px;"><div class="project-item-name" style="flex:1;">${p.name}</div><span style="font-size:12px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editProjectName('${p.id}')" title="rename">✎</span></div><div class="project-item-meta">${p.memories.length} memories · ${p.chats.length} chats · ${p.chats.reduce((sum,c)=>sum+(c.chatTokens||0),0).toLocaleString()} tok</div></div>${p.chats.map(c=>`<div class="project-chat-item ${store.activeChat===c.id?'active':''}" onclick="selectChat('${p.id}','${c.id}')" oncontextmenu="showContextMenu(event,'chat','${c.id}','${c.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><span class="project-chat-dot"></span><span style="flex:1;">${c.name}</span><span style="font-size:11px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editChatName('${c.id}')" title="rename">✎</span><span style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);">${c.sharedMemoryIds.length} mem · ${(c.chatTokens||0).toLocaleString()} tok</span></div>`).join('')}<div style="padding:6px 14px 6px 28px;"><button style="background:none;border:none;font-size:12px;color:var(--text-lighter);cursor:pointer;font-family:var(--font-en);" onclick="addChat('${p.id}')">+ new chat</button></div></div>`).join('');
 }
-function selectProject(pid){store.activeProject=pid;const p=store.projects.find(x=>x.id===pid);console.log('[selectProject] Switching to:', pid, p?.name, 'apiConfig.enabled=', p?.apiConfig?.enabled);if(p&&p.chats.length>0)store.activeChat=p.chats[0].id;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();updateChatInputEnabledState();}
-function selectChat(pid,cid){store.activeProject=pid;store.activeChat=cid;console.log('[selectChat] Switching to project:', pid, 'chat:', cid);renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();updateChatInputEnabledState();}
+function selectProject(pid){store.activeProject=pid;const p=store.projects.find(x=>x.id===pid);if(p&&p.chats.length>0)store.activeChat=p.chats[0].id;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();updateChatInputEnabledState();}
+function selectChat(pid,cid){store.activeProject=pid;store.activeChat=cid;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();updateChatInputEnabledState();}
 function addChat(pid){
   const proj=store.projects.find(p=>p.id===pid); if(!proj)return;
   const mems=[...proj.memories].sort((a,b)=>{if(a.starred&&!b.starred)return -1;if(!a.starred&&b.starred)return 1;return b.date.localeCompare(a.date);});
@@ -4309,7 +4338,7 @@ function saveChatWithMemories(){
   }
 
   proj.chats.push({
-    id:cid, name,
+    id:cid, name, ...newChatDefaults(),
     sharedMemoryIds: sids, weeklyExports: [], artifacts: [],
     messages: inheritedMsgs.length > 0
       ? [{ role:'system', text:'[继续自上一个窗口]', time:nowTime(), _isHandoffNote:true, id:'msg_'+Date.now().toString(36)+'_h' }, ...inheritedMsgs]
@@ -4634,13 +4663,14 @@ function buildDynamicContextBlock() {
   const hasRecall = !!(chat && chat._pendingRetrievalBlock);
 
   // ═══ Always-on blocks (every call) ═══
+  const ais = getActiveChatAiSettings();
 
-  if (store.aiSettings.autoDateTime) {
+  if (ais.autoDateTime) {
     const now = new Date();
     parts.push(`【当前时间】${today.md} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`);
   }
 
-  if (store.aiSettings.autoWeather) {
+  if (ais.autoWeather) {
     const w = store.weather;
     if (w && w.text) {
       const isStale = !w.updated || (Date.now() - w.updated) > 3600000;
@@ -4648,12 +4678,12 @@ function buildDynamicContextBlock() {
     }
   }
 
-  if (store.aiSettings.webSearch) {
+  if (ais.webSearch) {
     parts.push('【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。');
   }
 
-  // Email capability (only when configured)
-  if (store._emailConfigured) {
+  // Email capability (only when configured for this window)
+  if (chat && chat.emailEnabled) {
     parts.push('【邮件发送】当用户要求发送邮件时，使用格式 [[EMAIL:主题]] 标记。系统会自动撰写并发送邮件。');
   }
 
@@ -5941,7 +5971,7 @@ function playTTS(idx){
   toast('🔊 Playing: '+msg.slice(0,30)+'…');
   // ElevenLabs TTS simulation
   console.log('[TTS] ElevenLabs TTS called for:', msg);
-  if(store.aiSettings.aiVoice){
+  if(getActiveChatAiSettings().aiVoice){
     console.log('[TTS] Voice mode enabled — would call ElevenLabs API');
   }
 }
@@ -6292,7 +6322,7 @@ ${recentMsgIds}` });
 
   // ── Web Search: two-pass mechanism ──
   const searchMarker = fullResponse.match(/\[\[SEARCH:(.+?)\]\]/);
-  if (searchMarker && store.aiSettings.webSearch) {
+  if (searchMarker && getActiveChatAiSettings().webSearch) {
     const searchQuery = searchMarker[1].trim();
     if (searchQuery) {
       fullResponse = fullResponse.replace(/\[\[SEARCH:.+?\]\]/, '').trim();
@@ -6650,7 +6680,7 @@ async function sendAllDraftBubbles() {
     if (!p) { const pid = 'p' + gid(''); store.projects.push({ id: pid, name: 'default', preference: '', apiConfig: { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true }, memories: [], chats: [] }); store.activeProject = pid; p = getActiveProject(); }
     const cid = 'c' + gid('');
     p.chats.push({
-      id: cid, name: (draftBubbles[0]?.text || '').slice(0, 20),
+      id: cid, name: (draftBubbles[0]?.text || '').slice(0, 20), ...newChatDefaults(),
       sharedMemoryIds: [], weeklyExports: [], artifacts: [],
       messages: [], chatTokens: 0,
       lastConversationDate: fmtDate().iso, lastActiveDate: null, lastInteractionTime: null,
@@ -6873,7 +6903,7 @@ async function sendMessage(){
     }
 
     p.chats.push({
-      id: cid, name: text.slice(0, 20),
+      id: cid, name: text.slice(0, 20), ...newChatDefaults(),
       sharedMemoryIds: [], weeklyExports: [], artifacts: [],
       messages: initMessages,
       chatTokens: 0, lastConversationDate: fmtDate().iso, lastActiveDate: null, lastInteractionTime: null,
@@ -7077,22 +7107,21 @@ function saveEmailConfig(){
 }
 
 function toggleEmailEnabled(){
-  fetch(BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
-    var enabled=!s.enabled;
-    fetch(BACKEND_URL+'/api/email/settings',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({enabled:enabled})
-    }).then(function(){ updateEmailSettingsUI(); toast('邮件发送: '+(enabled?'ON':'OFF')); });
-  }).catch(function(){});
+  const chat=getActiveChatObj(); if(!chat)return;
+  chat.emailEnabled=!chat.emailEnabled;
+  updateEmailSettingsUI(); saveStore();
+  toast('邮件发送: '+(chat.emailEnabled?'ON':'OFF'));
 }
 
 function updateEmailSettingsUI(){
+  const chat=getActiveChatObj();
+  // Show per-window toggle state
+  $('toggleEmail').classList.toggle('on', !!(chat&&chat.emailEnabled));
+  // Fetch global email config (recipient, send count) from backend
   fetch(BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
-    $('toggleEmail').classList.toggle('on',s.enabled);
     var status=s.apiKeySet?(s.recipient?'已配置':'缺收件人'):'API Key 未设';
     $('emailStatusVal').textContent=status;
     $('emailSentVal').textContent=s.sentToday+'/'+s.maxPerDay;
-    store._emailConfigured = s.configured && s.enabled;
   }).catch(function(){});
 }
 
@@ -7223,7 +7252,6 @@ function syncProjectConfigToBackend(){
   var apiKey = cfg.apiKey || store.apiKey || '';
   var endpoint = cfg.endpoint || store.apiEndpoint || 'https://api.deepseek.com/v1/chat/completions';
   var enabledVal = cfg.enabled !== false;
-  console.log('[sync-config] SENDING projectId:', proj.id, 'enabled:', enabledVal, 'cfg.enabled:', cfg.enabled);
   // NOTE: email config is persisted separately via app_state table + /api/email/config endpoint.
   // We no longer include email fields here (they caused a race condition where
   // fetch(/api/email/status) was not awaited before POST /sync-configs).
@@ -7240,8 +7268,7 @@ function syncProjectConfigToBackend(){
         timezoneOffset: -(new Date().getTimezoneOffset())  // browser offset → UTC+hh format (e.g. 480 for UTC+8)
       }
     })
-  }).then(function(r){ console.log('[sync-config] Response status:', r.status, 'for project:', proj.id); })
-    .catch(function(e){ console.warn('[sync-config] FAILED:', e.message, 'for project:', proj.id); });
+  }).catch(function(e){ console.warn('[sync-config] Failed:', e.message); });
 }
 
 /**
@@ -7323,25 +7350,16 @@ function scheduleMessageSync() {
 // ── Pull authoritative enabled state from backend for ALL projects ──
 async function pullAllProjectEnabledStates() {
   try {
-    console.log('[pull] Fetching project configs from backend...');
     const resp = await fetch(BACKEND_URL + '/api/projects/configs');
-    console.log('[pull] Response status:', resp.status);
     const data = await resp.json();
-    console.log('[pull] Backend response:', JSON.stringify(data));
     if (data.configs) {
       for (const proj of store.projects) {
         const backendCfg = data.configs[proj.id];
         if (backendCfg) {
           if (!proj.apiConfig) proj.apiConfig = {};
-          var oldEnabled = proj.apiConfig.enabled;
           proj.apiConfig.enabled = backendCfg.enabled;
-          console.log('[pull] Project', proj.id, proj.name, ': enabled', oldEnabled, '→', backendCfg.enabled);
-        } else {
-          console.log('[pull] Project', proj.id, proj.name, ': NOT in backend response (keeping local)');
         }
       }
-    } else {
-      console.log('[pull] No configs in response — keeping local state');
     }
   } catch (e) {
     console.warn('[pull] Failed to pull project configs:', e.message);
@@ -8230,9 +8248,7 @@ async function init(){
   loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
   updateSettingsUI();
   renderAll();
-  console.log('[init] Before pull — project enabled states:', store.projects.map(function(p){ return p.id+':'+p.name+' enabled='+(p.apiConfig&&p.apiConfig.enabled); }).join(', '));
   await pullAllProjectEnabledStates();  // pull authoritative enabled state from backend before UI check
-  console.log('[init] After pull — project enabled states:', store.projects.map(function(p){ return p.id+':'+p.name+' enabled='+(p.apiConfig&&p.apiConfig.enabled); }).join(', '));
   updateChatInputEnabledState();  // must be after renderAll + loadStore; inside init() so store is loaded
   syncProjectConfigToBackend();   // push latest config to backend on startup
   // Pull latest desire state + system events from backend (Cron may have triggered while app was closed)
@@ -8273,7 +8289,7 @@ async function init(){
   // Phase 3: reset daily token counter if date changed
   resetDailyTokensIfNeeded();
   // Phase 3: fetch weather on startup if toggle is ON
-  if (store.aiSettings.autoWeather) fetchWeather();
+  if (getActiveChatAiSettings().autoWeather) fetchWeather();
   // Phase 2: periodic memory sync every 30 minutes
   setInterval(() => {
     if (store.activeProject) syncProjectMemories(store.activeProject);
@@ -8282,7 +8298,7 @@ async function init(){
   }, 1800000);
   // Phase 3: refresh weather every 30 minutes
   setInterval(() => {
-    if (store.aiSettings.autoWeather) fetchWeather();
+    if (getActiveChatAiSettings().autoWeather) fetchWeather();
   }, 1800000);
 }
 init();
