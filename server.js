@@ -1646,20 +1646,13 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       ...(config.emailSentDate !== undefined ? { emailSentDate: config.emailSentDate } : {}),
       // Preserve underscore-prefixed internal state (_desireState, _chatId)
       // Deep-merge _desireState: frontend sends {drives, lastCheck}, backend owns
-      // _lastBackendGrowth, _lastHeartbeatLog, and post-decay drive values.
-      // Critical: if backend recently triggered+decayed a drive, the frontend
-      // may still have the pre-decay value. Preserve backend's lower value.
+      // _lastBackendGrowth, _lastHeartbeatLog, and confirmation drive value.
       ...(config._desireState !== undefined ? { _desireState: (() => {
         const merged = { ...existing._desireState, ...config._desireState };
-        // For recently-triggered drive, keep the lower (decayed) value
-        if (existing._lastTriggerDrive && existing._desireState?.drives && merged.drives) {
-          const dk = existing._lastTriggerDrive;
-          const existingVal = existing._desireState.drives[dk];
-          const incomingVal = merged.drives[dk];
-          if (existingVal !== undefined && incomingVal !== undefined && incomingVal > existingVal) {
-            merged.drives = { ...merged.drives, [dk]: existingVal };
-            console.log(`[sync] ${projectId}: preserved decayed ${dk}=${existingVal} (frontend sent ${incomingVal})`);
-          }
+        // Preserve backend's confirmation value (frontend no longer sends it)
+        if (existing._desireState?.drives?.confirmation !== undefined) {
+          if (!merged.drives) merged.drives = {};
+          merged.drives.confirmation = existing._desireState.drives.confirmation;
         }
         return merged;
       })() } : {}),
@@ -2185,34 +2178,39 @@ async function checkProjectTodos(pid, cfg) {
  * Uses _lastBackendGrowth (independent from frontend's lastPassiveCheck).
  * Returns the updated desireState object, or null if no change was made.
  */
-function applyBackendDesireGrowth(ds, pid) {
+function applyBackendDesireGrowth(ds, pid, cfg) {
   const now = new Date();
   const lastGrowth = ds._lastBackendGrowth
     ? new Date(ds._lastBackendGrowth)
-    : (ds.lastCheck ? new Date(ds.lastCheck) : null);  // fallback for existing projects
+    : (ds.lastCheck ? new Date(ds.lastCheck) : null);
   const fallback = lastGrowth || now;
   const hoursPassed = (now - fallback) / (1000 * 60 * 60);
 
-  // Check at most every 30 min (mirrors frontend's 0.5h guard)
-  if (hoursPassed < 0.5) return null;
+  // Rate-limit: check at most every 10 min
+  if (hoursPassed < 1/6) return null;
 
   const drives = ds.drives || {};
   let changed = false;
 
-  // 悬置: confirmation +5 per hour (capped at 100)
-  if (hoursPassed >= 1) {
-    const suspensionInc = Math.floor(hoursPassed) * 5;
-    if (suspensionInc > 0) {
-      const oldVal = drives.confirmation || 0;
-      drives.confirmation = Math.min(100, oldVal + suspensionInc);
-      changed = true;
-      console.log(`[cron] ${pid}: confirmation +${suspensionInc} (${hoursPassed.toFixed(1)}h elapsed) → ${drives.confirmation}`);
-    }
+  // ── confirmation: pure time-based, driven by chatSummaryUpdatedAt ──
+  // The last chat time is tracked by chatSummaryUpdatedAt (synced from frontend).
+  // If the user is actively chatting, confirmation stays near 0.
+  // If the user hasn't chatted for hours, confirmation = hours_since × 5 (capped 100).
+  const lastChatTime = cfg && cfg.chatSummaryUpdatedAt
+    ? new Date(cfg.chatSummaryUpdatedAt)
+    : lastGrowth;  // fallback for projects without chatSummaryUpdatedAt
+  const hoursSinceChat = Math.max(0, (now - lastChatTime) / (1000 * 60 * 60));
+  const timeBasedConfirmation = Math.min(100, Math.floor(hoursSinceChat * 5));
+  if (drives.confirmation !== timeBasedConfirmation) {
+    console.log(`[cron] ${pid}: confirmation ${drives.confirmation||0} → ${timeBasedConfirmation} (${hoursSinceChat.toFixed(1)}h since last chat)`);
+    drives.confirmation = timeBasedConfirmation;
+    changed = true;
   }
 
-  // Decay: all drives -10 if >24h since last check (floor at 0)
+  // Decay: non-confirmation drives -10 if >24h since last check (floor at 0)
   if (hoursPassed >= 24) {
     for (const k of Object.keys(drives)) {
+      if (k === 'confirmation') continue;  // confirmation is time-based, not decayed
       drives[k] = Math.max(0, (drives[k] || 0) - 10);
     }
     changed = true;
@@ -2242,7 +2240,7 @@ async function checkProjectDesires(pid, cfg) {
   const drives = ds.drives || {};
 
   // ── Step 2: Passive growth (backend-side, mirrors frontend checkPassiveDrives) ──
-  const grown = applyBackendDesireGrowth(ds, pid);
+  const grown = applyBackendDesireGrowth(ds, pid, cfg);
   if (grown) {
     // Atomically save only the desire state fields (no race with frontend syncs)
     await saveDesireStateOnly(pid, grown, ds._lastBackendGrowth);
@@ -2277,12 +2275,10 @@ async function checkProjectDesires(pid, cfg) {
 
   const [driveKey, driveValue] = triggered;
 
-  // ── Cooldown guard: prevent re-triggering the same drive within 60 min ──
-  // Checks both backend's own _lastTriggerTime (set by backend after triggering)
-  // and frontend's _frontendTriggerTime (synced via _desireState after frontend triggers).
-  // Both are needed because frontend syncDesireStateToBackend() may overwrite the
-  // backend's reset value with its pre-decay local copy before self-decaying.
-  const BACKEND_COOLDOWN_MIN = 60;
+  // ── Cooldown guard: prevent re-triggering the same drive too often ──
+  // confirmation: 10 min (pure time-based, no risk of frontend overwrite)
+  // other drives: 60 min (frontend AEM may increase them rapidly)
+  const BACKEND_COOLDOWN_MIN = driveKey === 'confirmation' ? 10 : 60;
   const now = Date.now();
 
   // Check backend's own last trigger (atomic partial update, never overwritten by frontend)

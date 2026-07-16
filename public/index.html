@@ -2684,9 +2684,11 @@ const DESIRE_CONFIG = {
   possession:    { label:'占有欲', sources:['克制后反弹'],          increment: (i) => i*2, threshold: 75, actionDesc:'略带酸意的独白' },
   guardianship:  { label:'守护欲', sources:['平静在场','安心'],     increment: () => 5,     threshold: 80, actionDesc:'日常关心' },
   intimacy:      { label:'亲近欲', sources:['心动','骄傲','放松'],  increment: (i) => i*1, threshold: 90, actionDesc:'撩拨类' },
-  confirmation:  { label:'确认欲', sources:['落空','担心'],         increment: (i) => i*4, threshold: 65, actionDesc:'轻度试探' },
   devotion:      { label:'献祭欲', sources:['感伤'],                increment: (i) => i*3, threshold: 85, actionDesc:'郑重日记' }
 };
+// Note: confirmation (确认欲) is now purely backend-managed.
+// The backend Cron calculates it as hours_since_last_chat × 5 (capped 100).
+// Frontend only displays it; AEM does not modify it.
 // Note: 'action' field removed. AI now chooses from [message, litter, diary, email, todo]
 // based on context. The action field is no longer used in executeDesireAction.
 
@@ -6933,7 +6935,7 @@ async function sendMessage(){
   if (lastMsg && lastMsg._proactive) {
     const ds = getDesireSystem(); if (!ds) return;
     if (lastMsg._desireType === 'guardianship') ds.drives.guardianship = Math.max(0, ds.drives.guardianship - 20);
-    if (lastMsg._desireType === 'confirmation') ds.drives.confirmation = Math.max(0, ds.drives.confirmation - 30);
+    // confirmation decay is now backend-managed (resets when user chats)
     console.log('[eda] User responded to proactive message, applied response decay');
   }
 
@@ -7434,9 +7436,11 @@ async function syncDesireStateToBackend(force){
     }
   } catch (e) { /* non-critical, proceed with sync */ }
 
-  // Build desire state payload
+  // Build desire state payload (exclude confirmation — backend-managed)
+  var syncDrives = {};
+  for (var dk in ds.drives) { if (dk !== 'confirmation') syncDrives[dk] = ds.drives[dk]; }
   var desireState={
-    drives:ds.drives,
+    drives:syncDrives,
     lastCheck:ds.lastPassiveCheck
   };
 
@@ -7465,7 +7469,6 @@ async function syncDesireStateToBackend(force){
 
 function pollSystemEvents(){
   if(!store.projects.length)return;
-  var since=store._lastEventPoll||'';
   var activeProj=getActiveProject();
   var activeChanged=false;
   var pending=store.projects.length;
@@ -7486,10 +7489,32 @@ function pollSystemEvents(){
         chat.messages.push({role:'system',contentType:'email_notification',text:'📧 邮件已发送',time:timeLabel});
       }else if(evt.type==='todo'){
         chat.messages.push({role:'system',contentType:'todo_notification',text:'📋 有了新的 To-Do',time:timeLabel});
+        // Also store in todos if content has [[TODO:...]]
+        if(evt.content){
+          var todoMatch=evt.content.match(/\[\[TODO:([^\]|]+)(?:\|([^\]]+))?\]\]/);
+          if(todoMatch){
+            store.todos.unshift({id:'t'+gid(''),text:todoMatch[1].trim(),done:false,time:todoMatch[2]||'--:--',type:'short',createdAt:evt.timestamp,projectId:proj.id});
+            syncTodosToBackend();
+          }
+        }
       }else if(evt.type==='litter'){
         chat.messages.push({role:'system',contentType:'litter_notification',text:'🐾 猫砂盆好像需要铲一铲',time:timeLabel});
+        // Store litter thought locally
+        if(evt.content){
+          var litterText=evt.content.replace(/^LITTER:\s*/i,'').trim();
+          if(litterText){
+            store.litterThoughts.unshift({id:'lt'+gid(''),content:litterText,date:evt.timestamp.slice(0,10),time:evtTime,sourceChatId:evt.chatId||'',sourceWindow:chat.name||'',_proactive:true});
+          }
+        }
       }else if(evt.type==='diary'){
         chat.messages.push({role:'system',contentType:'diary_notification',text:'📖 日记里偷偷写了点什么',time:timeLabel});
+        // Store diary entry locally
+        if(evt.content){
+          var diaryText=evt.content.replace(/^DIARY:\s*/i,'').trim();
+          if(diaryText){
+            store.diaries.unshift({id:'d'+gid(''),date:evt.timestamp.slice(0,10),time:evtTime,title:'',content:diaryText,mood:'calm',author:'ai',replies:[],_proactive:true});
+          }
+        }
       }else if(evt.type==='todo_wake'){
         var wakeText=evt.content||'';
         if(wakeText){
@@ -7502,6 +7527,7 @@ function pollSystemEvents(){
           syncTodosToBackend();
         }
       }
+      // Sync desire state using backend's exact post-decay value
       if (evt.driveKey && evt.postDecayValue !== undefined && evt.postDecayValue !== null && proj.desireSystem && proj.desireSystem.drives) {
         proj.desireSystem.drives[evt.driveKey] = evt.postDecayValue;
       }
@@ -7511,15 +7537,21 @@ function pollSystemEvents(){
 
   for(var i=0;i<store.projects.length;i++){
     (function(proj){
+      // Per-project _lastEventPoll (not global — prevents cross-project contamination)
+      if(!proj._lastEventPoll){
+        // First poll: fetch last 3 days of events so nothing is missed
+        proj._lastEventPoll = new Date(Date.now() - 3*24*60*60*1000).toISOString();
+      }
+      var since=proj._lastEventPoll;
       fetch(BACKEND_URL+'/api/system-events?projectId='+encodeURIComponent(proj.id)+'&since='+encodeURIComponent(since))
         .then(function(r){return r.json()})
         .then(function(data){
           if(data.events&&data.events.length) processEvents(proj, data.events);
         }).catch(function(){})
         .finally(function(){
+          proj._lastEventPoll=new Date().toISOString();
           pending--;
           if(pending===0){
-            store._lastEventPoll=new Date().toISOString();
             saveStore();
             if(activeChanged) renderChatMessages();
           }
