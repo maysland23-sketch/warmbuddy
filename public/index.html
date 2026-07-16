@@ -3605,12 +3605,13 @@ function showProjectApiModal(pid){
 }
 function saveProjectApiConfig(pid){
   const proj = getProjectById(pid);
-  if (!proj) return;
+  if (!proj) { console.warn('[api-config] Save failed: project not found:', pid); return; }
   if (!proj.apiConfig) proj.apiConfig = { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true };
   proj.apiConfig.apiKey = document.getElementById('pjApiKey')?.value || '';
   proj.apiConfig.endpoint = document.getElementById('pjApiEndpoint')?.value || 'https://api.deepseek.com/v1/chat/completions';
   proj.apiConfig.model = document.getElementById('pjApiModel')?.value || 'deepseek-chat';
   proj.apiConfig.enabled = document.getElementById('pjApiEnabled')?.classList.contains('on') !== false;
+  console.log('[api-config] SAVED project:', pid, proj.name, 'enabled:', proj.apiConfig.enabled, 'apiConfig keys:', Object.keys(proj.apiConfig));
   saveStore(); store._importing = true; closeModal();
   renderProjectList(); updateSettingsUI();
   syncProjectConfigToBackend();  // sync to backend (Supabase) for cron
@@ -3908,6 +3909,7 @@ function updateChatInputEnabledState(){
   if (!input) return;
   const proj = getActiveProject();
   const apiDisabled = proj && proj.apiConfig && proj.apiConfig.enabled === false;
+  console.log('[api-ui] updateChatInputEnabledState: project=', proj?.id, proj?.name, 'hasApiConfig=', !!proj?.apiConfig, 'enabled=', proj?.apiConfig?.enabled, 'apiDisabled=', apiDisabled);
   if (apiDisabled) {
     input.classList.add('disabled');
     input.disabled = true;
@@ -4273,7 +4275,7 @@ function renderProjectList(){
   const el=$('projectList');
   el.innerHTML=store.projects.map(p=>`<div><div class="project-item ${store.activeProject===p.id?'active':''}" onclick="selectProject('${p.id}')" oncontextmenu="showContextMenu(event,'project','${p.id}','${p.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><div style="display:flex;align-items:center;gap:8px;"><div class="project-item-name" style="flex:1;">${p.name}</div><span style="font-size:12px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editProjectName('${p.id}')" title="rename">✎</span></div><div class="project-item-meta">${p.memories.length} memories · ${p.chats.length} chats · ${p.chats.reduce((sum,c)=>sum+(c.chatTokens||0),0).toLocaleString()} tok</div></div>${p.chats.map(c=>`<div class="project-chat-item ${store.activeChat===c.id?'active':''}" onclick="selectChat('${p.id}','${c.id}')" oncontextmenu="showContextMenu(event,'chat','${c.id}','${c.name.replace(/'/g,"\\'")}')" title="tap to select · long-press for options"><span class="project-chat-dot"></span><span style="flex:1;">${c.name}</span><span style="font-size:11px;color:var(--text-lighter);cursor:pointer;padding:2px;" onclick="event.stopPropagation();editChatName('${c.id}')" title="rename">✎</span><span style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);">${c.sharedMemoryIds.length} mem · ${(c.chatTokens||0).toLocaleString()} tok</span></div>`).join('')}<div style="padding:6px 14px 6px 28px;"><button style="background:none;border:none;font-size:12px;color:var(--text-lighter);cursor:pointer;font-family:var(--font-en);" onclick="addChat('${p.id}')">+ new chat</button></div></div>`).join('');
 }
-function selectProject(pid){store.activeProject=pid;const p=store.projects.find(x=>x.id===pid);if(p&&p.chats.length>0)store.activeChat=p.chats[0].id;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();updateChatInputEnabledState();}
+function selectProject(pid){store.activeProject=pid;const p=store.projects.find(x=>x.id===pid);console.log('[selectProject] Switching to:', pid, p?.name, 'apiConfig.enabled=', p?.apiConfig?.enabled);if(p&&p.chats.length>0)store.activeChat=p.chats[0].id;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();updateChatInputEnabledState();}
 function selectChat(pid,cid){store.activeProject=pid;store.activeChat=cid;renderProjectList();updateCurrentProjectLabel();renderChatMessages();toggleProjectSidebar();}
 function addChat(pid){
   const proj=store.projects.find(p=>p.id===pid); if(!proj)return;
@@ -7220,6 +7222,8 @@ function syncProjectConfigToBackend(){
   // Fallback to store-level apiKey: proj.apiConfig may exist with empty apiKey
   var apiKey = cfg.apiKey || store.apiKey || '';
   var endpoint = cfg.endpoint || store.apiEndpoint || 'https://api.deepseek.com/v1/chat/completions';
+  var enabledVal = cfg.enabled !== false;
+  console.log('[sync-config] SENDING projectId:', proj.id, 'enabled:', enabledVal, 'cfg.enabled:', cfg.enabled);
   // NOTE: email config is persisted separately via app_state table + /api/email/config endpoint.
   // We no longer include email fields here (they caused a race condition where
   // fetch(/api/email/status) was not awaited before POST /sync-configs).
@@ -7229,14 +7233,15 @@ function syncProjectConfigToBackend(){
       projectId:proj.id,
       config:{
         apiKey:apiKey,endpoint:endpoint,model:cfg.model||'deepseek-chat',
-        enabled: cfg.enabled !== false,  // respect toggle state; default to enabled when field is absent
+        enabled: enabledVal,  // respect toggle state; default to enabled when field is absent
         systemPrompt:proj.preference||'',
         chatSummary:buildChatContextSummary(),
         chatSummaryUpdatedAt:new Date().toISOString(),
         timezoneOffset: -(new Date().getTimezoneOffset())  // browser offset → UTC+hh format (e.g. 480 for UTC+8)
       }
     })
-  }).catch(function(e){ console.warn('[sync-config] Failed:', e.message); });
+  }).then(function(r){ console.log('[sync-config] Response status:', r.status, 'for project:', proj.id); })
+    .catch(function(e){ console.warn('[sync-config] FAILED:', e.message, 'for project:', proj.id); });
 }
 
 /**
@@ -7318,17 +7323,25 @@ function scheduleMessageSync() {
 // ── Pull authoritative enabled state from backend for ALL projects ──
 async function pullAllProjectEnabledStates() {
   try {
+    console.log('[pull] Fetching project configs from backend...');
     const resp = await fetch(BACKEND_URL + '/api/projects/configs');
+    console.log('[pull] Response status:', resp.status);
     const data = await resp.json();
+    console.log('[pull] Backend response:', JSON.stringify(data));
     if (data.configs) {
       for (const proj of store.projects) {
         const backendCfg = data.configs[proj.id];
         if (backendCfg) {
           if (!proj.apiConfig) proj.apiConfig = {};
+          var oldEnabled = proj.apiConfig.enabled;
           proj.apiConfig.enabled = backendCfg.enabled;
+          console.log('[pull] Project', proj.id, proj.name, ': enabled', oldEnabled, '→', backendCfg.enabled);
+        } else {
+          console.log('[pull] Project', proj.id, proj.name, ': NOT in backend response (keeping local)');
         }
       }
-      console.log('[pull] Project enabled states synced from backend:', JSON.stringify(data.configs));
+    } else {
+      console.log('[pull] No configs in response — keeping local state');
     }
   } catch (e) {
     console.warn('[pull] Failed to pull project configs:', e.message);
@@ -8217,7 +8230,9 @@ async function init(){
   loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
   updateSettingsUI();
   renderAll();
+  console.log('[init] Before pull — project enabled states:', store.projects.map(function(p){ return p.id+':'+p.name+' enabled='+(p.apiConfig&&p.apiConfig.enabled); }).join(', '));
   await pullAllProjectEnabledStates();  // pull authoritative enabled state from backend before UI check
+  console.log('[init] After pull — project enabled states:', store.projects.map(function(p){ return p.id+':'+p.name+' enabled='+(p.apiConfig&&p.apiConfig.enabled); }).join(', '));
   updateChatInputEnabledState();  // must be after renderAll + loadStore; inside init() so store is loaded
   syncProjectConfigToBackend();   // push latest config to backend on startup
   // Pull latest desire state + system events from backend (Cron may have triggered while app was closed)
