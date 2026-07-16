@@ -7410,10 +7410,29 @@ async function reconcileFromBackend() {
   }
 }
 
-function syncDesireStateToBackend(force){
+async function syncDesireStateToBackend(force){
   var proj=getActiveProject(); if(!proj||!proj.desireSystem)return;
   var ds=proj.desireSystem;
   var chat=getActiveChatObj();
+
+  // Before syncing, pull latest system events to apply any post-decay values
+  // (prevents overwriting backend's decayed drive values with stale local data)
+  try {
+    var since = store._lastEventPoll || '';
+    var resp = await fetch(BACKEND_URL+'/api/system-events?projectId='+encodeURIComponent(proj.id)+'&since='+encodeURIComponent(since));
+    var data = await resp.json();
+    if (data.events && data.events.length) {
+      for (var i = 0; i < data.events.length; i++) {
+        var evt = data.events[i];
+        if (evt.driveKey && evt.postDecayValue !== undefined && evt.postDecayValue !== null && proj.desireSystem && proj.desireSystem.drives) {
+          if (proj.desireSystem.drives[evt.driveKey] > evt.postDecayValue) {
+            console.log('[sync-desire] Applying post-decay before sync:', evt.driveKey, proj.desireSystem.drives[evt.driveKey], '→', evt.postDecayValue);
+            proj.desireSystem.drives[evt.driveKey] = evt.postDecayValue;
+          }
+        }
+      }
+    }
+  } catch (e) { /* non-critical, proceed with sync */ }
 
   // Build desire state payload
   var desireState={

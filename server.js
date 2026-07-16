@@ -1646,8 +1646,23 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       ...(config.emailSentDate !== undefined ? { emailSentDate: config.emailSentDate } : {}),
       // Preserve underscore-prefixed internal state (_desireState, _chatId)
       // Deep-merge _desireState: frontend sends {drives, lastCheck}, backend owns
-      // _lastBackendGrowth and _lastHeartbeatLog — must not be wiped by frontend sync.
-      ...(config._desireState !== undefined ? { _desireState: { ...existing._desireState, ...config._desireState } } : {}),
+      // _lastBackendGrowth, _lastHeartbeatLog, and post-decay drive values.
+      // Critical: if backend recently triggered+decayed a drive, the frontend
+      // may still have the pre-decay value. Preserve backend's lower value.
+      ...(config._desireState !== undefined ? { _desireState: (() => {
+        const merged = { ...existing._desireState, ...config._desireState };
+        // For recently-triggered drive, keep the lower (decayed) value
+        if (existing._lastTriggerDrive && existing._desireState?.drives && merged.drives) {
+          const dk = existing._lastTriggerDrive;
+          const existingVal = existing._desireState.drives[dk];
+          const incomingVal = merged.drives[dk];
+          if (existingVal !== undefined && incomingVal !== undefined && incomingVal > existingVal) {
+            merged.drives = { ...merged.drives, [dk]: existingVal };
+            console.log(`[sync] ${projectId}: preserved decayed ${dk}=${existingVal} (frontend sent ${incomingVal})`);
+          }
+        }
+        return merged;
+      })() } : {}),
       ...(config._chatId !== undefined ? { _chatId: config._chatId } : {}),
       // Chat context for proactive shadow messages
       ...(config.systemPrompt !== undefined ? { systemPrompt: config.systemPrompt } : {}),
