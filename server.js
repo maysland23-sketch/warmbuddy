@@ -668,7 +668,8 @@ async function saveTodos(projectId, todos) {
     await supabase.from('project_todos').delete().eq('project_id', projectId);
     if (todos.length > 0) {
       const rows = todos.map(t => ({
-        id: t.id, project_id: projectId, chat_id: t.chat_id || t.chatId || '',
+        id: t.id, project_id: projectId,
+        chat_id: t.chat_id || t.chatId || '',
         title: t.title, time: t.time, creator: t.creator || 'user',
         triggered: t.triggered || false, done: t.done || false,
         created_at: t.createdAt || t.created_at || new Date().toISOString()
@@ -2535,8 +2536,24 @@ async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
   const filteredTodos = await fetchFilteredTodos(pid, windowId);
   let todosBlock = '';
   if (filteredTodos.length > 0) {
+    const now = new Date();
     const todoLines = filteredTodos.slice(0, 5).map(function(t) {
-      return '- ' + t.title + (t.time ? ' (' + (t.time||'').toString().slice(0,16).replace('T',' ') + ')' : '');
+      var timeLabel = '';
+      if (t.time) {
+        var td = new Date(t.time);
+        var diffMs = td - now;
+        var diffH = diffMs / 3600000;
+        if (diffH < 0) {
+          timeLabel = ' (已过期)';
+        } else if (diffH < 24) {
+          // Short-term: show HH:MM
+          timeLabel = ' (' + String(td.getHours()).padStart(2,'0') + ':' + String(td.getMinutes()).padStart(2,'0') + ')';
+        } else {
+          // Long-term: show date
+          timeLabel = ' (' + td.getFullYear() + '-' + String(td.getMonth()+1).padStart(2,'0') + '-' + String(td.getDate()).padStart(2,'0') + ')';
+        }
+      }
+      return '- ' + t.title + timeLabel;
     });
     todosBlock = '【待办】\n' + todoLines.join('\n');
   }

@@ -4762,8 +4762,12 @@ function buildDynamicContextBlock() {
     if (pref) parts.push(`【用户偏好】${pref}`);
   }
 
-  // Todos
-  const activeTodos = store.todos.filter(t => !t.done);
+  // Todos — filter AI-created ones by window (user todos: all windows visible)
+  const activeTodos = store.todos.filter(function(t) {
+    if (t.done) return false;
+    if (t.creator === 'ai' && t.chatId && t.chatId !== store.activeChat) return false;
+    return true;
+  });
   if (activeTodos.length > 0) {
     const shortTodos = activeTodos.filter(t => t.type === 'short');
     const longTodos = activeTodos.filter(t => t.type === 'long');
@@ -6573,7 +6577,8 @@ ${recentMsgIds}` });
       if (!exists) {
         store.todos.unshift({
           id: 't' + gid(), text: et.title, done: false,
-          time: et.deadline, type: 'short', creator: 'ai'
+          time: et.deadline, type: 'short', creator: 'ai',
+          chatId: evt.chatId || ''
         });
         hasNewTodo = true;
       }
@@ -7289,6 +7294,7 @@ function syncTodosToBackend(){
         return {
           id:t.id, title:t.text||t.title,
           time:isoTime, creator:t.creator||'user',
+          chat_id: t.chatId || '',
           triggered:t.triggered||false, done:t.done||false
         };
       })
@@ -7642,7 +7648,7 @@ function pollSystemEvents(){
         if(evt.content){
           var todoMatch=evt.content.match(/\[\[TODO:([^\]|]+)(?:\|([^\]]+))?\]\]/);
           if(todoMatch){
-            store.todos.unshift({id:'t'+gid(''),text:todoMatch[1].trim(),done:false,time:todoMatch[2]||'--:--',type:'short',createdAt:evt.timestamp,projectId:proj.id});
+            store.todos.unshift({id:'t'+gid(''),text:todoMatch[1].trim(),done:false,time:todoMatch[2]||'--:--',type:'short',creator:'ai',chatId:evt.chatId||'',createdAt:evt.timestamp,projectId:proj.id});
             syncTodosToBackend();
           }
         }
