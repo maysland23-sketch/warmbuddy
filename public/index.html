@@ -4091,6 +4091,12 @@ function shakeLitterBox(){
 function dismissLitterThought(id){
   store.litterThoughts=store.litterThoughts.filter(t=>t.id!==id); $('litterThoughtArea').innerHTML='';
   const icon=$('litterBoxIcon'); if(icon){const dot=icon.querySelector('.litter-box-dot');if(dot)dot.classList.remove('has-thoughts');}
+  // Track dismissed IDs so cloud-synced thoughts don't reappear on next poll
+  if (!store._dismissedLitterIds) store._dismissedLitterIds = [];
+  if (store._dismissedLitterIds.indexOf(id) === -1) store._dismissedLitterIds.push(id);
+  // Keep only last 100 to avoid unbounded growth
+  if (store._dismissedLitterIds.length > 100) store._dismissedLitterIds = store._dismissedLitterIds.slice(-100);
+  saveStore();
   toast('已铲走 💨');
 }
 // ==================== LITTER BOX — INTELLIGENT TRIGGERS ====================
@@ -7453,7 +7459,8 @@ function pollCloudData(projectId){
         var merged=false;
         for(var i=0;i<data.thoughts.length;i++){
           var t=data.thoughts[i];
-          if(!store.litterThoughts.find(function(lt){return lt.id===t.id;})){
+          if(!store.litterThoughts.find(function(lt){return lt.id===t.id;})
+            && (!store._dismissedLitterIds || store._dismissedLitterIds.indexOf(t.id)===-1)){
             store.litterThoughts.unshift({
               id:t.id, content:t.content, date:t.date, time:t.time,
               sourceChatId:t.chatId, sourceWindow:t.sourceWindow, _proactive:t.proactive
