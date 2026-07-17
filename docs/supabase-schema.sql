@@ -104,8 +104,62 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Table 5: System events for proactive behavior audit log (frontend polling source)
+CREATE TABLE IF NOT EXISTS system_events (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  chat_id TEXT DEFAULT '',
+  type TEXT NOT NULL,
+  drive_key TEXT,
+  content TEXT DEFAULT '',
+  push_sent BOOLEAN DEFAULT false,
+  todo_id TEXT,
+  todo_title TEXT,
+  post_decay_value INTEGER,
+  has_context BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_system_events_project ON system_events(project_id, created_at);
+ALTER TABLE system_events DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON system_events TO PUBLIC;
+
+-- Table 6: Litter box thoughts (AI's unfiltered inner monologue)
+CREATE TABLE IF NOT EXISTS litter_thoughts (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  chat_id TEXT DEFAULT '',
+  content TEXT NOT NULL,
+  date TEXT NOT NULL,
+  time TEXT DEFAULT '',
+  source_window TEXT DEFAULT '',
+  proactive BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_litter_thoughts_project ON litter_thoughts(project_id, created_at);
+ALTER TABLE litter_thoughts DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON litter_thoughts TO PUBLIC;
+
+-- Table 7: Diary entries (AI's private journal)
+CREATE TABLE IF NOT EXISTS diary_entries (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  chat_id TEXT DEFAULT '',
+  date TEXT NOT NULL,
+  time TEXT DEFAULT '',
+  title TEXT DEFAULT '',
+  content TEXT NOT NULL,
+  mood TEXT DEFAULT 'calm',
+  author TEXT DEFAULT 'ai',
+  proactive BOOLEAN DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_diary_entries_project ON diary_entries(project_id, created_at);
+ALTER TABLE diary_entries DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON diary_entries TO PUBLIC;
+
 -- Grant access
 GRANT ALL ON project_configs TO PUBLIC;
 GRANT ALL ON app_state TO PUBLIC;
 GRANT ALL ON project_todos TO PUBLIC;
+GRANT ALL ON chat_messages TO PUBLIC;
 GRANT USAGE ON SCHEMA public TO PUBLIC;

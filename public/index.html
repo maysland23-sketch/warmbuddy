@@ -6613,7 +6613,8 @@ ${recentMsgIds}` });
   chat.lastInteractionTime = new Date().toISOString();
 
   // Sync chat context (summary + AEM) to backend for proactive shadow messages
-  syncProjectConfigToBackend();
+  // Pass updateChatTime=true — user just sent a message, so reset confirmation clock
+  syncProjectConfigToBackend(true);
   // Sync messages to Supabase for real conversation context in Cron
   scheduleMessageSync();
 }
@@ -7247,7 +7248,7 @@ function buildChatContextSummary(){
   return parts.join('\n\n');
 }
 
-function syncProjectConfigToBackend(){
+function syncProjectConfigToBackend(updateChatTime){
   var proj=getActiveProject(); if(!proj)return;
   var cfg=getActiveApiConfig();
   // Fallback to store-level apiKey: proj.apiConfig may exist with empty apiKey
@@ -7257,19 +7258,30 @@ function syncProjectConfigToBackend(){
   // NOTE: email config is persisted separately via app_state table + /api/email/config endpoint.
   // We no longer include email fields here (they caused a race condition where
   // fetch(/api/email/status) was not awaited before POST /sync-configs).
+
+  var config = {
+    apiKey:apiKey,endpoint:endpoint,model:cfg.model||'deepseek-chat',
+    enabled: enabledVal,  // respect toggle state; default to enabled when field is absent
+    aiName: getAIName(),  // for push notification title
+    systemPrompt:proj.preference||'',
+    chatSummary:buildChatContextSummary(),
+    timezoneOffset: -(new Date().getTimezoneOffset())  // browser offset → UTC+hh format (e.g. 480 for UTC+8)
+  };
+
+  // Only update lastUserMessageTime when the user actually sent a message.
+  // This is the reference point for backend confirmation calculation.
+  // Setting it on browser open (init) would incorrectly reset confirmation to 0.
+  if (updateChatTime) {
+    config.lastUserMessageTime = new Date().toISOString();
+    // Also update chatSummaryUpdatedAt for shadow message "hours since" display
+    config.chatSummaryUpdatedAt = new Date().toISOString();
+  }
+
   fetch(BACKEND_URL+'/api/projects/sync-configs',{
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
       projectId:proj.id,
-      config:{
-        apiKey:apiKey,endpoint:endpoint,model:cfg.model||'deepseek-chat',
-        enabled: enabledVal,  // respect toggle state; default to enabled when field is absent
-        aiName: getAIName(),  // for push notification title
-        systemPrompt:proj.preference||'',
-        chatSummary:buildChatContextSummary(),
-        chatSummaryUpdatedAt:new Date().toISOString(),
-        timezoneOffset: -(new Date().getTimezoneOffset())  // browser offset → UTC+hh format (e.g. 480 for UTC+8)
-      }
+      config: config
     })
   }).catch(function(e){ console.warn('[sync-config] Failed:', e.message); });
 }
@@ -7407,9 +7419,55 @@ async function reconcileFromBackend() {
 
     // Immediately pull latest system events (don't wait for 30s poll)
     pollSystemEvents();
+    // Also pull cloud-synced litter thoughts and diary entries
+    pollCloudData(proj.id);
   } catch (e) {
     console.warn('[reconcile] Failed:', e.message);
   }
+}
+
+// ── Pull cloud-synced litter thoughts and diary entries ──
+function pollCloudData(projectId){
+  if(!projectId) return;
+  // Pull litter thoughts from Supabase
+  fetch(BACKEND_URL+'/api/litter-thoughts?projectId='+encodeURIComponent(projectId))
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(data.thoughts&&data.thoughts.length){
+        var merged=false;
+        for(var i=0;i<data.thoughts.length;i++){
+          var t=data.thoughts[i];
+          if(!store.litterThoughts.find(function(lt){return lt.id===t.id;})){
+            store.litterThoughts.unshift({
+              id:t.id, content:t.content, date:t.date, time:t.time,
+              sourceChatId:t.chatId, sourceWindow:t.sourceWindow, _proactive:t.proactive
+            });
+            merged=true;
+          }
+        }
+        if(merged){ store.litterThoughts.sort(function(a,b){return (b.date||'').localeCompare(a.date||'');}); saveStore(); }
+      }
+    }).catch(function(){});
+  // Pull diary entries from Supabase
+  fetch(BACKEND_URL+'/api/diary-entries?projectId='+encodeURIComponent(projectId))
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(data.entries&&data.entries.length){
+        var merged=false;
+        for(var i=0;i<data.entries.length;i++){
+          var e=data.entries[i];
+          if(!store.diaries.find(function(d){return d.id===e.id;})){
+            store.diaries.unshift({
+              id:e.id, date:e.date, time:e.time, title:e.title,
+              content:e.content, mood:e.mood, author:e.author,
+              replies:[], _proactive:e.proactive
+            });
+            merged=true;
+          }
+        }
+        if(merged){ store.diaries.sort(function(a,b){return (b.date||'').localeCompare(a.date||'');}); saveStore(); }
+      }
+    }).catch(function(){});
 }
 
 async function syncDesireStateToBackend(force){
@@ -8396,6 +8454,7 @@ init();
 setInterval(saveStore, 2000);
 setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
 setInterval(pollSystemEvents, 30000);      // backend proactive events every 30s
+setInterval(function(){ var p=getActiveProject(); if(p)pollCloudData(p.id); }, 60000); // cloud litter/diary every 60s
 setInterval(syncDesireStateToBackend, 60000); // sync desire state to backend every 60s
 
 // ── Weekly memory file write ──

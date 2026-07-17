@@ -694,32 +694,128 @@ async function countAITodosToday(projectId) {
 
 // ── System events persisted in Supabase (survives Render restarts) ──
 async function loadSystemEvents(projectId, since) {
-  if (!supabase) return [];
+  let dbEvents = [];
+  if (supabase) {
+    try {
+      let query = supabase.from('system_events').select('*');
+      if (projectId) query = query.eq('project_id', projectId);
+      if (since) query = query.gt('created_at', since);
+      query = query.order('created_at', { ascending: true }).limit(100);
+      const { data } = await query;
+      dbEvents = (data || []).map(row => ({
+        id: row.id,
+        projectId: row.project_id,
+        chatId: row.chat_id || '',
+        type: row.type,
+        driveKey: row.drive_key || null,
+        content: row.content || '',
+        timestamp: row.created_at,
+        pushSent: row.push_sent || false,
+        todoId: row.todo_id || null,
+        todoTitle: row.todo_title || null,
+        postDecayValue: row.post_decay_value || null,
+        _hasContext: row.has_context || false
+      }));
+    } catch (e) { console.error('[supabase] loadSystemEvents error:', e.message); }
+  }
+
+  // Merge fallback file events (in case Supabase was unavailable)
   try {
-    let query = supabase.from('system_events').select('*');
-    if (projectId) query = query.eq('project_id', projectId);
-    if (since) query = query.gt('created_at', since);
-    query = query.order('created_at', { ascending: true }).limit(100);
-    const { data } = await query;
-    return (data || []).map(row => ({
-      id: row.id,
-      projectId: row.project_id,
-      chatId: row.chat_id || '',
-      type: row.type,
-      driveKey: row.drive_key || null,
-      content: row.content || '',
-      timestamp: row.created_at,
-      pushSent: row.push_sent || false,
-      todoId: row.todo_id || null,
-      todoTitle: row.todo_title || null,
-      postDecayValue: row.post_decay_value || null,
-      _hasContext: row.has_context || false
-    }));
-  } catch (e) { console.error('[supabase] loadSystemEvents error:', e.message); return []; }
+    const fbEvents = loadFallbackEvents();
+    for (const fb of fbEvents) {
+      if (projectId && fb.projectId !== projectId) continue;
+      if (since && fb.timestamp <= since) continue;
+      dbEvents.push({
+        id: fb._fallbackId || fb.id,
+        projectId: fb.projectId,
+        chatId: fb.chatId || '',
+        type: fb.type,
+        driveKey: fb.driveKey || null,
+        content: fb.content || '',
+        timestamp: fb.timestamp,
+        pushSent: fb.pushSent || false,
+        todoId: fb.todoId || null,
+        todoTitle: fb.todoTitle || null,
+        postDecayValue: fb.postDecayValue || null,
+        _hasContext: fb._hasContext || false
+      });
+    }
+  } catch (e) { /* ignore fallback read errors */ }
+
+  // Sort merged results by timestamp
+  dbEvents.sort(function(a, b) { return (a.timestamp || '').localeCompare(b.timestamp || ''); });
+  return dbEvents;
+}
+
+// ── File-based fallback for system events (when Supabase is unavailable) ──
+const SYSTEM_EVENTS_FALLBACK_FILE = path.join(DATA_DIR, 'system_events_fallback.json');
+
+function loadFallbackEvents() {
+  try { return JSON.parse(fs.readFileSync(SYSTEM_EVENTS_FALLBACK_FILE, 'utf-8')); } catch { return []; }
+}
+
+function saveFallbackEvents(events) {
+  try { fs.writeFileSync(SYSTEM_EVENTS_FALLBACK_FILE, JSON.stringify(events, null, 2), 'utf-8'); } catch (e) {
+    console.error('[fallback] Failed to write fallback events:', e.message);
+  }
+}
+
+async function saveSystemEventToFile(event) {
+  try {
+    const events = loadFallbackEvents();
+    const saved = { ...event, _fallbackId: 'fb_' + Date.now().toString(36), _fallbackAt: new Date().toISOString() };
+    events.push(saved);
+    saveFallbackEvents(events);
+    console.log('[fallback] Event saved to file:', saved._fallbackId, 'type:', event.type);
+    return { id: saved._fallbackId };
+  } catch (e) {
+    console.error('[fallback] saveSystemEventToFile error:', e.message);
+    return null;
+  }
+}
+
+async function syncFallbackEventsToSupabase() {
+  if (!supabase) return;
+  const events = loadFallbackEvents();
+  if (events.length === 0) return;
+  console.log('[fallback] Syncing', events.length, 'fallback events to Supabase...');
+  let synced = 0, failed = 0;
+  for (const evt of events) {
+    try {
+      const { data, error } = await supabase.from('system_events').insert({
+        project_id: evt.projectId,
+        chat_id: evt.chatId || '',
+        type: evt.type,
+        drive_key: evt.driveKey || null,
+        content: evt.content || '',
+        push_sent: evt.pushSent || false,
+        todo_id: evt.todoId || null,
+        todo_title: evt.todoTitle || null,
+        post_decay_value: evt.postDecayValue || null,
+        has_context: evt._hasContext || false,
+        created_at: evt.timestamp || new Date().toISOString()
+      }).select('id').single();
+      if (error) { failed++; console.error('[fallback] Sync error:', error.message); }
+      else { synced++; }
+    } catch (e) { failed++; console.error('[fallback] Sync exception:', e.message); }
+  }
+  if (synced > 0 || failed > 0) {
+    console.log('[fallback] Sync complete — synced:', synced, 'failed:', failed);
+  }
+  if (failed === 0) {
+    // All synced — clear fallback file
+    saveFallbackEvents([]);
+  } else if (synced > 0) {
+    // Partial sync — keep only failed events (simplified: keep all remaining, they'll be deduped by created_at)
+    saveFallbackEvents(events.filter(function(e, i) { return i >= synced; }));
+  }
 }
 
 async function saveSystemEvent(event) {
-  if (!supabase) return null;
+  if (!supabase) {
+    console.error('[supabase] saveSystemEvent: supabase not configured — using file fallback');
+    return saveSystemEventToFile(event);
+  }
   try {
     const { data, error } = await supabase.from('system_events').insert({
       project_id: event.projectId,
@@ -734,8 +830,20 @@ async function saveSystemEvent(event) {
       has_context: event._hasContext || false,
       created_at: event.timestamp || new Date().toISOString()
     }).select('id').single();
+    if (error) {
+      console.error('[supabase] saveSystemEvent INSERT error:',
+        'message:', error.message, 'code:', error.code,
+        'details:', error.details, 'hint:', error.hint);
+      // Fallback to file on any Supabase error
+      return saveSystemEventToFile(event);
+    }
+    console.log('[supabase] saveSystemEvent OK — id:', data?.id, 'type:', event.type,
+      'project:', event.projectId, 'drive:', event.driveKey);
     return data || null;
-  } catch (e) { console.error('[supabase] saveSystemEvent error:', e.message); return null; }
+  } catch (e) {
+    console.error('[supabase] saveSystemEvent EXCEPTION:', e.message, e.stack);
+    return saveSystemEventToFile(event);
+  }
 }
 
 async function markEventPushSent(eventId) {
@@ -1603,6 +1711,8 @@ app.get('/api/health', (req, res) => {
 // External cron trigger (cron-job.org pings this to prevent Render sleep + run checks)
 app.get('/api/cron/check', async (req, res) => {
   console.log('[cron] External ping — running proactive checks...');
+  // Sync any fallback events that accumulated while Supabase was unavailable
+  syncFallbackEventsToSupabase().catch(function(){});
   const configs = await loadProjectConfigs();
   let triggered = 0;
   for (const [pid, cfg] of Object.entries(configs)) {
@@ -1662,6 +1772,9 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       ...(config.aiName !== undefined ? { aiName: config.aiName } : {}),
       ...(config.chatSummary !== undefined ? { chatSummary: config.chatSummary } : {}),
       ...(config.chatSummaryUpdatedAt !== undefined ? { chatSummaryUpdatedAt: config.chatSummaryUpdatedAt } : {}),
+      // lastUserMessageTime: set only when user sends a message (NOT on browser open).
+      // Used by applyBackendDesireGrowth() for confirmation time calculation.
+      ...(config.lastUserMessageTime !== undefined ? { lastUserMessageTime: config.lastUserMessageTime } : {}),
       // Timezone offset for user-local time in Cron-triggered messages (default UTC+8)
       ...(config.timezoneOffset !== undefined ? { timezoneOffset: config.timezoneOffset } : {})
     };
@@ -1760,6 +1873,66 @@ app.get('/api/system-events', async (req, res) => {
   res.json({ events: events.slice(0, 20) });
 });
 
+// ── Litter thoughts endpoint (cloud-synced cat litter box) ──
+app.get('/api/litter-thoughts', async (req, res) => {
+  const { projectId, since } = req.query;
+  if (!supabase) return res.json({ thoughts: [] });
+  try {
+    let query = supabase.from('litter_thoughts').select('*');
+    if (projectId) query = query.eq('project_id', projectId);
+    if (since) query = query.gt('created_at', since);
+    query = query.order('created_at', { ascending: false }).limit(50);
+    const { data, error } = await query;
+    if (error) throw error;
+    const thoughts = (data || []).map(row => ({
+      id: row.id,
+      projectId: row.project_id,
+      chatId: row.chat_id || '',
+      content: row.content,
+      date: row.date,
+      time: row.time || row.created_at,
+      sourceWindow: row.source_window || '',
+      proactive: row.proactive || false,
+      createdAt: row.created_at
+    }));
+    res.json({ thoughts });
+  } catch (e) {
+    console.error('[api] litter-thoughts error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Diary entries endpoint (cloud-synced AI diary) ──
+app.get('/api/diary-entries', async (req, res) => {
+  const { projectId, since } = req.query;
+  if (!supabase) return res.json({ entries: [] });
+  try {
+    let query = supabase.from('diary_entries').select('*');
+    if (projectId) query = query.eq('project_id', projectId);
+    if (since) query = query.gt('created_at', since);
+    query = query.order('created_at', { ascending: false }).limit(50);
+    const { data, error } = await query;
+    if (error) throw error;
+    const entries = (data || []).map(row => ({
+      id: row.id,
+      projectId: row.project_id,
+      chatId: row.chat_id || '',
+      date: row.date,
+      time: row.time || row.created_at,
+      title: row.title || '',
+      content: row.content,
+      mood: row.mood || 'calm',
+      author: row.author || 'ai',
+      proactive: row.proactive || false,
+      createdAt: row.created_at
+    }));
+    res.json({ entries });
+  } catch (e) {
+    console.error('[api] diary-entries error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── To-Do sync endpoint (full replace per project) ──
 app.post('/api/todos/sync', async (req, res) => {
   const { projectId, todos } = req.body || {};
@@ -1771,6 +1944,8 @@ app.post('/api/todos/sync', async (req, res) => {
 // ==================== CRON: PROACTIVE CHECKS ====================
 cron.schedule('* * * * *', async () => {
   console.log('[cron] Checking proactive triggers...');
+  // Sync any fallback events to Supabase
+  syncFallbackEventsToSupabase().catch(function(){});
   const configs = await loadProjectConfigs();
   for (const [pid, cfg] of Object.entries(configs)) {
     // Re-load latest config to get current enabled state (bypass 15s cache)
@@ -2192,13 +2367,14 @@ function applyBackendDesireGrowth(ds, pid, cfg) {
   const drives = ds.drives || {};
   let changed = false;
 
-  // ── confirmation: pure time-based, driven by chatSummaryUpdatedAt ──
-  // The last chat time is tracked by chatSummaryUpdatedAt (synced from frontend).
-  // If the user is actively chatting, confirmation stays near 0.
+  // ── confirmation: pure time-based, driven by lastUserMessageTime ──
+  // lastUserMessageTime is set by the frontend ONLY when the user sends a message.
+  // Falls back to chatSummaryUpdatedAt for backward compatibility.
   // If the user hasn't chatted for hours, confirmation = hours_since × 5 (capped 100).
-  const lastChatTime = cfg && cfg.chatSummaryUpdatedAt
-    ? new Date(cfg.chatSummaryUpdatedAt)
-    : lastGrowth;  // fallback for projects without chatSummaryUpdatedAt
+  const lastChatTimeRaw = (cfg && cfg.lastUserMessageTime) || (cfg && cfg.chatSummaryUpdatedAt) || null;
+  const lastChatTime = lastChatTimeRaw
+    ? new Date(lastChatTimeRaw)
+    : lastGrowth;  // fallback for projects without either field
   const hoursSinceChat = Math.max(0, (now - lastChatTime) / (1000 * 60 * 60));
   const timeBasedConfirmation = Math.min(100, Math.floor(hoursSinceChat * 5));
   if (drives.confirmation !== timeBasedConfirmation) {
@@ -2331,7 +2507,10 @@ async function checkProjectDesires(pid, cfg) {
     });
     const data = await llmResp.json();
     const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
-    if (!content) return;
+    if (!content) {
+      console.error(`[cron] ${pid}: LLM returned empty content for ${driveKey}=${driveValue}`);
+      return;
+    }
 
     // Determine action type from content
     let actionType = 'message';
@@ -2342,25 +2521,134 @@ async function checkProjectDesires(pid, cfg) {
 
     // Compute post-decay value so frontend can sync desire state immediately
     const postDecayValue = Math.floor(driveValue * 0.2);
-
-    // Store as system event in Supabase for frontend polling
     const chatId = cfg._chatId || '';
+    const cleanContent = content.replace(/^(MESSAGE|LITTER|DIARY):/i, '').trim();
+    const nowISO = new Date().toISOString();
+
+    // ── Step A: Write to business table by action type (primary persistence) ──
+    if (supabase) {
+      try {
+        switch (actionType) {
+          case 'message': {
+            const proactiveMsgId = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+            if (chatId) {
+              const { error: msgErr } = await supabase.from('chat_messages').upsert({
+                project_id: pid,
+                window_id: chatId,
+                message_id: proactiveMsgId,
+                role: 'assistant',
+                content: cleanContent,
+                token_usage: 0,
+                created_at: nowISO,
+                metadata: { proactive: true, drive_key: driveKey, post_decay_value: postDecayValue }
+              }, { onConflict: 'message_id' });
+              if (msgErr) {
+                console.error('[cron] chat_messages upsert error:', msgErr.message, msgErr.code, msgErr.details);
+              } else {
+                console.log('[cron] Proactive message saved to chat_messages:', proactiveMsgId);
+              }
+            }
+            break;
+          }
+          case 'litter': {
+            const litterId = 'lt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+            const litterText = cleanContent.replace(/^LITTER:\s*/i, '').trim();
+            if (litterText) {
+              const { error: litterErr } = await supabase.from('litter_thoughts').insert({
+                id: litterId,
+                project_id: pid,
+                chat_id: chatId,
+                content: litterText,
+                date: nowISO.slice(0, 10),
+                time: nowISO,
+                source_window: chatId,
+                proactive: true,
+                created_at: nowISO
+              });
+              if (litterErr) {
+                console.error('[cron] litter_thoughts insert error:', litterErr.message, litterErr.code, litterErr.details);
+              } else {
+                console.log('[cron] Proactive litter saved:', litterId);
+              }
+            }
+            break;
+          }
+          case 'diary': {
+            const diaryId = 'd_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+            const diaryText = cleanContent.replace(/^DIARY:\s*/i, '').trim();
+            if (diaryText) {
+              const { error: diaryErr } = await supabase.from('diary_entries').insert({
+                id: diaryId,
+                project_id: pid,
+                chat_id: chatId,
+                date: nowISO.slice(0, 10),
+                time: nowISO,
+                content: diaryText,
+                mood: 'calm',
+                author: 'ai',
+                proactive: true,
+                created_at: nowISO
+              });
+              if (diaryErr) {
+                console.error('[cron] diary_entries insert error:', diaryErr.message, diaryErr.code, diaryErr.details);
+              } else {
+                console.log('[cron] Proactive diary saved:', diaryId);
+              }
+            }
+            break;
+          }
+          case 'todo': {
+            const todoMatch = content.match(/\[\[TODO:([^\]|]+)(?:\|([^\]]+))?\]\]/);
+            if (todoMatch) {
+              const todoId = 't_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+              const { error: todoErr } = await supabase.from('project_todos').insert({
+                id: todoId,
+                project_id: pid,
+                chat_id: chatId,
+                title: todoMatch[1].trim(),
+                time: todoMatch[2] || nowISO,
+                creator: 'ai',
+                triggered: false,
+                done: false,
+                created_at: nowISO
+              });
+              if (todoErr) {
+                console.error('[cron] project_todos insert error:', todoErr.message, todoErr.code, todoErr.details);
+              } else {
+                console.log('[cron] Proactive todo saved:', todoId, '—', todoMatch[1].trim());
+              }
+            }
+            break;
+          }
+          case 'email':
+            // Handled by existing email logic below (Resend API)
+            break;
+        }
+      } catch (businessErr) {
+        console.error('[cron] Business table write error for', actionType, ':', businessErr.message);
+      }
+    }
+
+    // ── Step B: Store as system event in Supabase (unified audit log + frontend polling source) ──
     const savedEvent = await saveSystemEvent({
       projectId: pid,
       chatId: chatId,
       type: actionType,
       driveKey: driveKey,
-      postDecayValue: postDecayValue,  // frontend uses this to sync desire state
-      content: content.replace(/^(MESSAGE|LITTER|DIARY):/i, '').trim(),
-      timestamp: new Date().toISOString(),
+      postDecayValue: postDecayValue,
+      content: cleanContent,
+      timestamp: nowISO,
       pushSent: false,
       _hasContext: true
     });
+    if (!savedEvent || !savedEvent.id) {
+      console.error('[cron] saveSystemEvent FAILED for project', pid, 'drive', driveKey,
+        '— event may still be accessible via business table');
+    }
 
-    // Send push notification
+    // ── Step C: Send push notification ──
     if (pushSubscription) {
       // Body: show actual content for message/todo, hint for litter/diary/email (matching chat UI)
-      const cleanContent = content.replace(/^(MESSAGE|LITTER|DIARY):/i, '').trim();
       const chatHints = { message: cleanContent, todo: cleanContent, todo_wake: cleanContent, litter: '🐾 猫砂盆好像需要铲一铲', diary: '📖 日记里偷偷写了点什么', email: '📧 邮件已发送' };
       const pushBody = (chatHints[actionType] || cleanContent).slice(0, 120);
       // Title: use project's AI name
