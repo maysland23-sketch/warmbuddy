@@ -2827,6 +2827,7 @@ async function checkProjectDesires(pid, cfg) {
 
     // Compute post-decay value so frontend can sync desire state immediately
     const postDecayValue = Math.floor(driveValue * 0.2);
+    const decayedValue = postDecayValue;  // alias for Step 6
     const chatId = cfg._chatId || '';
     const nowISO = new Date().toISOString();
 
@@ -2978,7 +2979,7 @@ async function checkProjectDesires(pid, cfg) {
     }
 
     // ── Step 6: Reset desire after trigger (mirrors frontend's applyDesireDecay) ──
-    drives[driveKey] = Math.floor(driveValue * 0.2);
+    drives[driveKey] = decayedValue;
     // Atomically save: only touches _desireState, _lastBackendGrowth, _lastTrigger*
     await saveDesireStateOnly(pid, ds, ds._lastBackendGrowth, {
       lastTriggerTime: new Date().toISOString(),
@@ -2986,7 +2987,20 @@ async function checkProjectDesires(pid, cfg) {
     });
     await saveDailyCounts(pid, cfg);  // persist daily desire count
 
-    console.log(`[cron] Project ${pid}: triggered ${actionType} (${driveLabel}=${driveValue})`);
+    // Fix: shift lastUserMessageTime so the time formula respects the decay.
+    // Without this, hoursSinceChat × 5 would immediately override the decayed value.
+    // E.g., 60 → 12 means setting lastUserMessageTime to now - 12/5 hours = 2.4h ago,
+    // so the next cron run calculates floor(2.4 × 5) = 12 instead of jumping back to 60.
+    const hoursEquivalent = decayedValue / 5;
+    const adjustedLastMsgTime = new Date(Date.now() - hoursEquivalent * 3600000).toISOString();
+    cfg.lastUserMessageTime = adjustedLastMsgTime;
+    // Persist to Supabase via sync-configs (single-field update, no race with other fields)
+    fetch(`http://localhost:${PORT}/api/projects/sync-configs`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId: pid, config: { lastUserMessageTime: adjustedLastMsgTime } })
+    }).catch(function(e) { console.error('[cron] Failed to sync lastUserMessageTime:', e.message); });
+
+    console.log(`[cron] Project ${pid}: triggered ${actionType} (${driveLabel}=${driveValue} → decayed ${decayedValue}, lastMsgTime shifted ${hoursEquivalent.toFixed(1)}h)`);
   } catch (e) {
     console.error(`[cron] Desire LLM error for ${pid}:`, e.message);
   }
