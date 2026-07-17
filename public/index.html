@@ -3048,7 +3048,7 @@ function renderMemoryPanelBody(){
       <!-- Filter buttons -->
       <div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin:12px 0 8px;">CALL HISTORY</div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;">
-        ${['all','chat','diary','litterbox','reflection','memory_write','web_search'].map(f => {
+        ${['all','chat','proactive_message','proactive_litter','proactive_diary','proactive_todo','diary','litterbox','reflection','memory_write','web_search'].map(f => {
           return `<button class="todo-tab ${filterType===f?'active':''}" onclick="currentTokenFilter='${f}';renderMemoryPanelBody();" style="font-size:9px;padding:3px 10px;">${f}</button>`;
         }).join('')}
       </div>
@@ -4908,12 +4908,15 @@ function extractReflection(responseText) {
   const compactRe = /^([^,]+),\s*(\d+)\s*,\s*([^,]+),\s*(\d+)\s*,\s*(.+)$/;
   const cm = inner.match(compactRe);
   if (cm) {
+    // Strip leading { from labels (can be introduced by malformed REFLECT fallback wrapping)
+    const aiLabel = cm[1].trim().replace(/^\{/, '');
+    const userLabel = cm[3].trim().replace(/^\{/, '');
     return {
       cleanText,
       reflection: {
-        ai_affect_label: cm[1].trim(),
+        ai_affect_label: aiLabel,
         ai_affect_intensity: parseInt(cm[2]) || 5,
-        user_affect_label: cm[3].trim(),
+        user_affect_label: userLabel,
         user_affect_intensity: parseInt(cm[4]) || 5,
         signal_source: cm[5].trim()
       }
@@ -6007,8 +6010,18 @@ function copyBubble(idx){
 
 function deleteBubble(idx){
   const chat=getActiveChatObj(); if(!chat||!chat.messages[idx])return;
+  if(!confirm('确定要删除这条消息吗？')) return;
+  const msg=chat.messages[idx];
   chat.messages.splice(idx, 1);
+  saveStore();
   renderChatMessages();
+  // Delete from Supabase if message has an ID
+  if(msg.id){
+    fetch(BACKEND_URL+'/api/delete-message',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({messageId:msg.id})
+    }).catch(function(){});
+  }
   toast('🗑 已删除');
 }
 
@@ -8482,6 +8495,7 @@ setInterval(saveStore, 2000);
 setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
 setInterval(pollSystemEvents, 30000);      // backend proactive events every 30s
 setInterval(function(){ var p=getActiveProject(); if(p)pollCloudData(p.id); }, 60000); // cloud litter/diary every 60s
+setInterval(pullProactiveTokenLogs, 120000); // proactive token logs every 2min
 setInterval(syncDesireStateToBackend, 60000); // sync desire state to backend every 60s
 
 // ── Weekly memory file write ──
@@ -8546,6 +8560,54 @@ function resetDailyTokensIfNeeded() {
     }
     saveStore();
   }
+}
+
+// ── Pull proactive token logs from Supabase and merge into local tokenLogs ──
+function pullProactiveTokenLogs(){
+  var proj=getActiveProject(); if(!proj)return;
+  if(!store._lastTokenLogPull) store._lastTokenLogPull = new Date(Date.now()-3600000).toISOString();
+  fetch(BACKEND_URL+'/api/token-logs?projectId='+encodeURIComponent(proj.id)+'&since='+encodeURIComponent(store._lastTokenLogPull))
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(!data.logs||!data.logs.length)return;
+      for(var i=0;i<data.logs.length;i++){
+        var l=data.logs[i];
+        // Skip if already logged (check by messageId)
+        var alreadyLogged=false;
+        var activeLog=store.tokenLogs&&store.tokenLogs[l.windowId];
+        if(activeLog&&activeLog.calls){
+          alreadyLogged=activeLog.calls.some(function(c){return c._tokenLogId===l.messageId;});
+        }
+        if(!alreadyLogged){
+          // Add a synthetic call entry
+          if(!store.tokenLogs)store.tokenLogs={};
+          if(!store.tokenLogs[l.windowId]){
+            store.tokenLogs[l.windowId]={calls:[],dailySummary:{total_input:0,total_output:0,total_cache_read:0,total:0,by_action_type:{}}};
+          }
+          var total=(l.inputTokens||0)+(l.outputTokens||0);
+          var entry={
+            timestamp:l.timestamp,
+            model:l.model||'unknown',
+            action_type:l.actionType||'proactive',
+            input_tokens:l.inputTokens||0,
+            output_tokens:l.outputTokens||0,
+            cache_read_tokens:0,
+            cache_write_tokens:0,
+            total_tokens:total,
+            _tokenLogId:l.messageId
+          };
+          store.tokenLogs[l.windowId].calls.unshift(entry);
+          var ds=store.tokenLogs[l.windowId].dailySummary;
+          ds.total_input+=(l.inputTokens||0);
+          ds.total_output+=(l.outputTokens||0);
+          ds.total+=total;
+          if(!ds.by_action_type)ds.by_action_type={};
+          ds.by_action_type[l.actionType||'proactive']=(ds.by_action_type[l.actionType||'proactive']||0)+total;
+        }
+      }
+      store._lastTokenLogPull=new Date().toISOString();
+      saveStore();
+    }).catch(function(){});
 }
 
 // ── Token logging per API call ──

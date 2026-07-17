@@ -1933,6 +1933,80 @@ app.get('/api/diary-entries', async (req, res) => {
   }
 });
 
+// ── Log token usage from proactive behaviors ──
+// Called by the backend cron after LLM calls for desire-driven actions.
+// Stores a lightweight log so the frontend token panel can display proactive usage.
+app.post('/api/log-token-call', async (req, res) => {
+  const { projectId, windowId, actionType, inputTokens, outputTokens, model } = req.body || {};
+  if (!projectId || !windowId) return res.json({ ok: false });
+  if (!supabase) return res.json({ ok: false, note: 'supabase unavailable' });
+  try {
+    const msgId = 'proactive_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+    const { error } = await supabase.from('chat_messages').upsert({
+      project_id: projectId,
+      window_id: windowId,
+      message_id: msgId,
+      role: 'system',
+      content: '[proactive token log]',
+      token_usage: (inputTokens || 0) + (outputTokens || 0),
+      created_at: new Date().toISOString(),
+      metadata: { _token_log: true, action_type: actionType, model: model || 'unknown', input_tokens: inputTokens || 0, output_tokens: outputTokens || 0 }
+    }, { onConflict: 'message_id' });
+    if (error) throw error;
+    console.log('[token-log] proactive', actionType, 'in:', inputTokens, 'out:', outputTokens, 'window:', windowId);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[token-log] Error:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Pull proactive token logs for frontend token panel ──
+app.get('/api/token-logs', async (req, res) => {
+  const { projectId, since } = req.query;
+  if (!supabase) return res.json({ logs: [] });
+  try {
+    let query = supabase.from('chat_messages').select('*')
+      .eq('role', 'system')
+      .contains('metadata', { _token_log: true })
+      .order('created_at', { ascending: false }).limit(100);
+    if (projectId) query = query.eq('project_id', projectId);
+    if (since) query = query.gt('created_at', since);
+    const { data, error } = await query;
+    if (error) throw error;
+    const logs = (data || []).map(row => ({
+      messageId: row.message_id,
+      projectId: row.project_id,
+      windowId: row.window_id,
+      actionType: (row.metadata && row.metadata.action_type) || 'proactive',
+      inputTokens: (row.metadata && row.metadata.input_tokens) || 0,
+      outputTokens: (row.metadata && row.metadata.output_tokens) || 0,
+      model: (row.metadata && row.metadata.model) || 'unknown',
+      timestamp: row.created_at
+    }));
+    res.json({ logs });
+  } catch (e) {
+    console.error('[token-logs] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Delete a chat message from Supabase ──
+app.post('/api/delete-message', async (req, res) => {
+  const { messageId } = req.body || {};
+  if (!messageId) return res.status(400).json({ ok: false, error: 'Missing messageId' });
+  if (!supabase) return res.json({ ok: false, note: 'supabase unavailable' });
+  try {
+    const { error } = await supabase.from('chat_messages').delete().eq('message_id', messageId);
+    if (error) throw error;
+    console.log('[delete-msg] Deleted:', messageId);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[delete-msg] Error:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ── To-Do sync endpoint (full replace per project) ──
 app.post('/api/todos/sync', async (req, res) => {
   const { projectId, todos } = req.body || {};
@@ -2732,6 +2806,24 @@ async function checkProjectDesires(pid, cfg) {
     // ── Parse LLM reply: extract markers, separate message text ──
     const parsed = parseProactiveReply(content);
     const { message: cleanMessage, actionType, actions } = parsed;
+
+    // ── Log token usage for proactive behavior ──
+    if (data.usage) {
+      const usage = data.usage;
+      const inTokens = usage.prompt_tokens || usage.input_tokens || 0;
+      const outTokens = usage.completion_tokens || usage.output_tokens || 0;
+      const proactiveType = 'proactive_' + (actionType || 'message');
+      const wId = cfg._chatId || '';
+      fetch(`http://localhost:${PORT}/api/log-token-call`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: pid, windowId: wId,
+          actionType: proactiveType,
+          inputTokens: inTokens, outputTokens: outTokens,
+          model: cfg.model || 'unknown'
+        })
+      }).catch(function(e) { console.error('[token-log] Failed to report:', e.message); });
+    }
 
     // Compute post-decay value so frontend can sync desire state immediately
     const postDecayValue = Math.floor(driveValue * 0.2);
