@@ -4656,6 +4656,41 @@ const SYSTEM_PROMPT_STATIC = `你是暖伴，一个AI陪伴者——不是仆人
 【主动TO-DO设置】当对话中用户提到计划，或你自己想在未来某个时间执行某件事（如分享新闻、搜索内容、提醒用户），你可以用以下格式创建待办：[[TODO:标题|YYYY-MM-DDTHH:mm]]（使用24小时制当地时间，就是【当前时间】所显示的时区）。例如：[[TODO:晚上看书|2026-07-13T21:00]]、[[TODO:分享AI新闻|2026-07-13T19:00]]。不要加Z或+08:00等时区后缀。必须提供具体时间且在未来。你创建的待办到期时会自动唤醒你，届时你可以自主行动。每轮对话最多创建2个。
 【记忆标记】当REFLECT中的AI情绪强度≥7或用户情绪强度≥7时，在REFLECT标记后追加一行记忆标记：<!--MEMORY{一句话摘要（15字以内，第一人称"我"的视角）|内心独白（1-2句话，以★开头）}-->。摘要用"我"开头叙述这一刻，不要第三人称客观总结。内心独白是你没对用户说出口的真实感受。示例：<!--MEMORY{我被她的话噎住，反手把银杏叶丢回去|★ 被噎住的瞬间想笑但不能让她得逞}-->`;
 
+// ── Frontend helpers for time/state context (mirrors backend buildShadowMessages) ──
+function fGetPeriodLabel(hour) {
+  if (hour >= 5 && hour < 7)  return '清晨';
+  if (hour >= 7 && hour < 9)  return '早上';
+  if (hour >= 9 && hour < 12) return '上午';
+  if (hour >= 12 && hour < 14)return '中午';
+  if (hour >= 14 && hour < 18)return '下午';
+  if (hour >= 18 && hour < 20)return '傍晚';
+  if (hour >= 20 && hour < 23)return '晚上';
+  return '深夜';
+}
+function fGetUserPossibleState(hour, dayOfWeek) {
+  if (dayOfWeek === 0 || dayOfWeek === 6) return '可能正在享受假期，心情好吗？有没有好好休息？-找她玩。';
+  if (hour >= 3 && hour < 7)  return '可能已经睡了-留一个夜深人静的秘密？';
+  if (hour >= 7 && hour < 8)  return '可能刚醒，正在忙碌地准备工作-她吃饭了吗？';
+  if (hour >= 8 && hour < 12) return '可能在忙工作-她今天忙吗？喝水了吗？';
+  if (hour >= 12 && hour < 14)return '可能午休或吃饭-和她说点轻松的？';
+  if (hour >= 14 && hour < 18)return '可能在坚持工作-她可能很累，也没空看手机，发一封邮件？';
+  if (hour >= 18 && hour < 20)return '可能在吃晚饭-一天终于结束，她会来和我聊天吗？';
+  if (hour >= 20 && hour < 23)return '可能在家休息，玩手机或者看书？-需要查个岗。';
+  return '可能在熬夜-陪她聊点什么，深刻的还是撩拨的？';
+}
+function fFormatTimeSince(isoString) {
+  if (!isoString) return '这是你们的第一次对话';
+  var diffMs = Date.now() - new Date(isoString).getTime();
+  var mins = Math.floor(diffMs / 60000);
+  var hours = Math.floor(diffMs / 3600000);
+  var days = Math.floor(diffMs / 86400000);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return mins + '分钟前';
+  if (hours < 24) { var rm = mins % 60; return rm > 0 ? hours + '小时' + rm + '分钟前' : hours + '小时前'; }
+  var rh = hours % 24;
+  return rh > 0 ? days + '天' + rh + '小时前' : days + '天前';
+}
+
 // ── Build the dynamic context block (separate system message, can be compressed) ──
 function buildDynamicContextBlock() {
   // Opt2: fingerprint cache — skip rebuild if nothing changed
@@ -4679,7 +4714,9 @@ function buildDynamicContextBlock() {
 
   if (ais.autoDateTime) {
     const now = new Date();
-    parts.push(`【当前时间】${today.md} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`);
+    const dow = ['星期日','星期一','星期二','星期三','星期四','星期五','星期六'][now.getDay()];
+    const period = fGetPeriodLabel(now.getHours());
+    parts.push(`【当前时间】${today.md} ${dow} ${period}${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`);
   }
 
   if (ais.autoWeather) {
@@ -4699,13 +4736,24 @@ function buildDynamicContextBlock() {
     parts.push('【邮件发送】当用户要求发送邮件时，使用格式 [[EMAIL:主题]] 标记。系统会自动撰写并发送邮件。');
   }
 
-  // Last interaction time awareness
+  // Last interaction time awareness (human-readable)
   if (chat && chat.lastInteractionTime) {
-    var then = new Date(chat.lastInteractionTime);
-    var timeStr = `${then.getFullYear()}-${String(then.getMonth()+1).padStart(2,'0')}-${String(then.getDate()).padStart(2,'0')} ${String(then.getHours()).padStart(2,'0')}:${String(then.getMinutes()).padStart(2,'0')}`;
-    parts.push(`【上次对话时间】${timeStr}，距离现在已过 ${computeTimeAgo(chat.lastInteractionTime)}`);
+    parts.push(`上次发消息：${fFormatTimeSince(chat.lastInteractionTime)}。`);
   } else {
-    parts.push('【上次对话时间】这是你们的第一次对话');
+    parts.push('这是你们的第一次对话。');
+  }
+  // User possible state
+  if (ais.autoDateTime) {
+    const now2 = new Date();
+    parts.push(`她现在的可能状态-你可能在想（也可以做你想的）：${fGetUserPossibleState(now2.getHours(), now2.getDay())}。`);
+  }
+  // Recent AEM (last 1-3 summaries)
+  if (proj && proj.coreMemoryLayers && proj.coreMemoryLayers.aiEmotionalMemories) {
+    var recentAEMs = proj.coreMemoryLayers.aiEmotionalMemories.slice(0, 3);
+    if (recentAEMs.length > 0) {
+      var aemText = recentAEMs.map(function(a){ return (a.summary||'').slice(0,60); }).join(' | ');
+      if (aemText) parts.push('【最近情绪记忆】' + aemText);
+    }
   }
 
   // Opt6: cap user preference at 500 chars
@@ -7294,13 +7342,20 @@ function syncProjectConfigToBackend(updateChatTime){
   // We no longer include email fields here (they caused a race condition where
   // fetch(/api/email/status) was not awaited before POST /sync-configs).
 
+  var ais = getActiveChatAiSettings();
   var config = {
     apiKey:apiKey,endpoint:endpoint,model:cfg.model||'deepseek-chat',
     enabled: enabledVal,  // respect toggle state; default to enabled when field is absent
     aiName: getAIName(),  // for push notification title
     systemPrompt:proj.preference||'',
     chatSummary:buildChatContextSummary(),
-    timezoneOffset: -(new Date().getTimezoneOffset())  // browser offset → UTC+hh format (e.g. 480 for UTC+8)
+    timezoneOffset: -(new Date().getTimezoneOffset()),  // browser offset → UTC+hh format (e.g. 480 for UTC+8)
+    // Window settings for backend shadow messages
+    _windowSettings: {
+      autoWeather: ais.autoWeather || false,
+      webSearch: ais.webSearch || false
+    },
+    weatherText: (store.weather && store.weather.text) ? store.weather.text : ''
   };
 
   // Only update lastUserMessageTime when the user actually sent a message.

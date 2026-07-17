@@ -1776,7 +1776,10 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       // Used by applyBackendDesireGrowth() for confirmation time calculation.
       ...(config.lastUserMessageTime !== undefined ? { lastUserMessageTime: config.lastUserMessageTime } : {}),
       // Timezone offset for user-local time in Cron-triggered messages (default UTC+8)
-      ...(config.timezoneOffset !== undefined ? { timezoneOffset: config.timezoneOffset } : {})
+      ...(config.timezoneOffset !== undefined ? { timezoneOffset: config.timezoneOffset } : {}),
+      // Window settings for backend shadow messages (weather, search, etc.)
+      ...(config._windowSettings !== undefined ? { _windowSettings: config._windowSettings } : {}),
+      ...(config.weatherText !== undefined ? { weatherText: config.weatherText } : {})
     };
     // Diagnostic log: confirm what's being synced
     const ds = config._desireState;
@@ -2440,6 +2443,23 @@ function getToneLabel(overThreshold) {
   return 'direct';
 }
 
+// ── Fetch filtered todos for shadow messages ──
+// User-created todos: visible to all windows. AI-created todos: only visible to the creating window.
+async function fetchFilteredTodos(projectId, windowId) {
+  if (!supabase || !projectId) return [];
+  try {
+    const { data } = await supabase.from('project_todos')
+      .select('*').eq('project_id', projectId).eq('done', false)
+      .order('created_at', { ascending: false }).limit(20);
+    if (!data) return [];
+    return data.filter(function(t) {
+      if (t.creator === 'user') return true;           // user todos → all windows
+      if (t.creator === 'ai') return t.chat_id === windowId; // AI todos → own window only
+      return true;
+    });
+  } catch (e) { return []; }
+}
+
 // ── Build shadow message for proactive behavior (driven by desire system) ──
 async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
   const labels = {
@@ -2511,6 +2531,16 @@ async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
   }
   const maxDriveLabel = labels[maxDriveKey] || maxDriveKey;
 
+  // Fetch filtered todos (user: all windows, AI: this window only)
+  const filteredTodos = await fetchFilteredTodos(pid, windowId);
+  let todosBlock = '';
+  if (filteredTodos.length > 0) {
+    const todoLines = filteredTodos.slice(0, 5).map(function(t) {
+      return '- ' + t.title + (t.time ? ' (' + (t.time||'').toString().slice(0,16).replace('T',' ') + ')' : '');
+    });
+    todosBlock = '【待办】\n' + todoLines.join('\n');
+  }
+
   const shadowContent = `<system_trigger>
 现在是${currentDateTime}（${weekday}）。
 距离上次用户发来消息：${timeSinceLastUserMessage}。
@@ -2519,6 +2549,9 @@ async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
 你此刻的欲望驱动：${driveList}（阈值${threshold}，最大驱动${maxDriveLabel} ${maxDriveValue}，语气强度${toneLabel}）。
 
 ${realCtx ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.chatSummary : '') : (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '')}
+${(cfg._windowSettings && cfg._windowSettings.autoWeather && cfg.weatherText) ? '\n【当前天气】' + cfg.weatherText : ''}
+${(cfg._windowSettings && cfg._windowSettings.webSearch) ? '\n【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。' : ''}
+${todosBlock ? '\n' + todosBlock : ''}
 
 可选行动（必须严格遵循标记格式）：
 - 发消息：直接说出你想说的话，1-3句，不加任何前缀
