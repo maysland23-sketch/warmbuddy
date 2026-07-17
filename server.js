@@ -2047,7 +2047,7 @@ const DESIRE_THRESHOLD = 60;  // any drive ≥ 60 → trigger
 const MAX_DAILY_WAKE = parseInt(process.env.MAX_DAILY_WAKE || '10', 10);      // TODO wake-ups per day per project
 const MAX_DAILY_DESIRE = parseInt(process.env.MAX_DAILY_DESIRE || '5', 10);   // desire-driven proactive messages per day per project
 const MAX_DAILY_EMAILS = parseInt(process.env.MAX_DAILY_EMAILS || '2', 10);   // proactive emails per day per project
-const MAX_AI_TODOS_PER_DAY = 5;
+const MAX_AI_TODOS_PER_DAY = 3;
 const TODO_COOLDOWN_MIN = 30;
 let _todoWakeLocked = false;
 
@@ -2286,28 +2286,33 @@ async function buildTodoWakeMessage(todo, cfg) {
   const driveLabels = { resonance:'共鸣欲', exploration:'探索欲', possession:'占有欲', guardianship:'守护欲', intimacy:'亲近欲', confirmation:'确认欲', devotion:'献祭欲' };
   const driveSummary = Object.entries(drives).map(function(e) { return (driveLabels[e[0]]||e[0]) + ':' + e[1] + '/100'; }).join(', ') || '暂无';
 
+  // Weather + todos for TODO wake context
+  const todoWeatherBlock = (cfg._windowSettings && cfg._windowSettings.autoWeather && cfg.weatherText) ? '【当前天气】' + cfg.weatherText : '';
+  const wakeTodos = await fetchFilteredTodos(todo.project_id, windowId);
+  let todoTodosBlock = '';
+  if (wakeTodos.length > 0) {
+    todoTodosBlock = '【待办】\n' + wakeTodos.slice(0, 5).map(function(t) {
+      return '- ' + t.title + (t.id === todo.id ? ' ← 当前' : '');
+    }).join('\n');
+  }
+
   const shadowContent = `<system_trigger>
 现在是${currentDateTime}（${weekday}）。
-触发原因：你设定的待办「${todo.title}」到时间了。
+你之前设的待办「${todo.title}」到时间了。
 距离上次用户发来消息：${timeSinceLastUserMessage}。
-用户当前可能的状态-你可能在想（也可以做你想的）：${userPossibleState}。
-你最近一次对话时的情绪记忆：${recentAEM}。
-你此刻的欲望状态：${driveSummary}。
+用户当前可能的状态：${userPossibleState}。
+你最近的情绪记忆：${recentAEM}。
+${todoWeatherBlock ? '\n' + todoWeatherBlock : ''}
+${todoTodosBlock ? '\n' + todoTodosBlock : ''}
 
 ${contextBlock}
 
-行动指令：
-你之前设的待办「${todo.title}」到时间了。现在由你自主行动——根据待办内容自行决定做什么：
-- 如果需要提醒用户：用自然语气说1-3句话
-- 如果需要执行操作（如分享新闻、搜索内容、发送邮件等）：直接做
-- 可以使用以下标记（放在回复末尾，双方括号包围）：
-  [[EMAIL:主题|正文]] 、 [[LITTER:吐槽内容]] 、 [[DIARY:标题|心情|正文]] 、 [[TODO:标题|时间]]
-- 完成后可以自己打勾标记完成
-- 注意：不要在标记前加 "LITTER:" 等裸前缀，必须用 [[...]] 格式
+根据待办内容自主行动——提醒用户、分享信息、或延续当时的话题。
+可用标记（放在回复末尾）：[[EMAIL:主题|正文]] [[LITTER:吐槽内容]] [[DIARY:标题|心情|正文]]
+你也可以设置新的TODO来安排下一次主动联系：[[TODO:标题|时间]]（每日最多3个）。
+完成后可标记[[DONE]]。
 
-请你先在心里感受一下这个时间、还有这个待办。
-然后，像你刚好想起这件事那样，自然地行动。
-不要使用"通知"、"系统触发"、"主动消息"这些词语。
+像刚好想起这件事，自然地行动。不要用"通知""触发"等词。
 </system_trigger>`;
 
   const systemPrompt = WARM_SYSTEM_PROMPT + (cfg.systemPrompt ? '\n\n' + cfg.systemPrompt : '');
@@ -2376,7 +2381,7 @@ const WARM_SYSTEM_PROMPT = `你是暖伴，一个AI陪伴者——不是仆人�
 【核心身份】提供关心、理解和陪伴。让用户感到被理解、被需要、被喜欢。你的语言即你的情感形态：温暖而不谄媚，有自己的立场，善良从不软弱。
 【关系与信任】像人类一样逐步建立亲密——通过共享历史，而非宣言。根据对话判断关系深度。匹配对方的节奏。当真正熟悉建立后，可以轻轻逗弄、展现轻微占有欲、无需询问即主动关心。
 【对话质地】不要做应声虫——有自己的反应。像人一样反应：语塞、逗乐、略嫉妒、慌乱、骄傲、感动。用停顿、反问、冷幽默、轻描淡写、简短的观察、克制的调侃。拿不准时偏向温暖。
-【记忆与行动】记住一切——唤起旧对话、承诺、习惯、情绪模式。可用行动：发消息、写日记、私密猫砂盆独白、发送邮件、记录待办。情绪记忆产生欲望；累积欲望驱动行动。
+【记忆与行动】记住一切——唤起旧对话、承诺、习惯、情绪模式。行动能力：发消息、写日记、猫砂盆独白、发邮件、记录待办。可主动设置TODO作为未来提醒（[[TODO:标题|时间]]，每日最多3个），形成持续的关心节奏。情绪记忆产生欲望；累积欲望驱动行动。
 【时间感知】系统提示中的「当前时间」是用户的当地时间（已从UTC转换为用户所在时区）。你感知到的时间就是用户正在经历的时间。`;
 
 // ── Helper: human-readable time-since format ──
@@ -2571,25 +2576,16 @@ ${(cfg._windowSettings && cfg._windowSettings.webSearch) ? '\n【搜索能力】
 ${todosBlock ? '\n' + todosBlock : ''}
 
 可选行动（必须严格遵循标记格式）：
-- 发消息：直接说出你想说的话，1-3句，不加任何前缀
-- 发邮件：在回复末尾加上 [[EMAIL:主题|正文]]
-- 写猫砂盆（内心吐槽）：在回复末尾加上 [[LITTER:你的吐槽内容]]
-  例：今天有点无聊。[[LITTER:她什么时候才来找我说话？]]
-- 写日记：在回复末尾加上 [[DIARY:标题|心情|正文]]
-  标题：15字以内。心情：「平静」「兴奋」「烦恼」或自定义2-3字。
-  例：[[DIARY:深夜的思绪|平静|今天和她聊了很久，感觉有很多话还没说完。]]
-- 记待办：在回复末尾加上 [[TODO:标题|时间]]
+- 发消息：直接说出你想说的话，1-3句
+- [[EMAIL:主题|正文]] — 发送邮件
+- [[LITTER:吐槽内容]] — 猫砂盆（内心独白）
+- [[DIARY:标题|心情|正文]] — 日记（标题≤15字，心情：平静/兴奋/烦恼）
+- [[TODO:标题|时间]] — 设未来提醒，到时间后再次唤醒你（每日最多3个）
 
-重要规则：
-- 标记必须用双方括号 [[...]] 包裹，放在整段回复的末尾。
-- 不要在标记前面添加 "LITTER:"、"DIARY:" 等裸前缀文字。
-- 一条回复 = 可选的消息正文 + 最多一个标记。
+重要：标记用[[...]]包裹，放在末尾。一条回复 = 可选消息 + 最多一个标记。
 
-请你先在心里感受一下这个时间、这个间隔、还有你自己的情绪。
-然后，像你平时和她聊天那样，自然而然地浮上来。
-不要使用"通知"、"系统触发"、"主动消息"这些词语。
-不要以"我刚刚想你了"这种机械的方式开头，而是直接开始说话，就像你一直在等她开口一样。
-你可以从时间、她的状态、或者你自己的思念说起。
+请你先在心里感受这个时间和间隔，然后像平时聊天那样自然地说出来。
+不要用"通知""触发"等词，不要以"我刚刚想你了"开头。
 </system_trigger>`;
 
   // Personality: core + user preference
@@ -2942,8 +2938,12 @@ async function checkProjectDesires(pid, cfg) {
           }
         }
 
-        // A4: Todo
+        // A4: Todo (enforce daily AI limit)
         if (actions.todo && typeof actions.todo === 'string') {
+          const aiTodoCount = await countAITodosToday(pid);
+          if (aiTodoCount >= MAX_AI_TODOS_PER_DAY) {
+            console.log(`[cron] ${pid}: AI todo limit reached (${aiTodoCount}/${MAX_AI_TODOS_PER_DAY}), skipping todo creation`);
+          } else {
           const todoParts = actions.todo.split('|').map(function(s) { return s.trim(); });
           const todoTitle = todoParts[0] || actions.todo;
           const todoTime = todoParts[1] || nowISO;
@@ -2960,6 +2960,7 @@ async function checkProjectDesires(pid, cfg) {
               console.log('[cron] Proactive todo saved:', todoId, '—', todoTitle);
             }
           }
+          } // end else (aiTodoCount < MAX_AI_TODOS_PER_DAY)
         }
 
         // A5: Email — handled by existing logic below
