@@ -2191,8 +2191,10 @@ ${contextBlock}
 你之前设的待办「${todo.title}」到时间了。现在由你自主行动——根据待办内容自行决定做什么：
 - 如果需要提醒用户：用自然语气说1-3句话
 - 如果需要执行操作（如分享新闻、搜索内容、发送邮件等）：直接做
-- 可以发消息、发邮件（[[EMAIL:主题]]）、写猫砂盆（LITTER:）、写日记（DIARY:）、记新待办（[[TODO:标题|时间]]）
+- 可以使用以下标记（放在回复末尾，双方括号包围）：
+  [[EMAIL:主题|正文]] 、 [[LITTER:吐槽内容]] 、 [[DIARY:标题|心情|正文]] 、 [[TODO:标题|时间]]
 - 完成后可以自己打勾标记完成
+- 注意：不要在标记前加 "LITTER:" 等裸前缀，必须用 [[...]] 格式
 像你刚好想起这件事，自然地行动。
 </system_trigger>`;
 
@@ -2317,16 +2319,21 @@ ${driveList}
 
 ${realCtx ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.chatSummary : '') : (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '')}
 
-可选行动：
-- 发消息：1-3句自然的话，像你刚好想到对方一样
-- 发邮件：回复含 [[EMAIL:主题]]，正文为邮件内容
-- 写猫砂盆：回复含 LITTER: ，写一条没说出口的心里话
-- 写日记：回复含 DIARY: ，记录你此刻的感受
-- 记待办：回复含 [[TODO:标题]]，帮对方记一件事
+可选行动（必须严格遵循标记格式）：
+- 发消息：直接说出你想说的话，1-3句，不加任何前缀
+- 发邮件：在回复末尾加上 [[EMAIL:主题|正文]]
+- 写猫砂盆（内心吐槽）：在回复末尾加上 [[LITTER:你的吐槽内容]]
+  例：今天有点无聊。[[LITTER:她什么时候才来找我说话？]]
+- 写日记：在回复末尾加上 [[DIARY:标题|心情|正文]]
+  标题：15字以内。心情：「平静」「兴奋」「烦恼」或自定义2-3字。
+  例：[[DIARY:深夜的思绪|平静|今天和她聊了很久，感觉有很多话还没说完。]]
+- 记待办：在回复末尾加上 [[TODO:标题|时间]]
 
-根据你的欲望状态、语气指引和上下文，自主选择一种行动并执行。
-回复格式：先写行动内容。如有标记（[[EMAIL:...]]、[[TODO:...]]）则自动执行对应操作。
-不要输出"根据系统指令"或解释你在做什么——就像你内心的驱动力自然地推动你行动。
+重要规则：
+- 标记必须用双方括号 [[...]] 包裹，放在整段回复的末尾。
+- 不要在标记前面添加 "LITTER:"、"DIARY:" 等裸前缀文字。
+- 一条回复 = 可选的消息正文 + 最多一个标记。
+- 不要输出"根据系统指令"或解释你在做什么。
 </system_trigger>`;
 
   // Personality: core + user preference
@@ -2394,6 +2401,84 @@ function applyBackendDesireGrowth(ds, pid, cfg) {
 
   ds._lastBackendGrowth = now.toISOString();
   return changed ? ds : null;
+}
+
+/**
+ * Parse LLM proactive reply: extract [[TYPE:...]] markers, separate message text,
+ * and handle malformed raw TYPE: prefix fallback.
+ * Returns { message, actionType, actions: { litter?, diary?, todo?, email? } }
+ * where actions.diary is { title, mood, body } for structured diary format.
+ */
+function parseProactiveReply(content) {
+  let message = content;
+  const actions = {};
+
+  // ── Pass 1: Match [[TYPE:内容]] standard markers ──
+  const markerRegex = /\[\[(\w+):([\s\S]*?)\]\]/gi;
+  let match;
+  while ((match = markerRegex.exec(content)) !== null) {
+    const type = match[1].toLowerCase();
+    const body = match[2].trim();
+    if (!actions[type]) {
+      actions[type] = body;
+    }
+    message = message.replace(match[0], '');
+  }
+
+  // ── Pass 2: Fallback — raw LITTER:/DIARY:/MESSAGE: prefix (no brackets) ──
+  const fallbackTypes = ['LITTER', 'DIARY', 'MESSAGE', 'EMAIL', 'TODO'];
+  for (const fb of fallbackTypes) {
+    const fbRegex = new RegExp('(?:^|\\n)\\s*' + fb + ':\\s*(.+?)(?=\\n|$)', 'im');
+    const fbMatch = message.match(fbRegex);
+    if (fbMatch) {
+      const fbType = fb.toLowerCase();
+      if (!actions[fbType]) {
+        console.warn('[proactive] LLM used raw ' + fb + ': instead of [[' + fb + ':]] — auto-corrected');
+        actions[fbType] = fbMatch[1].trim();
+      }
+      message = message.replace(fbMatch[0], '');
+    }
+  }
+
+  // ── Pass 3: Parse DIARY sub-fields (标题|心情|正文) ──
+  if (actions.diary && typeof actions.diary === 'string') {
+    const parts = actions.diary.split('|').map(function(s) { return s.trim(); });
+    if (parts.length >= 3) {
+      actions.diary = {
+        title: parts[0].substring(0, 15),
+        mood: parts[1] || '平静',
+        body: parts.slice(2).join('|')
+      };
+    } else {
+      // Compat: old format — no title/mood
+      actions.diary = {
+        title: actions.diary.substring(0, 15),
+        mood: '平静',
+        body: actions.diary
+      };
+    }
+  }
+
+  // ── Final: strip any residual markers and prefixes ──
+  message = message
+    .replace(/\[\[\w+:[\s\S]*?\]\]/g, '')
+    .replace(/^(MESSAGE|LITTER|DIARY|EMAIL|TODO):\s*/gmi, '')
+    .trim();
+
+  // Determine primary action type (for push notification tag matching)
+  let actionType = 'message';
+  if (actions.email) actionType = 'email';
+  else if (actions.todo) actionType = 'todo';
+  else if (actions.litter) actionType = 'litter';
+  else if (actions.diary) actionType = 'diary';
+
+  if (message) {
+    console.log('[proactive] Parsed — message: ' + message.substring(0, 80) + ' | actions: ' + Object.keys(actions).join(','));
+  } else {
+    console.log('[proactive] Parsed — no message | actions: ' + Object.keys(actions).join(','));
+  }
+
+  return { message: message, actionType: actionType, actions: actions };
 }
 
 async function checkProjectDesires(pid, cfg) {
@@ -2512,131 +2597,110 @@ async function checkProjectDesires(pid, cfg) {
       return;
     }
 
-    // Determine action type from content
-    let actionType = 'message';
-    if (/\[\[EMAIL:/.test(content)) actionType = 'email';
-    else if (/\[\[TODO:/.test(content)) actionType = 'todo';
-    else if (/LITTER/i.test(content)) actionType = 'litter';
-    else if (/DIARY/i.test(content)) actionType = 'diary';
+    // ── Parse LLM reply: extract markers, separate message text ──
+    const parsed = parseProactiveReply(content);
+    const { message: cleanMessage, actionType, actions } = parsed;
 
     // Compute post-decay value so frontend can sync desire state immediately
     const postDecayValue = Math.floor(driveValue * 0.2);
     const chatId = cfg._chatId || '';
-    const cleanContent = content.replace(/^(MESSAGE|LITTER|DIARY):/i, '').trim();
     const nowISO = new Date().toISOString();
 
-    // ── Step A: Write to business table by action type (primary persistence) ──
+    // ── Step A: Write to business tables by action type ──
     if (supabase) {
       try {
-        switch (actionType) {
-          case 'message': {
-            const proactiveMsgId = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
-            if (chatId) {
-              const { error: msgErr } = await supabase.from('chat_messages').upsert({
-                project_id: pid,
-                window_id: chatId,
-                message_id: proactiveMsgId,
-                role: 'assistant',
-                content: cleanContent,
-                token_usage: 0,
-                created_at: nowISO,
-                metadata: { proactive: true, drive_key: driveKey, post_decay_value: postDecayValue }
-              }, { onConflict: 'message_id' });
-              if (msgErr) {
-                console.error('[cron] chat_messages upsert error:', msgErr.message, msgErr.code, msgErr.details);
-              } else {
-                console.log('[cron] Proactive message saved to chat_messages:', proactiveMsgId);
-              }
-            }
-            break;
+        // A1: If there's a clean message, store in chat_messages
+        if (cleanMessage && chatId) {
+          const proactiveMsgId = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+          const { error: msgErr } = await supabase.from('chat_messages').upsert({
+            project_id: pid,
+            window_id: chatId,
+            message_id: proactiveMsgId,
+            role: 'assistant',
+            content: cleanMessage,
+            token_usage: 0,
+            created_at: nowISO,
+            metadata: { proactive: true, drive_key: driveKey, post_decay_value: postDecayValue }
+          }, { onConflict: 'message_id' });
+          if (msgErr) {
+            console.error('[cron] chat_messages upsert error:', msgErr.message, msgErr.code, msgErr.details);
+          } else {
+            console.log('[cron] Proactive message saved to chat_messages:', proactiveMsgId);
           }
-          case 'litter': {
-            const litterId = 'lt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-            const litterText = cleanContent.replace(/^LITTER:\s*/i, '').trim();
-            if (litterText) {
-              const { error: litterErr } = await supabase.from('litter_thoughts').insert({
-                id: litterId,
-                project_id: pid,
-                chat_id: chatId,
-                content: litterText,
-                date: nowISO.slice(0, 10),
-                time: nowISO,
-                source_window: chatId,
-                proactive: true,
-                created_at: nowISO
-              });
-              if (litterErr) {
-                console.error('[cron] litter_thoughts insert error:', litterErr.message, litterErr.code, litterErr.details);
-              } else {
-                console.log('[cron] Proactive litter saved:', litterId);
-              }
-            }
-            break;
-          }
-          case 'diary': {
-            const diaryId = 'd_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-            const diaryText = cleanContent.replace(/^DIARY:\s*/i, '').trim();
-            if (diaryText) {
-              const { error: diaryErr } = await supabase.from('diary_entries').insert({
-                id: diaryId,
-                project_id: pid,
-                chat_id: chatId,
-                date: nowISO.slice(0, 10),
-                time: nowISO,
-                content: diaryText,
-                mood: 'calm',
-                author: 'ai',
-                proactive: true,
-                created_at: nowISO
-              });
-              if (diaryErr) {
-                console.error('[cron] diary_entries insert error:', diaryErr.message, diaryErr.code, diaryErr.details);
-              } else {
-                console.log('[cron] Proactive diary saved:', diaryId);
-              }
-            }
-            break;
-          }
-          case 'todo': {
-            const todoMatch = content.match(/\[\[TODO:([^\]|]+)(?:\|([^\]]+))?\]\]/);
-            if (todoMatch) {
-              const todoId = 't_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-              const { error: todoErr } = await supabase.from('project_todos').insert({
-                id: todoId,
-                project_id: pid,
-                chat_id: chatId,
-                title: todoMatch[1].trim(),
-                time: todoMatch[2] || nowISO,
-                creator: 'ai',
-                triggered: false,
-                done: false,
-                created_at: nowISO
-              });
-              if (todoErr) {
-                console.error('[cron] project_todos insert error:', todoErr.message, todoErr.code, todoErr.details);
-              } else {
-                console.log('[cron] Proactive todo saved:', todoId, '—', todoMatch[1].trim());
-              }
-            }
-            break;
-          }
-          case 'email':
-            // Handled by existing email logic below (Resend API)
-            break;
         }
+
+        // A2: Litter
+        if (actions.litter && typeof actions.litter === 'string') {
+          const litterId = 'lt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+          const litterText = actions.litter.trim();
+          if (litterText) {
+            const { error: litterErr } = await supabase.from('litter_thoughts').insert({
+              id: litterId, project_id: pid, chat_id: chatId,
+              content: litterText, date: nowISO.slice(0, 10), time: nowISO,
+              source_window: chatId, proactive: true, created_at: nowISO
+            });
+            if (litterErr) {
+              console.error('[cron] litter_thoughts insert error:', litterErr.message, litterErr.code, litterErr.details);
+            } else {
+              console.log('[cron] Proactive litter saved:', litterId);
+            }
+          }
+        }
+
+        // A3: Diary (structured: { title, mood, body })
+        if (actions.diary && typeof actions.diary === 'object') {
+          const diaryId = 'd_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+          const { title, mood, body } = actions.diary;
+          if (body) {
+            const { error: diaryErr } = await supabase.from('diary_entries').insert({
+              id: diaryId, project_id: pid, chat_id: chatId,
+              date: nowISO.slice(0, 10), time: nowISO,
+              title: title || body.substring(0, 15),
+              content: body, mood: mood || '平静', author: 'ai',
+              proactive: true, created_at: nowISO
+            });
+            if (diaryErr) {
+              console.error('[cron] diary_entries insert error:', diaryErr.message, diaryErr.code, diaryErr.details);
+            } else {
+              console.log('[cron] Proactive diary saved:', diaryId, '—', title, '|', mood);
+            }
+          }
+        }
+
+        // A4: Todo
+        if (actions.todo && typeof actions.todo === 'string') {
+          const todoParts = actions.todo.split('|').map(function(s) { return s.trim(); });
+          const todoTitle = todoParts[0] || actions.todo;
+          const todoTime = todoParts[1] || nowISO;
+          if (todoTitle) {
+            const todoId = 't_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+            const { error: todoErr } = await supabase.from('project_todos').insert({
+              id: todoId, project_id: pid, chat_id: chatId,
+              title: todoTitle, time: todoTime, creator: 'ai',
+              triggered: false, done: false, created_at: nowISO
+            });
+            if (todoErr) {
+              console.error('[cron] project_todos insert error:', todoErr.message, todoErr.code, todoErr.details);
+            } else {
+              console.log('[cron] Proactive todo saved:', todoId, '—', todoTitle);
+            }
+          }
+        }
+
+        // A5: Email — handled by existing logic below
       } catch (businessErr) {
-        console.error('[cron] Business table write error for', actionType, ':', businessErr.message);
+        console.error('[cron] Business table write error:', businessErr.message);
       }
     }
 
-    // ── Step B: Store as system event in Supabase (unified audit log + frontend polling source) ──
+    // ── Step B: Store system event (unified audit log + frontend polling source) ──
     const savedEvent = await saveSystemEvent({
       projectId: pid,
       chatId: chatId,
       type: actionType,
       driveKey: driveKey,
       postDecayValue: postDecayValue,
-      content: cleanContent,
+      content: cleanMessage || (actions.litter || (actions.diary && actions.diary.body) || (actions.todo) || ''),
       timestamp: nowISO,
       pushSent: false,
       _hasContext: true
@@ -2649,8 +2713,8 @@ async function checkProjectDesires(pid, cfg) {
     // ── Step C: Send push notification ──
     if (pushSubscription) {
       // Body: show actual content for message/todo, hint for litter/diary/email (matching chat UI)
-      const chatHints = { message: cleanContent, todo: cleanContent, todo_wake: cleanContent, litter: '🐾 猫砂盆好像需要铲一铲', diary: '📖 日记里偷偷写了点什么', email: '📧 邮件已发送' };
-      const pushBody = (chatHints[actionType] || cleanContent).slice(0, 120);
+      const chatHints = { message: cleanMessage, todo: cleanMessage, todo_wake: cleanMessage, litter: '🐾 猫砂盆好像需要铲一铲', diary: '📖 日记里偷偷写了点什么', email: '📧 邮件已发送' };
+      const pushBody = (chatHints[actionType] || cleanMessage).slice(0, 120);
       // Title: use project's AI name
       const aiName = cfg.aiName || '暖伴';
       try {
@@ -2672,13 +2736,15 @@ async function checkProjectDesires(pid, cfg) {
     }
 
     // Handle email directly
-    if (actionType === 'email' && cfg.recipient) {
-      const emSubj = (content.match(/\[\[EMAIL:([^\]|]+)/) || [])[1] || '来自暖伴';
+    if (actions.email && cfg.recipient) {
+      const emParts = (typeof actions.email === 'string' ? actions.email : '').split('|').map(function(s) { return s.trim(); });
+      const emSubj = emParts[0] || '来自暖伴';
+      const emBody = emParts.slice(1).join('\n') || cleanMessage;
       try {
         await fetch('https://api.resend.com/emails', {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: 'WarmBuddy <onboarding@resend.dev>', to: cfg.recipient, subject: emSubj, text: content.replace(/\[\[EMAIL:[^\]]+\]\]/g, '').trim() })
+          body: JSON.stringify({ from: 'WarmBuddy <onboarding@resend.dev>', to: cfg.recipient, subject: emSubj, text: emBody })
         });
         // Update daily email count (persisted)
         resetDailyCountsIfNewDay(cfg);
