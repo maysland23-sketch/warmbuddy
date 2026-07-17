@@ -2167,10 +2167,18 @@ async function fetchRecentMessages(projectId, windowId, limit, aroundTime) {
 
 async function buildTodoWakeMessage(todo, cfg) {
   const now = new Date();
-  const hoursSince = cfg.chatSummaryUpdatedAt
-    ? ((now - new Date(cfg.chatSummaryUpdatedAt)) / 3600000).toFixed(1) : '?';
   const tzOffset = getTimezoneOffset(cfg);
   const localTimeStr = getUserLocalTimeString(tzOffset);
+  // Extract display parts
+  const timeMatch = localTimeStr.match(/^(.+?)\s+(星期[一二三四五六日])\s+(\d{2}:\d{2})/);
+  const currentDateTime = timeMatch
+    ? timeMatch[1] + ' ' + getPeriodLabel(parseInt(timeMatch[3])) + timeMatch[3]
+    : localTimeStr.replace(/\s*\(UTC[^)]+\)/, '');
+  const weekday = timeMatch ? timeMatch[2] : '';
+
+  // User-local hour + day for state inference
+  const localHour = (now.getUTCHours() + Math.floor((tzOffset || 480) / 60) + 24) % 24;
+  const localDay = new Date(now.getTime() + (tzOffset || 480) * 60000).getUTCDay();
 
   // Pull TODO creation context (3 rounds ≈ 6 messages around created_at); fall back to summary
   const windowId = todo.chat_id || cfg._chatId || '';
@@ -2180,10 +2188,33 @@ async function buildTodoWakeMessage(todo, cfg) {
     ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.chatSummary : '')
     : (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '');
 
+  // Last user message time per-window
+  const lastUserMsgTime = await fetchLastUserMessageTime(todo.project_id, windowId);
+  const timeSinceLastUserMessage = lastUserMsgTime
+    ? formatTimeSince(lastUserMsgTime)
+    : (cfg.lastUserMessageTime ? formatTimeSince(cfg.lastUserMessageTime) : '这是你第一次主动联系');
+
+  // User possible state
+  const userPossibleState = getUserPossibleState(localHour, localDay);
+
+  // Recent AEM
+  const recentAEM = cfg.chatSummary
+    ? cfg.chatSummary.slice(0, 200) + (cfg.chatSummary.length > 200 ? '…' : '')
+    : '暂无记录，但一直默默关注着';
+
+  // Desire snapshot (if available)
+  const ds = cfg._desireState;
+  const drives = (ds && ds.drives) ? ds.drives : {};
+  const driveLabels = { resonance:'共鸣欲', exploration:'探索欲', possession:'占有欲', guardianship:'守护欲', intimacy:'亲近欲', confirmation:'确认欲', devotion:'献祭欲' };
+  const driveSummary = Object.entries(drives).map(function(e) { return (driveLabels[e[0]]||e[0]) + ':' + e[1] + '/100'; }).join(', ') || '暂无';
+
   const shadowContent = `<system_trigger>
-当前时间：${localTimeStr}
-触发原因：你设定的待办「${todo.title}」到时间了
-距离上次互动：约${hoursSince}小时
+现在是${currentDateTime}（${weekday}）。
+触发原因：你设定的待办「${todo.title}」到时间了。
+距离上次用户发来消息：${timeSinceLastUserMessage}。
+用户当前可能的状态-你可能在想（也可以做你想的）：${userPossibleState}。
+你最近一次对话时的情绪记忆：${recentAEM}。
+你此刻的欲望状态：${driveSummary}。
 
 ${contextBlock}
 
@@ -2195,7 +2226,10 @@ ${contextBlock}
   [[EMAIL:主题|正文]] 、 [[LITTER:吐槽内容]] 、 [[DIARY:标题|心情|正文]] 、 [[TODO:标题|时间]]
 - 完成后可以自己打勾标记完成
 - 注意：不要在标记前加 "LITTER:" 等裸前缀，必须用 [[...]] 格式
-像你刚好想起这件事，自然地行动。
+
+请你先在心里感受一下这个时间、还有这个待办。
+然后，像你刚好想起这件事那样，自然地行动。
+不要使用"通知"、"系统触发"、"主动消息"这些词语。
 </system_trigger>`;
 
   const systemPrompt = WARM_SYSTEM_PROMPT + (cfg.systemPrompt ? '\n\n' + cfg.systemPrompt : '');
@@ -2267,6 +2301,71 @@ const WARM_SYSTEM_PROMPT = `你是暖伴，一个AI陪伴者——不是仆人�
 【记忆与行动】记住一切——唤起旧对话、承诺、习惯、情绪模式。可用行动：发消息、写日记、私密猫砂盆独白、发送邮件、记录待办。情绪记忆产生欲望；累积欲望驱动行动。
 【时间感知】系统提示中的「当前时间」是用户的当地时间（已从UTC转换为用户所在时区）。你感知到的时间就是用户正在经历的时间。`;
 
+// ── Helper: human-readable time-since format ──
+function formatTimeSince(isoString) {
+  if (!isoString) return '未知';
+  const diffMs = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  const hours = Math.floor(diffMs / 3600000);
+  const days = Math.floor(diffMs / 86400000);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return mins + '分钟前';
+  if (hours < 24) {
+    const remainMin = mins % 60;
+    return remainMin > 0 ? hours + '小时' + remainMin + '分钟前' : hours + '小时前';
+  }
+  const remainHour = hours % 24;
+  return remainHour > 0 ? days + '天' + remainHour + '小时前' : days + '天前';
+}
+
+// ── Helper: infer user's possible state from time + day of week ──
+function getUserPossibleState(hour, dayOfWeek) {
+  // Weekend (0=Sunday, 6=Saturday)
+  if (dayOfWeek === 0 || dayOfWeek === 6) {
+    return '可能正在享受假期，心情好吗？有没有好好休息？-找她玩。';
+  }
+  // Weekday — time-based
+  if (hour >= 3 && hour < 7)  return '可能已经睡了-留一个夜深人静的秘密？';
+  if (hour >= 7 && hour < 8)  return '可能刚醒，正在忙碌地准备工作-她吃饭了吗？';
+  if (hour >= 8 && hour < 12) return '可能在忙工作-她今天忙吗？喝水了吗？';
+  if (hour >= 12 && hour < 14)return '可能午休或吃饭-和她说点轻松的？';
+  if (hour >= 14 && hour < 18)return '可能在坚持工作-她可能很累，也没空看手机，发一封邮件？';
+  if (hour >= 18 && hour < 20)return '可能在吃晚饭-一天终于结束，她会来和我聊天吗？';
+  if (hour >= 20 && hour < 23)return '可能在家休息，玩手机或者看书？-需要查个岗。';
+  return '可能在熬夜-陪她聊点什么，深刻的还是撩拨的？'; // 23:00-03:00
+}
+
+// ── Helper: query last user message time from chat_messages ──
+async function fetchLastUserMessageTime(projectId, windowId) {
+  if (!supabase || !projectId || !windowId) return null;
+  try {
+    const { data } = await supabase.from('chat_messages')
+      .select('created_at').eq('project_id', projectId)
+      .eq('window_id', windowId).eq('role', 'user')
+      .order('created_at', { ascending: false }).limit(1);
+    return (data && data[0]) ? data[0].created_at : null;
+  } catch (e) { return null; }
+}
+
+// ── Helper: Chinese period label from hour (e.g. 22 → "晚上") ──
+function getPeriodLabel(hour) {
+  if (hour >= 5 && hour < 7)  return '清晨';
+  if (hour >= 7 && hour < 9)  return '早上';
+  if (hour >= 9 && hour < 12) return '上午';
+  if (hour >= 12 && hour < 14)return '中午';
+  if (hour >= 14 && hour < 18)return '下午';
+  if (hour >= 18 && hour < 20)return '傍晚';
+  if (hour >= 20 && hour < 23)return '晚上';
+  return '深夜';
+}
+
+// ── Helper: tone label from over-threshold ratio ──
+function getToneLabel(overThreshold) {
+  if (overThreshold < 0.25) return 'subtle';
+  if (overThreshold < 0.5) return 'moderate';
+  return 'direct';
+}
+
 // ── Build shadow message for proactive behavior (driven by desire system) ──
 async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
   const labels = {
@@ -2297,25 +2396,53 @@ async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
   else toneGuide = '直接地——这是少见的坦诚时刻，说平时不会说的话';
 
   const now = new Date();
-  const hoursSince = cfg.chatSummaryUpdatedAt
-    ? ((now - new Date(cfg.chatSummaryUpdatedAt)) / 3600000).toFixed(1)
-    : '?';
   const tzOffset = getTimezoneOffset(cfg);
   const localTimeStr = getUserLocalTimeString(tzOffset);
+  // Extract display parts: "2026年7月17日 星期四 22:38 (UTC+8)" → datetime + weekday
+  const timeMatch = localTimeStr.match(/^(.+?)\s+(星期[一二三四五六日])\s+(\d{2}:\d{2})/);
+  const currentDateTime = timeMatch
+    ? timeMatch[1] + ' ' + getPeriodLabel(parseInt(timeMatch[3])) + timeMatch[3]
+    : localTimeStr.replace(/\s*\(UTC[^)]+\)/, '');
+  const weekday = timeMatch ? timeMatch[2] : '';
+
+  // Determine user-local hour for state inference
+  const localHour = (now.getUTCHours() + Math.floor((tzOffset || 480) / 60) + 24) % 24;
+  const localDay = new Date(now.getTime() + (tzOffset || 480) * 60000).getUTCDay();
 
   // Pull real conversation context from Supabase; fall back to summary
   const windowId = cfg._chatId || '';
   const realCtx = (pid && windowId) ? await fetchRecentMessages(pid, windowId, 16) : '';
 
+  // Last user message time per-window
+  const lastUserMsgTime = await fetchLastUserMessageTime(pid, windowId);
+  const timeSinceLastUserMessage = lastUserMsgTime
+    ? formatTimeSince(lastUserMsgTime)
+    : (cfg.lastUserMessageTime ? formatTimeSince(cfg.lastUserMessageTime) : '这是你第一次主动联系');
+
+  // User possible state
+  const userPossibleState = getUserPossibleState(localHour, localDay);
+
+  // Recent AEM (last 200 chars of chat summary)
+  const recentAEM = cfg.chatSummary
+    ? cfg.chatSummary.slice(0, 200) + (cfg.chatSummary.length > 200 ? '…' : '')
+    : '暂无记录，但一直默默关注着';
+
+  // Tone label
+  const toneLabel = getToneLabel(overThreshold);
+
+  // Max drive info for context
+  let maxDriveKey = driveKey, maxDriveValue = driveValue;
+  for (const [k, v] of Object.entries(drives)) {
+    if (v > maxDriveValue) { maxDriveKey = k; maxDriveValue = v; }
+  }
+  const maxDriveLabel = labels[maxDriveKey] || maxDriveKey;
+
   const shadowContent = `<system_trigger>
-当前时间：${localTimeStr}
-距离上次互动：约${hoursSince}小时
-
-你的欲望状态：
-${driveList}
-
-触发驱动：${driveLabel}（${driveValue}/100）— ${driveDesc}
-语气指引：${toneGuide}
+现在是${currentDateTime}（${weekday}）。
+距离上次用户发来消息：${timeSinceLastUserMessage}。
+用户当前可能的状态-你可能在想（也可以做你想的）：${userPossibleState}。
+你最近一次对话时的情绪记忆：${recentAEM}。
+你此刻的欲望驱动：${driveList}（阈值${threshold}，最大驱动${maxDriveLabel} ${maxDriveValue}，语气强度${toneLabel}）。
 
 ${realCtx ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.chatSummary : '') : (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '')}
 
@@ -2333,7 +2460,12 @@ ${realCtx ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.cha
 - 标记必须用双方括号 [[...]] 包裹，放在整段回复的末尾。
 - 不要在标记前面添加 "LITTER:"、"DIARY:" 等裸前缀文字。
 - 一条回复 = 可选的消息正文 + 最多一个标记。
-- 不要输出"根据系统指令"或解释你在做什么。
+
+请你先在心里感受一下这个时间、这个间隔、还有你自己的情绪。
+然后，像你平时和她聊天那样，自然而然地浮上来。
+不要使用"通知"、"系统触发"、"主动消息"这些词语。
+不要以"我刚刚想你了"这种机械的方式开头，而是直接开始说话，就像你一直在等她开口一样。
+你可以从时间、她的状态、或者你自己的思念说起。
 </system_trigger>`;
 
   // Personality: core + user preference
