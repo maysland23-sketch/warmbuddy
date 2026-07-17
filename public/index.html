@@ -4083,7 +4083,7 @@ function shakeLitterBox(){
   if(store.litterThoughts.length>0){
     const t=store.litterThoughts[0];
     const typeLabel = LITTER_TYPE_LABELS[t.thought_type] || '';
-    area.innerHTML=`<div class="litter-thought-card"><button class="litter-thought-close" onclick="dismissLitterThought('${t.id}')">✕</button><div class="thought-emoji">🐈</div>${typeLabel?`<div style="font-size:10px;color:var(--text-lighter);text-align:center;margin-bottom:4px;letter-spacing:0.04em;">${typeLabel}</div>`:''}<div class="thought-text">${t.content}</div><div class="thought-date"><span style="cursor:pointer;color:var(--accent);" onclick="navigateToDiaryReplySource('${t.sourceChatId||''}','${t.sourceWindow||''}')">from ${t.sourceWindow||'unknown'}</span> · ${t.date} ${t.time||''}</div></div>`;
+    area.innerHTML=`<div class="litter-thought-card"><button class="litter-thought-close" onclick="dismissLitterThought('${t.id}')">✕</button><div class="thought-emoji">🐈</div>${typeLabel?`<div style="font-size:10px;color:var(--text-lighter);text-align:center;margin-bottom:4px;letter-spacing:0.04em;">${typeLabel}</div>`:''}<div class="thought-text">${t.content}</div><div class="thought-date"><span style="cursor:pointer;color:var(--accent);" onclick="navigateToDiaryReplySource('${t.sourceChatId||''}','${t.sourceWindow||''}')">from ${getChatDisplayName(t.sourceChatId)||t.sourceWindow||'unknown'}</span> · ${t.date} ${(t.time&&t.time.length>8)?t.time.slice(11,16):(t.time||'')}</div></div>`;
     if (!t.revealed) { t.revealed = true; t.revealed_at = fmtDate().iso; }
     icon.classList.remove('has-thoughts'); const dot=icon.querySelector('.litter-box-dot'); if(dot)dot.classList.remove('has-thoughts');
   } else { area.innerHTML=''; toast('你铲走了旺财的猫砂……'); }
