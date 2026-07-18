@@ -1384,6 +1384,42 @@ function migrateStore() {
   // ============ v2.3: Load AEMs from per-window memory files for each project ============
   loadMemoryFilesForAllProjects().catch(function(e){ console.warn('[migrate] Memory file loading failed:', e.message); });
 
+  // ============ v2.4: Repair cross-project AEM misplacement ============
+  // Build chat→project map, then move AEMs back to their correct project
+  (function(){
+    var chatMap = {};
+    for (var i = 0; i < store.projects.length; i++) {
+      var p = store.projects[i];
+      for (var j = 0; j < (p.chats||[]).length; j++) {
+        chatMap[p.chats[j].id] = p.id;
+      }
+    }
+    for (var i = 0; i < store.projects.length; i++) {
+      var proj = store.projects[i];
+      var cml = proj.coreMemoryLayers;
+      if (!cml || !cml.aiEmotionalMemories) continue;
+      var aems = cml.aiEmotionalMemories;
+      for (var k = aems.length - 1; k >= 0; k--) {
+        var aem = aems[k];
+        var sc = aem.sourceChatId || aem.sourceWindowId || '';
+        var owner = chatMap[sc];
+        if (owner && owner !== proj.id) {
+          // This AEM belongs to another project — move it
+          var target = store.projects.find(function(x){return x.id===owner;});
+          if (target && target.coreMemoryLayers) {
+            var tcml = target.coreMemoryLayers;
+            if (!tcml.aiEmotionalMemories) tcml.aiEmotionalMemories = [];
+            // Avoid duplicates
+            if (!tcml.aiEmotionalMemories.some(function(m){return m.id===aem.id;})) {
+              tcml.aiEmotionalMemories.unshift(aem);
+            }
+            aems.splice(k, 1);
+          }
+        }
+      }
+    }
+  })();
+
   // ============ v2.1: derivedRelationalPatterns — moved to per-project ============
   const oldDRP = ms.derivedRelationalPatterns;  // legacy global (may exist from old localStorage)
   const oldPP = ms.personalityProfiles;          // legacy global (may exist from old localStorage)
