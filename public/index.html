@@ -8900,59 +8900,9 @@ async function sendPushNotification(title, body, opts = {}) {
 }
 
 async function init(){
-  // ── AEM recovery for pmqmkvxp9kogv (one-time; flag persisted in localforage) ──
-  try {
-    var recDone = await localforage.getItem('_aemRecoveryDone_pmqmkvxp9kogv');
-    if (!recDone) {
-      var recResp = await fetch('/aem-recovery.json');
-      if (recResp.ok) {
-        var recFile = await recResp.json();
-        await localforage.setItem('warmbuddy-memory-pmqmkvxp9kogv-cmr3nolv7rivs', recFile);
-        await localforage.setItem('_aemRecoveryDone_pmqmkvxp9kogv', true);
-        console.log('[recovery] AEM memory file restored (' + (recFile.aiEmotionalMemories||[]).length + ' AEMs) — reloading...');
-        location.reload();
-        return;
-      }
-    }
-  } catch(e) { console.warn('[recovery] AEM recovery skipped:', e.message); }
-
   await loadStore();
   store._importing = false;
   store._importLock = false;
-
-  // ── One-time cross-project data repair ──
-  try {
-    var repairRan = await localforage.getItem('_crossProjectRepairDone');
-    if (!repairRan) {
-      var chatMap = {};
-      store.projects.forEach(function(p){ (p.chats||[]).forEach(function(c){ chatMap[c.id]=p.id; }); });
-      var totalMoved = 0;
-      store.projects.forEach(function(p){
-        var cml = p.coreMemoryLayers; if(!cml)return;
-        ['aiEmotionalMemories','userStarredMemories','diaryAndLitterbox'].forEach(function(layer){
-          var items = cml[layer]; if(!items)return;
-          for(var k=items.length-1;k>=0;k--){
-            var sc = items[k].sourceChatId || items[k].sourceWindowId || items[k].sourceWindow || '';
-            var owner = chatMap[sc];
-            if(owner && owner !== p.id){
-              var target = store.projects.find(function(x){return x.id===owner;});
-              if(target && target.coreMemoryLayers){
-                if(!target.coreMemoryLayers[layer]) target.coreMemoryLayers[layer] = [];
-                if(!target.coreMemoryLayers[layer].some(function(m){return m.id===items[k].id;})){
-                  target.coreMemoryLayers[layer].unshift(items[k]);
-                  totalMoved++;
-                }
-                items.splice(k,1);
-              }
-            }
-          }
-        });
-      });
-      if(totalMoved > 0){ saveStore(); console.log('[repair] 跨项目修复: 移回 '+totalMoved+' 条记忆'); }
-      await localforage.setItem('_crossProjectRepairDone', true);
-    }
-  } catch(e) { console.warn('[repair] 跨项目修复跳过:', e.message); }
-
   initTheme(); // apply saved theme before any rendering
   loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
   updateSettingsUI();
