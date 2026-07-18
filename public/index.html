@@ -8879,6 +8879,21 @@ async function sendPushNotification(title, body, opts = {}) {
 }
 
 async function init(){
+  // ── AEM recovery for pmqmkvxp9kogv (one-time, before store loads) ──
+  if (!store._aemRecovered) {
+    try {
+      var recResp = await fetch('/aem-recovery.json');
+      if (recResp.ok) {
+        var recFile = await recResp.json();
+        await localforage.setItem('warmbuddy-memory-pmqmkvxp9kogv-cmr3nolv7rivs', recFile);
+        store._aemRecovered = true;
+        console.log('[recovery] AEM memory file restored (' + (recFile.aiEmotionalMemories||[]).length + ' AEMs) — reloading...');
+        location.reload();
+        return;
+      }
+    } catch(e) { console.warn('[recovery] AEM recovery skipped:', e.message); }
+  }
+
   await loadStore();
   store._importing = false; // reset stale import flag (must be AFTER loadStore, which may load _importing=true from corrupted save)
   store._importLock = false; // always reset import lock on fresh page load
