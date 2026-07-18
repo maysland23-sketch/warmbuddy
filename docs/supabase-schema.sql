@@ -157,6 +157,19 @@ CREATE INDEX IF NOT EXISTS idx_diary_entries_project ON diary_entries(project_id
 ALTER TABLE diary_entries DISABLE ROW LEVEL SECURITY;
 GRANT ALL ON diary_entries TO PUBLIC;
 
+-- Table 8: Poke events (user ↔ AI nudge/poke interactions)
+CREATE TABLE IF NOT EXISTS poke_events (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  chat_id TEXT DEFAULT '',
+  content TEXT NOT NULL,
+  source TEXT DEFAULT 'ai',  -- 'ai' or 'user'
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_poke_events_project ON poke_events(project_id, created_at);
+ALTER TABLE poke_events DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON poke_events TO PUBLIC;
+
 -- Grant access
 GRANT ALL ON project_configs TO PUBLIC;
 GRANT ALL ON app_state TO PUBLIC;

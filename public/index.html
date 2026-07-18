@@ -376,6 +376,21 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
   color: var(--text-lighter); letter-spacing: 0.04em;
   padding: 2px 6px 0; opacity: 0.6;
 }
+.bubble-source-label {
+  font-size: 9px; color: var(--accent-soft); letter-spacing: 0.04em;
+  padding: 2px 4px 0; opacity: 0.7; font-family: var(--font-cn);
+}
+/* Date separator */
+.chat-date-separator {
+  text-align: center; padding: 12px 0 8px; font-size: 12px;
+  color: var(--text-lighter); letter-spacing: 0.04em;
+  font-family: var(--font-cn);
+}
+/* Time gap separator */
+.chat-gap-separator {
+  border-top: 1px solid var(--border-light);
+  margin: 10px 0; opacity: 0.6;
+}
 /* WeChat-style system message */
 .chat-system-msg {
   text-align: center; padding: 6px 0; margin: 2px 0;
@@ -780,6 +795,24 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .chat-attach-btn { width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg-card); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--text-lighter); transition: all 0.2s; flex-shrink: 0; }
 .chat-attach-btn:hover { border-color: var(--accent); color: var(--accent); }
 
+/* ── More menu (pops up below input) ── */
+.more-menu {
+  position: absolute; bottom: 52px; right: 0;
+  display: flex; gap: 10px; padding: 10px 14px;
+  background: var(--bg-card); border-radius: 16px;
+  box-shadow: var(--shadow-md); border: 1px solid var(--border-light);
+  z-index: 20; animation: moreMenuIn 0.2s ease;
+}
+@keyframes moreMenuIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+.more-menu-item {
+  width: 44px; height: 44px; border-radius: 50%;
+  border: 1px solid var(--border-light); background: var(--bg);
+  font-size: 18px; cursor: pointer; display: flex; align-items: center;
+  justify-content: center; transition: all 0.2s;
+}
+.more-menu-item:active { transform: scale(0.93); background: var(--accent-pale); }
+.more-menu-empty { border-style: dashed; opacity: 0.3; cursor: default; pointer-events: none; }
+
 /* ── File attachment preview bar ── */
 .file-attach-preview { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 12px; background: var(--bg); border-top: 1px solid var(--border-light); }
 .file-attach-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 12px; background: var(--bg-card); border: 1px solid var(--border); font-size: 11px; }
@@ -877,11 +910,17 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
     <div class="draft-bubbles-scroll" id="draftBubblesScroll"></div>
   </div>
   <div class="file-attach-preview" id="fileAttachPreview" style="display:none;"></div>
-  <div class="chat-input-area">
+  <div class="chat-input-area" style="position:relative;">
     <textarea class="chat-input" id="chatInput" placeholder="type a message..." rows="1"></textarea>
     <button class="chat-send-plus" id="chatSendPlus" onclick="stageDraftBubble()" title="暂存为草稿" style="display:none;">+</button>
-    <button class="chat-attach-btn" id="chatAttachBtn" onclick="document.getElementById('chatFileInput').click()" title="附加文件">📎</button>
+    <button class="chat-attach-btn" id="chatAttachBtn" onclick="toggleMoreMenu()" title="更多">···</button>
     <button class="chat-send" id="chatSendBtn" onclick="sendMessage()">↑</button>
+    <div class="more-menu" id="moreMenu" style="display:none;">
+      <button class="more-menu-item" onclick="event.stopPropagation();document.getElementById('chatFileInput').click();toggleMoreMenu();" title="添加附件">📎</button>
+      <button class="more-menu-item" onclick="event.stopPropagation();openPokeSettings();toggleMoreMenu();" title="戳一戳设置">👆</button>
+      <button class="more-menu-item more-menu-empty"></button>
+      <button class="more-menu-item more-menu-empty"></button>
+    </div>
   </div>
 </div>
 
@@ -2909,6 +2948,7 @@ function getDerivedPatterns() { const p = getActiveProject(); return p ? p.deriv
 function getPersonalityProfiles() { const p = getActiveProject(); return p ? p.personalityProfiles : null; }
 function getCoreMemoryLayers() { const p = getActiveProject(); return p ? p.coreMemoryLayers : null; }
 function escapeHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function getDriveLabel(key){var m={resonance:'共鸣欲',exploration:'探索欲',possession:'占有欲',guardianship:'守护欲',intimacy:'亲近欲',confirmation:'确认欲',devotion:'献祭欲',todo:'待办提醒'};return m[key]||key||'';}
 function weekLabel(d) { d=d||new Date(); const y=d.getFullYear(); const j1=new Date(y,0,1); const w=Math.ceil(((d-j1)/86400000+j1.getDay()+1)/7); return `${y}-W${String(w).padStart(2,'0')}`; }
 function toast(m) { const t=$('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),2000); }
 function showStatusToast(m) { const t=$('toast'); t.textContent=m; t.classList.add('show'); clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('show'),3500); }
@@ -4020,8 +4060,25 @@ function attachSwipeListeners(){
   });
 }
 
-function toggleTodo(id){const t=store.todos.find(x=>x.id===id);if(t){t.done=!t.done;renderTodos();syncTodosToBackend();}}
-function deleteTodo(id){store.todos=store.todos.filter(x=>x.id!==id);renderTodos();toast('Deleted');syncTodosToBackend();}
+function toggleTodo(id){
+  const t=store.todos.find(function(x){return x.id===id;});
+  if(!t)return;
+  t.done=!t.done;
+  renderTodos();
+  // Incremental PATCH to backend
+  fetch(BACKEND_URL+'/api/todos/'+encodeURIComponent(id),{
+    method:'PATCH',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({done:t.done})
+  }).catch(function(e){console.warn('[todo] PATCH failed:',e.message);});
+}
+function deleteTodo(id){
+  store.todos=store.todos.filter(function(x){return x.id!==id;});
+  renderTodos();toast('Deleted');
+  // Incremental DELETE to backend
+  fetch(BACKEND_URL+'/api/todos/'+encodeURIComponent(id),{
+    method:'DELETE'
+  }).catch(function(e){console.warn('[todo] DELETE failed:',e.message);});
+}
 
 function addTodo(){
   const isGoal=todoTab==='long';
@@ -4034,14 +4091,32 @@ function addTodo(){
   ]);
 }
 function saveTodo(){
-  const text=$('newTodoText').value.trim(),type=$('newTodoType').value; if(!text){toast('Please enter text');return;}
+  var text=$('newTodoText').value.trim(),type=$('newTodoType').value; if(!text){toast('Please enter text');return;}
+  var proj=getActiveProject();
+  var now=new Date();
   if(type==='long'){
-    const deadline=$('newTodoDeadline').value.trim()||'2026-12-31';
-    store.todos.unshift({id:'t'+gid(''),text,done:false,time:'',type:'long',deadline,progress:0,dailyLogs:[]});
-    syncTodosToBackend();
+    var deadline=$('newTodoDeadline').value.trim()||'2026-12-31';
+    var id='t'+gid('');
+    store.todos.unshift({id:id,text,done:false,time:'',type:'long',deadline:deadline,progress:0,dailyLogs:[],creator:'user',createdAt:now.toISOString()});
+    // Incremental POST to backend
+    fetch(BACKEND_URL+'/api/todos',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({projectId:proj?proj.id:'',id:id,title:text,time:deadline+'T23:59:00Z',creator:'user'})
+    }).catch(function(e){console.warn('[todo] POST failed:',e.message);});
   } else {
-    const time=$('newTodoTime').value.trim(); store.todos.unshift({id:'t'+gid(''),text,done:false,time:time||'--:--',type:'short'});
-    syncTodosToBackend();
+    var time=$('newTodoTime').value.trim();
+    var id='t'+gid('');
+    var isoTime=null;
+    if(time&&/^\d{1,2}:\d{2}$/.test(time)){
+      var parts=time.split(':'); var h=parseInt(parts[0]),m=parseInt(parts[1]);
+      var today=new Date(); today.setHours(h,m,0,0); isoTime=today.toISOString();
+    }
+    store.todos.unshift({id:id,text,done:false,time:time||'--:--',type:'short',creator:'user',createdAt:now.toISOString()});
+    // Incremental POST to backend
+    fetch(BACKEND_URL+'/api/todos',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({projectId:proj?proj.id:'',id:id,title:text,time:isoTime||now.toISOString(),creator:'user'})
+    }).catch(function(e){console.warn('[todo] POST failed:',e.message);});
   }
   store._importing = true; closeModal(); renderTodos(); toast('Added');
 }
@@ -5495,7 +5570,38 @@ function renderChatMessages(preserveScroll){
   el.classList.toggle('batch-select-mode', batchSelectMode);
 
   let html='';
+  var shownDate='';
+  var prevTimeMin=null;
   chat.messages.forEach((m,i)=>{
+    // ── Date separator: first message of each day ──
+    var dateMatch=(m.time||'').match(/(\d{4}-\d{2}-\d{2})/);
+    var msgDate=dateMatch ? dateMatch[1] : '';
+    // For regular messages without date in time, use today
+    if(!msgDate && m.role!=='system'){
+      var now=new Date();
+      msgDate=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0');
+    }
+    if(msgDate && msgDate!==shownDate){
+      var d=new Date(msgDate+'T00:00:00');
+      var weekdays=['星期日','星期一','星期二','星期三','星期四','星期五','星期六'];
+      var weekday=isNaN(d.getTime())?'':weekdays[d.getDay()];
+      html+='<div class="chat-date-separator">📅 '+msgDate+' '+weekday+'</div>';
+      shownDate=msgDate;
+    }
+    // ── Time gap separator: ≥5 min between consecutive messages ──
+    if(i>0 && m.role!=='system'){
+      var timeMatch=(m.time||'').match(/(\d{2}:\d{2})/);
+      if(timeMatch){
+        var parts=timeMatch[1].split(':');
+        var currMin=parseInt(parts[0])*60+parseInt(parts[1]);
+        if(prevTimeMin!==null){
+          var gap=currMin-prevTimeMin;
+          if(gap<0)gap+=24*60;
+          if(gap>=5){html+='<div class="chat-gap-separator"></div>';}
+        }
+        prevTimeMin=currMin;
+      }
+    }
     if (m.role === 'system') {
       html+=`<div class="chat-system-msg">
         <span class="chat-system-msg-text">${m.text}</span>
@@ -5524,7 +5630,7 @@ function renderChatMessages(preserveScroll){
     const displayText = resolveArtifactRefs(sanitizeDisplayText(m.text));
 
     html+=`<div class="chat-row ${m.role}" id="msg-${msgId}">
-      <div class="chat-avatar ${m.role}">${isUser?'MY':'✦'}</div>
+      <div class="chat-avatar ${m.role}" ${isUser?'':'ondblclick="handleAIAvatarDblClick()" title="双击戳一戳"'} style="${isUser?'':'cursor:pointer;'}">${isUser?'MY':'✦'}</div>
       <div class="chat-bubble-wrap">
         <div class="${bubbleCls}"
              onclick="handleBubbleClick(event,'${msgId}','${i}')"
@@ -5544,6 +5650,7 @@ function renderChatMessages(preserveScroll){
           <span class="bubble-time">${m.time}</span>
           ` : `
           <span class="bubble-time">${m.time}</span>
+          ${m._proactive ? `<span class="bubble-source-label">${m._todoWake ? '自我唤醒' : (m._desireType ? getDriveLabel(m._desireType) : '')}</span>` : ''}
           <span class="outer-star-icon ${starOnceCls} ${starSelectedCls}"
                 onclick="event.stopPropagation();${starAction}"
                 ontouchstart="event.stopPropagation();"
@@ -6601,6 +6708,23 @@ ${recentMsgIds}` });
     handleEmailSend(chat, subject, emailData.body);
   }
 
+  // ── Extract POKE markers from AI response ──
+  var pokeMatch = displayResponse.match(/\[\[POKE:([^\]]+)\]\]/i);
+  if (pokeMatch) {
+    var pokeContent = (pokeMatch[1] || '').trim().substring(0, 15);
+    displayResponse = displayResponse.replace(/\[\[POKE:[^\]]+\]\]/, '').trim();
+    var aiName = getAIName();
+    chat.messages.push({role:'system',contentType:'poke_notification',text:aiName+' 戳了戳 mays，'+pokeContent,time:bubbleTime,id:generateMsgId()});
+    // Also persist poke to Supabase
+    var proj=getActiveProject();
+    if(proj){
+      fetch(BACKEND_URL+'/api/poke-events',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({projectId:proj.id,chatId:chat.id,content:pokeContent,source:'ai'})
+      }).catch(function(){});
+    }
+  }
+
   // ── Extract artifacts (HTML cards/files) from AI response ──
   // Must happen BEFORE bubble parsing so cards don't go through sentence splitting
   if (displayResponse.includes('<!--ARTIFACT_START:')) {
@@ -6762,6 +6886,78 @@ function updateSendButtonState() {
   } else {
     btn.classList.remove('virtual');
   }
+}
+
+// ── More menu toggle ──
+function toggleMoreMenu(){
+  var menu=$('moreMenu');
+  if(!menu)return;
+  if(menu.style.display==='none'||!menu.style.display){
+    menu.style.display='flex';
+    // Click outside to close
+    setTimeout(function(){
+      document.addEventListener('click',closeMoreMenuOnClick,{once:true});
+    },50);
+  }else{
+    menu.style.display='none';
+  }
+}
+function closeMoreMenuOnClick(e){
+  var menu=$('moreMenu');
+  var btn=$('chatAttachBtn');
+  if(menu&&btn&&!menu.contains(e.target)&&e.target!==btn){
+    menu.style.display='none';
+  }
+}
+function closeMoreMenu(){
+  var menu=$('moreMenu');
+  if(menu)menu.style.display='none';
+}
+
+// ── Poke settings ──
+function openPokeSettings(){
+  var proj=getActiveProject();
+  var currentMsg=(proj&&proj._pokeMessage)?proj._pokeMessage:'在吗';
+  showModal('TA 戳了戳你，','<div style="text-align:center;">'+
+    '<input class="modal-input" id="pokeMessageInput" placeholder="在吗" value="'+escapeHtml(currentMsg)+'" maxlength="15" style="text-align:center;font-size:16px;">'+
+    '<div style="font-size:11px;color:var(--text-lighter);margin-top:6px;">（最多15字）</div>'+
+    '</div>',[
+    {label:'cancel',cls:'cancel',onclick:closeModal},
+    {label:'保存',cls:'confirm',onclick:savePokeSettings}
+  ]);
+}
+function savePokeSettings(){
+  var input=$('pokeMessageInput');
+  if(!input)return;
+  var msg=input.value.trim()||'在吗';
+  msg=msg.substring(0,15);
+  var proj=getActiveProject();
+  if(proj){
+    proj._pokeMessage=msg;
+    saveStore();
+    syncProjectConfigToBackend();
+  }
+  closeModal();toast('戳一戳已设置');
+}
+
+// ── Double-click AI avatar → poke ──
+function handleAIAvatarDblClick(){
+  var proj=getActiveProject();
+  var chat=getActiveChatObj();
+  if(!proj||!chat)return;
+  var pokeMsg=(proj&&proj._pokeMessage)?proj._pokeMessage:'在吗';
+  var aiName=getAIName();
+  var now=new Date();
+  var timeStr=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  chat.messages.push({role:'system',contentType:'poke_notification',text:'mays 戳了戳 '+aiName+'，'+pokeMsg,time:timeStr,id:generateMsgId()});
+  renderChatMessages();
+  saveStore();
+  // Persist to Supabase
+  fetch(BACKEND_URL+'/api/poke-events',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({projectId:proj.id,chatId:chat.id,content:pokeMsg,source:'user'})
+  }).catch(function(){});
+  toast('戳了戳 '+aiName);
 }
 
 async function sendAllDraftBubbles() {
@@ -7302,6 +7498,40 @@ function syncTodosToBackend(){
   }).catch(function(e){console.warn('[sync-todos] Failed:',e.message);});
 }
 
+// ── Fetch authoritative todos from backend (Supabase is source of truth) ──
+function fetchTodosFromBackend(projectId){
+  if(!projectId)return;
+  fetch(BACKEND_URL+'/api/todos/'+encodeURIComponent(projectId))
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(!data.todos||!data.todos.length)return;
+      var backendTodos=data.todos;
+      var merged=false;
+      // Map backend todo rows to frontend format
+      for(var i=0;i<backendTodos.length;i++){
+        var bt=backendTodos[i];
+        var existing=store.todos.find(function(t){return t.id===bt.id;});
+        if(existing){
+          // Update existing with backend state (backend is authority for done/triggered)
+          if(bt.done!==undefined)existing.done=bt.done;
+          if(bt.triggered!==undefined)existing.triggered=bt.triggered;
+        }else{
+          // New todo from backend
+          store.todos.unshift({
+            id:bt.id,text:bt.title,done:bt.done||false,
+            time:bt.time||'',type:bt.time&&/^\d{4}-\d{2}-\d{2}/.test(bt.time)?'long':'short',
+            creator:bt.creator||'user',chatId:bt.chat_id||'',
+            createdAt:bt.created_at,triggered:bt.triggered||false,
+            projectId:projectId
+          });
+          merged=true;
+        }
+      }
+      if(merged){saveStore();renderTodos();}
+      console.log('[fetch-todos] Loaded '+backendTodos.length+' todos from backend');
+    }).catch(function(e){console.warn('[fetch-todos] Failed:',e.message);});
+}
+
 function buildChatContextSummary(){
   var proj=getActiveProject(); if(!proj)return'';
   var chat=getActiveChatObj();
@@ -7361,7 +7591,8 @@ function syncProjectConfigToBackend(updateChatTime){
       autoWeather: ais.autoWeather || false,
       webSearch: ais.webSearch || false
     },
-    weatherText: (store.weather && store.weather.text) ? store.weather.text : ''
+    weatherText: (store.weather && store.weather.text) ? store.weather.text : '',
+    _pokeMessage: proj._pokeMessage || '在吗'
   };
 
   // Only update lastUserMessageTime when the user actually sent a message.
@@ -7513,10 +7744,17 @@ async function reconcileFromBackend() {
       console.log('[reconcile] Desire state reconciled from backend:', JSON.stringify(proj.desireSystem.drives));
     }
 
+    // Reconcile poke message from backend
+    if (data.config && data.config._pokeMessage !== undefined && !proj._pokeMessage) {
+      proj._pokeMessage = data.config._pokeMessage;
+    }
+
     // Immediately pull latest system events (don't wait for 30s poll)
     pollSystemEvents();
     // Also pull cloud-synced litter thoughts and diary entries
     pollCloudData(proj.id);
+    // Pull authoritative todos from backend (Supabase is source of truth)
+    fetchTodosFromBackend(proj.id);
   } catch (e) {
     console.warn('[reconcile] Failed:', e.message);
   }
@@ -7638,18 +7876,33 @@ function pollSystemEvents(){
       var chat=proj.chats.find(function(c){return c.id===evt.chatId;});
       if(!chat) chat=proj.chats[proj.chats.length-1];
       if(!chat)continue;
-      if(evt.type==='message'&&evt.content){
+      // ── Push AI's actual message to chat for ALL action types that have content ──
+      var hasAiMessage = evt.content && evt.type !== 'todo_wake' && evt.type !== 'poke';
+      if(hasAiMessage){
         chat.messages.push({role:'ai',text:evt.content,time:timeLabel,id:generateMsgId(),_proactive:true,_desireType:evt.driveKey});
+      }
+      // ── Then add the system notification for the action ──
+      if(evt.type==='message'){
+        // System notification for proactive message
+        chat.messages.push({role:'system',contentType:'proactive_notification',text:'💬 '+(driveLabel||'')+'提醒',time:timeLabel});
       }else if(evt.type==='email'){
         chat.messages.push({role:'system',contentType:'email_notification',text:'📧 邮件已发送',time:timeLabel});
       }else if(evt.type==='todo'){
-        chat.messages.push({role:'system',contentType:'todo_notification',text:'📋 有了新的 To-Do',time:timeLabel});
-        // Also store in todos if content has [[TODO:...]]
-        if(evt.content){
+        chat.messages.push({role:'system',contentType:'todo_notification',text:'📋 有了新的ToDo',time:timeLabel});
+        // Use event's todoId/todoTitle if available; fallback to parsing content for backward compat
+        if(evt.todoTitle && evt.todoId){
+          // Check if already exists (avoid duplicates from polling)
+          if(!store.todos.find(function(t){return t.id===evt.todoId;})){
+            store.todos.unshift({id:evt.todoId,text:evt.todoTitle,done:false,time:evt.timestamp,type:'short',creator:'ai',chatId:evt.chatId||'',createdAt:evt.timestamp,projectId:proj.id});
+            saveStore();
+          }
+        }else if(evt.content){
+          // Backward compat: try to parse [[TODO:...]] from content
           var todoMatch=evt.content.match(/\[\[TODO:([^\]|]+)(?:\|([^\]]+))?\]\]/);
           if(todoMatch){
-            store.todos.unshift({id:'t'+gid(''),text:todoMatch[1].trim(),done:false,time:todoMatch[2]||'--:--',type:'short',creator:'ai',chatId:evt.chatId||'',createdAt:evt.timestamp,projectId:proj.id});
-            syncTodosToBackend();
+            var newId='t'+gid('');
+            store.todos.unshift({id:newId,text:todoMatch[1].trim(),done:false,time:todoMatch[2]||'--:--',type:'short',creator:'ai',chatId:evt.chatId||'',createdAt:evt.timestamp,projectId:proj.id});
+            saveStore();
           }
         }
       }else if(evt.type==='litter'){
@@ -7662,7 +7915,7 @@ function pollSystemEvents(){
           }
         }
       }else if(evt.type==='diary'){
-        chat.messages.push({role:'system',contentType:'diary_notification',text:'📖 日记里偷偷写了点什么',time:timeLabel});
+        chat.messages.push({role:'system',contentType:'diary_notification',text:'📝 在日记里写了点什么',time:timeLabel});
         // Store diary entry locally
         if(evt.content){
           var diaryText=evt.content.replace(/^DIARY:\s*/i,'').trim();
@@ -7675,12 +7928,16 @@ function pollSystemEvents(){
         if(wakeText){
           chat.messages.push({role:'ai',text:wakeText,time:timeLabel,id:generateMsgId(),_proactive:true,_todoWake:true,_desireType:'todo'});
         }
-        chat.messages.push({role:'system',contentType:'todo_notification',text:'⏰ To-Do 被提醒了',time:timeLabel});
+        chat.messages.push({role:'system',contentType:'todo_notification',text:'⏰ 自我唤醒',time:timeLabel});
         if(evt.todoId){
           var todo=store.todos.find(function(t){return t.id===evt.todoId;});
-          if(todo){todo.triggered=true;}
-          syncTodosToBackend();
+          if(todo){todo.triggered=true;saveStore();}
         }
+      }else if(evt.type==='poke'){
+        // AI poked user — insert system message
+        var aiName=getAIName();
+        var pokeContent=evt.content||'在吗';
+        chat.messages.push({role:'system',contentType:'poke_notification',text:aiName+' 戳了戳 mays，'+pokeContent,time:timeLabel});
       }
       // Sync desire state using backend's exact post-decay value
       if (evt.driveKey && evt.postDecayValue !== undefined && evt.postDecayValue !== null && proj.desireSystem && proj.desireSystem.drives) {
