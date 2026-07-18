@@ -1339,20 +1339,26 @@ function migrateStore() {
   if (ms._usmSinceLastDerive === undefined) ms._usmSinceLastDerive = 0;
   if (!ms._lastWeeklyWrite) ms._lastWeeklyWrite = '';
 
-  // ============ v2.1: coreMemoryLayers — moved to per-project ============
-  const oldCML = getCoreMemoryLayers();  // legacy global (may exist from old localStorage)
+  // ============ v2.1: coreMemoryLayers — per-project, loaded from memory files ============
+  // v2.1 migration: if any project has a legacy global CML attached (old bug),
+  // detach it and let each project load from its own per-window memory files.
   for (const proj of store.projects) {
     if (!proj.coreMemoryLayers) {
-      if (oldCML && proj === store.projects[0]) {
-        proj.coreMemoryLayers = oldCML;
-      } else {
-        proj.coreMemoryLayers = { aiEmotionalMemories: [], userStarredMemories: [], diaryAndLitterbox: [] };
-      }
+      proj.coreMemoryLayers = { aiEmotionalMemories: [], userStarredMemories: [], diaryAndLitterbox: [] };
     }
     const cml = proj.coreMemoryLayers;
     if (!cml.aiEmotionalMemories) cml.aiEmotionalMemories = [];
     if (!cml.userStarredMemories) cml.userStarredMemories = [];
     if (!cml.diaryAndLitterbox) cml.diaryAndLitterbox = [];
+    // Detach any shared object reference from old migration bug
+    if (!proj._cmlDetached) {
+      proj.coreMemoryLayers = {
+        aiEmotionalMemories: cml.aiEmotionalMemories.slice(),
+        userStarredMemories: cml.userStarredMemories.slice(),
+        diaryAndLitterbox: cml.diaryAndLitterbox.slice()
+      };
+      proj._cmlDetached = true;
+    }
 
     // Legacy coreMemories migration (once): if global coreMemories exists, transfer to this project
     if (!proj._coreMemoriesMigrated && cml.aiEmotionalMemories.length === 0 && ms.coreMemories && ms.coreMemories.length > 0) {
@@ -1374,6 +1380,9 @@ function migrateStore() {
   // Remove legacy global keys
   if (getCoreMemoryLayers()) delete getCoreMemoryLayers();
   if (!ms._coreMemories_migrated && ms.coreMemories && ms.coreMemories.length > 0) ms._coreMemories_migrated = true;
+
+  // ============ v2.3: Load AEMs from per-window memory files for each project ============
+  loadMemoryFilesForAllProjects().catch(function(e){ console.warn('[migrate] Memory file loading failed:', e.message); });
 
   // ============ v2.1: derivedRelationalPatterns — moved to per-project ============
   const oldDRP = ms.derivedRelationalPatterns;  // legacy global (may exist from old localStorage)
@@ -4549,6 +4558,43 @@ function memoryFileKey(projectId, windowId) {
   return `warmbuddy-memory-${projectId}-${windowId}`;
 }
 
+// v2.3: Load AEMs from all per-window memory files into their respective projects
+async function loadMemoryFilesForAllProjects() {
+  for (const proj of store.projects) {
+    if (!proj.chats || proj.chats.length === 0) continue;
+    for (const chat of proj.chats) {
+      try {
+        const file = await readMemoryFile(proj.id, chat.id);
+        if (!file || !file.aiEmotionalMemories || file.aiEmotionalMemories.length === 0) continue;
+        const cml = proj.coreMemoryLayers;
+        if (!cml) continue;
+        // Merge: insert AEMs not already present (dedup by id)
+        var existingIds = new Set(cml.aiEmotionalMemories.map(function(m){return m.id;}));
+        var added = 0;
+        for (var i = file.aiEmotionalMemories.length - 1; i >= 0; i--) {
+          var aem = file.aiEmotionalMemories[i];
+          if (!existingIds.has(aem.id)) {
+            cml.aiEmotionalMemories.unshift(aem);
+            existingIds.add(aem.id);
+            added++;
+          }
+        }
+        if (added > 0) {
+          console.log('[memory-file] Loaded', added, 'AEMs from', proj.id, chat.id,
+            '(total:', cml.aiEmotionalMemories.length, ')');
+        }
+      } catch (e) {
+        console.warn('[memory-file] Failed to load', proj.id, chat.id, e.message);
+      }
+    }
+    // Trim to max 200
+    var cml2 = proj.coreMemoryLayers;
+    if (cml2 && cml2.aiEmotionalMemories && cml2.aiEmotionalMemories.length > 200) {
+      cml2.aiEmotionalMemories.length = 200;
+    }
+  }
+}
+
 async function readMemoryFile(projectId, windowId) {
   try {
     return await localforage.getItem(memoryFileKey(projectId, windowId));
@@ -4571,6 +4617,15 @@ async function writeMemoryFile(projectId, windowId, data, trigger) {
   const ms = store.memorySystem;
   const cml = getCoreMemoryLayers();
   const existing = await readMemoryFile(projectId, windowId);
+  // Guard: never overwrite existing AEM data with an empty array
+  // (can happen if CML was cleared by migration before memory files were loaded)
+  const newAEMs = (data && data.aiEmotionalMemories) || [];
+  const existingAEMs = (existing && existing.aiEmotionalMemories) || [];
+  if (newAEMs.length === 0 && existingAEMs.length > 0) {
+    console.warn('[memory-file] Refusing to overwrite', projectId, windowId,
+      'with empty AEMs (existing:', existingAEMs.length, '), trigger:', trigger);
+    return;
+  }
   const ts = new Date().toISOString();
 
   // Build v2.0 file from current in-memory state
