@@ -8917,8 +8917,42 @@ async function init(){
   } catch(e) { console.warn('[recovery] AEM recovery skipped:', e.message); }
 
   await loadStore();
-  store._importing = false; // reset stale import flag (must be AFTER loadStore, which may load _importing=true from corrupted save)
-  store._importLock = false; // always reset import lock on fresh page load
+  store._importing = false;
+  store._importLock = false;
+
+  // ── One-time cross-project data repair ──
+  try {
+    var repairRan = await localforage.getItem('_crossProjectRepairDone');
+    if (!repairRan) {
+      var chatMap = {};
+      store.projects.forEach(function(p){ (p.chats||[]).forEach(function(c){ chatMap[c.id]=p.id; }); });
+      var totalMoved = 0;
+      store.projects.forEach(function(p){
+        var cml = p.coreMemoryLayers; if(!cml)return;
+        ['aiEmotionalMemories','userStarredMemories','diaryAndLitterbox'].forEach(function(layer){
+          var items = cml[layer]; if(!items)return;
+          for(var k=items.length-1;k>=0;k--){
+            var sc = items[k].sourceChatId || items[k].sourceWindowId || items[k].sourceWindow || '';
+            var owner = chatMap[sc];
+            if(owner && owner !== p.id){
+              var target = store.projects.find(function(x){return x.id===owner;});
+              if(target && target.coreMemoryLayers){
+                if(!target.coreMemoryLayers[layer]) target.coreMemoryLayers[layer] = [];
+                if(!target.coreMemoryLayers[layer].some(function(m){return m.id===items[k].id;})){
+                  target.coreMemoryLayers[layer].unshift(items[k]);
+                  totalMoved++;
+                }
+                items.splice(k,1);
+              }
+            }
+          }
+        });
+      });
+      if(totalMoved > 0){ saveStore(); console.log('[repair] 跨项目修复: 移回 '+totalMoved+' 条记忆'); }
+      await localforage.setItem('_crossProjectRepairDone', true);
+    }
+  } catch(e) { console.warn('[repair] 跨项目修复跳过:', e.message); }
+
   initTheme(); // apply saved theme before any rendering
   loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
   updateSettingsUI();
