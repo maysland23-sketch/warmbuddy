@@ -1300,10 +1300,12 @@ async function loadStore() {
       if (raw) { var s = JSON.parse(raw); delete s._importing; delete s._pendingHandoff; delete s._importLock; Object.assign(store, s); }
     } catch(_) {}
   }
-  migrateStore();
+  await migrateStoreAsync();
 }
 
-function migrateStore() {
+function migrateStore() { migrateStoreAsync().catch(function(e){console.warn('[migrate] Error:',e.message);}); }
+
+async function migrateStoreAsync() {
   // ============ v1.0 compatibility: ensure memorySystem exists ============
   if (!store.memorySystem) {
     store.memorySystem = {
@@ -1382,10 +1384,10 @@ function migrateStore() {
   if (!ms._coreMemories_migrated && ms.coreMemories && ms.coreMemories.length > 0) ms._coreMemories_migrated = true;
 
   // ============ v2.3: Load AEMs from per-window memory files for each project ============
-  loadMemoryFilesForAllProjects().catch(function(e){ console.warn('[migrate] Memory file loading failed:', e.message); });
+  await loadMemoryFilesForAllProjects();
 
   // ============ v2.4: Repair cross-project memory misplacement (AEM + USM + DiaryLitter) ============
-  (function(){
+  await (async function(){
     var chatMap = {};
     for (var i = 0; i < store.projects.length; i++) {
       var p = store.projects[i];
@@ -1425,20 +1427,21 @@ function migrateStore() {
     }
     if (totalMoved > 0) {
       console.log('[repair] 跨项目修复: 移回 ' + totalMoved + ' 条记忆');
-      // Persist repaired store to localforage
-      saveStore();
-      // Also update per-window memory files for affected projects
-      // (use writeMemoryFile directly so we pass the correct project's cml, not active project's)
-      Object.keys(affectedProjects).forEach(function(pid){
+      // Write per-window files first (await completion), then save store
+      var pids = Object.keys(affectedProjects);
+      for (var pi = 0; pi < pids.length; pi++) {
+        var pid = pids[pi];
         var tp = store.projects.find(function(x){return x.id===pid;});
         if (tp && tp.coreMemoryLayers && tp.chats && tp.chats[0]) {
-          writeMemoryFile(pid, tp.chats[0].id, {
+          await writeMemoryFile(pid, tp.chats[0].id, {
             aiEmotionalMemories: tp.coreMemoryLayers.aiEmotionalMemories || [],
             userStarredMemories: tp.coreMemoryLayers.userStarredMemories || [],
             diaryAndLitterbox: tp.coreMemoryLayers.diaryAndLitterbox || []
           }, 'cross_project_repair');
         }
-      });
+      }
+      // Now persist store (per-window files are already updated)
+      saveStore();
     }
   })();
 
