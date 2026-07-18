@@ -1449,6 +1449,7 @@ async function migrateStoreAsync() {
       return p.name + ':' + ((p.coreMemoryLayers&&p.coreMemoryLayers.aiEmotionalMemories)||[]).length;
     }).join(' ');
     console.log('[repair] AEM counts: ' + counts);
+    if (totalMoved === 0) toast('📋 AEM: ' + counts);
   })();
 
   // ============ v2.1: derivedRelationalPatterns — moved to per-project ============
