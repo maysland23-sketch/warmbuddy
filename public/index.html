@@ -1427,29 +1427,19 @@ async function migrateStoreAsync() {
     }
     if (totalMoved > 0) {
       console.log('[repair] 跨项目修复: 移回 ' + totalMoved + ' 条记忆');
-      toast('🔧 修复: 移回 ' + totalMoved + ' 条记忆');
-      // Write per-window files first (await completion), then save store
-      var pids = Object.keys(affectedProjects);
-      for (var pi = 0; pi < pids.length; pi++) {
-        var pid = pids[pi];
-        var tp = store.projects.find(function(x){return x.id===pid;});
-        if (tp && tp.coreMemoryLayers && tp.chats && tp.chats[0]) {
-          await writeMemoryFile(pid, tp.chats[0].id, {
-            aiEmotionalMemories: tp.coreMemoryLayers.aiEmotionalMemories || [],
-            userStarredMemories: tp.coreMemoryLayers.userStarredMemories || [],
-            diaryAndLitterbox: tp.coreMemoryLayers.diaryAndLitterbox || []
-          }, 'cross_project_repair');
-        }
-      }
-      // Now persist store (per-window files are already updated)
-      saveStore();
     }
-    // Always show current state after repair
-    var counts = store.projects.map(function(p){
-      return p.name + ':' + ((p.coreMemoryLayers&&p.coreMemoryLayers.aiEmotionalMemories)||[]).length;
-    }).join(' ');
-    console.log('[repair] AEM counts: ' + counts);
-    if (totalMoved === 0) toast('📋 AEM: ' + counts);
+    // Always sync per-window files with in-memory cml (prevents drift)
+    for (var pi = 0; pi < store.projects.length; pi++) {
+      var tp = store.projects[pi];
+      if (tp && tp.coreMemoryLayers && tp.chats && tp.chats[0]) {
+        await writeMemoryFile(tp.id, tp.chats[0].id, {
+          aiEmotionalMemories: tp.coreMemoryLayers.aiEmotionalMemories || [],
+          userStarredMemories: tp.coreMemoryLayers.userStarredMemories || [],
+          diaryAndLitterbox: tp.coreMemoryLayers.diaryAndLitterbox || []
+        }, 'migrate_sync');
+      }
+    }
+    saveStore();
   })();
 
   // ============ v2.1: derivedRelationalPatterns — moved to per-project ============
