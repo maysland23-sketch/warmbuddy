@@ -6716,7 +6716,6 @@ ${recentMsgIds}` });
     var aiName = getAIName();
     chat.messages.push({role:'system',contentType:'poke_notification',text:aiName+' 戳了戳 mays，'+pokeContent,time:bubbleTime,id:generateMsgId()});
     // Also persist poke to Supabase
-    var proj=getActiveProject();
     if(proj){
       fetch(BACKEND_URL+'/api/poke-events',{
         method:'POST',headers:{'Content-Type':'application/json'},
