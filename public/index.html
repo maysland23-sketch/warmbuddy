@@ -1427,11 +1427,16 @@ function migrateStore() {
       console.log('[repair] 跨项目修复: 移回 ' + totalMoved + ' 条记忆');
       // Persist repaired store to localforage
       saveStore();
-      // Also update per-window memory files so syncProjectMemories won't overwrite
+      // Also update per-window memory files for affected projects
+      // (use writeMemoryFile directly so we pass the correct project's cml, not active project's)
       Object.keys(affectedProjects).forEach(function(pid){
-        var proj = store.projects.find(function(x){return x.id===pid;});
-        if (proj && proj.chats && proj.chats[0]) {
-          flushMemoryFile(pid, proj.chats[0].id, 'cross_project_repair');
+        var tp = store.projects.find(function(x){return x.id===pid;});
+        if (tp && tp.coreMemoryLayers && tp.chats && tp.chats[0]) {
+          writeMemoryFile(pid, tp.chats[0].id, {
+            aiEmotionalMemories: tp.coreMemoryLayers.aiEmotionalMemories || [],
+            userStarredMemories: tp.coreMemoryLayers.userStarredMemories || [],
+            diaryAndLitterbox: tp.coreMemoryLayers.diaryAndLitterbox || []
+          }, 'cross_project_repair');
         }
       });
     }
