@@ -8879,20 +8879,21 @@ async function sendPushNotification(title, body, opts = {}) {
 }
 
 async function init(){
-  // ── AEM recovery for pmqmkvxp9kogv (one-time, before store loads) ──
-  if (!store._aemRecovered) {
-    try {
+  // ── AEM recovery for pmqmkvxp9kogv (one-time; flag persisted in localforage) ──
+  try {
+    var recDone = await localforage.getItem('_aemRecoveryDone_pmqmkvxp9kogv');
+    if (!recDone) {
       var recResp = await fetch('/aem-recovery.json');
       if (recResp.ok) {
         var recFile = await recResp.json();
         await localforage.setItem('warmbuddy-memory-pmqmkvxp9kogv-cmr3nolv7rivs', recFile);
-        store._aemRecovered = true;
+        await localforage.setItem('_aemRecoveryDone_pmqmkvxp9kogv', true);
         console.log('[recovery] AEM memory file restored (' + (recFile.aiEmotionalMemories||[]).length + ' AEMs) — reloading...');
         location.reload();
         return;
       }
-    } catch(e) { console.warn('[recovery] AEM recovery skipped:', e.message); }
-  }
+    }
+  } catch(e) { console.warn('[recovery] AEM recovery skipped:', e.message); }
 
   await loadStore();
   store._importing = false; // reset stale import flag (must be AFTER loadStore, which may load _importing=true from corrupted save)
