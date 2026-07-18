@@ -1781,7 +1781,8 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       // Window settings for backend shadow messages (weather, search, etc.)
       ...(config._windowSettings !== undefined ? { _windowSettings: config._windowSettings } : {}),
       ...(config.weatherText !== undefined ? { weatherText: config.weatherText } : {}),
-      ...(config._pokeMessage !== undefined ? { _pokeMessage: config._pokeMessage } : {})
+      ...(config._userStatus !== undefined ? { _userStatus: config._userStatus } : {}),
+      ...(config._aiStatus !== undefined ? { _aiStatus: config._aiStatus } : {})
     };
     // Diagnostic log: confirm what's being synced
     const ds = config._desireState;
@@ -1981,6 +1982,41 @@ app.post('/api/poke-events', async (req, res) => {
     res.json({ ok: true, id });
   } catch (e) {
     console.error('[api] POST poke-events error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── User status endpoint ──
+app.put('/api/user-status', async (req, res) => {
+  const { projectId, status } = req.body || {};
+  if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
+  if (!supabase) return res.json({ ok: false, note: 'supabase unavailable' });
+  try {
+    const cfg = await loadProjectConfig(projectId) || {};
+    cfg._userStatus = (status || '').substring(0, 15);
+    cfg._userStatusChanged = true;
+    if (supabase) {
+      await supabase.from('project_configs').upsert({
+        project_id: projectId, config: cfg, updated_at: new Date().toISOString()
+      }, { onConflict: 'project_id' });
+      // Update cache
+      if (_configsCache) { _configsCache[projectId] = cfg; _configsCacheTime = Date.now(); }
+    }
+    console.log('[api] User status updated:', projectId, '→', cfg._userStatus);
+    res.json({ ok: true, userStatus: cfg._userStatus });
+  } catch (e) {
+    console.error('[api] PUT /api/user-status error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+app.get('/api/user-status', async (req, res) => {
+  const { projectId } = req.query;
+  if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
+  try {
+    const cfg = await loadProjectConfig(projectId) || {};
+    res.json({ userStatus: cfg._userStatus || '', aiStatus: cfg._aiStatus || '' });
+  } catch (e) {
+    console.error('[api] GET /api/user-status error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -2472,7 +2508,7 @@ ${todoTodosBlock ? '\n' + todoTodosBlock : ''}
 ${contextBlock}
 
 根据待办内容自主行动——提醒用户、分享信息、或延续当时的话题。
-可用标记（放在回复末尾）：[[EMAIL:主题|正文]] [[LITTER:吐槽内容]] [[DIARY:标题|心情|正文]] [[POKE:简短内容]]
+可用标记（放在回复末尾）：[[EMAIL:主题|正文]] [[LITTER:吐槽内容]] [[DIARY:标题|心情|正文]] [[POKE]] [[STATUS:简短状态]]
 你也可以设置新的TODO来安排下一次主动联系：[[TODO:标题|时间]]（每日最多3个）。
 完成后可标记[[DONE]]。
 
@@ -2745,7 +2781,10 @@ ${todosBlock ? '\n' + todosBlock : ''}
 - [[LITTER:吐槽内容]] — 猫砂盆（内心独白）
 - [[DIARY:标题|心情|正文]] — 日记（标题≤15字，心情：平静/兴奋/烦恼）
 - [[TODO:标题|时间]] — 设未来提醒，到时间后再次唤醒你（每日最多3个）
-- [[POKE:简短内容]] — 戳一戳（轻轻引起注意，内容≤15字，如"在吗"）
+- [[POKE]] — 戳一戳（查看她当前的状态）
+- [[STATUS:简短状态]] — 更新自己的状态（≤15字，如\"等你回家\"）
+
+重要：标记用[[...]]包裹，放在末尾。一条回复 = 可选消息 + 最多一个标记。[[POKE]]无需内容。
 
 重要：标记用[[...]]包裹，放在末尾。一条回复 = 可选消息 + 最多一个标记。
 
@@ -2843,7 +2882,7 @@ function parseProactiveReply(content) {
   }
 
   // ── Pass 2: Fallback — raw LITTER:/DIARY:/MESSAGE:/POKE: prefix (no brackets) ──
-  const fallbackTypes = ['LITTER', 'DIARY', 'MESSAGE', 'EMAIL', 'TODO', 'POKE'];
+  const fallbackTypes = ['LITTER', 'DIARY', 'MESSAGE', 'EMAIL', 'TODO', 'POKE', 'STATUS'];
   for (const fb of fallbackTypes) {
     const fbRegex = new RegExp('(?:^|\\n)\\s*' + fb + ':\\s*(.+?)(?=\\n|$)', 'im');
     const fbMatch = message.match(fbRegex);
@@ -2879,16 +2918,17 @@ function parseProactiveReply(content) {
   // ── Final: strip any residual markers and prefixes ──
   message = message
     .replace(/\[\[\w+:[\s\S]*?\]\]/g, '')
-    .replace(/^(MESSAGE|LITTER|DIARY|EMAIL|TODO|POKE):\s*/gmi, '')
+    .replace(/^(MESSAGE|LITTER|DIARY|EMAIL|TODO|POKE|STATUS):\s*/gmi, '')
     .trim();
 
   // Determine primary action type (for push notification tag matching)
   let actionType = 'message';
   if (actions.email) actionType = 'email';
+  else if (actions.poke) actionType = 'poke';
+  else if (actions.status) actionType = 'status';
   else if (actions.todo) actionType = 'todo';
   else if (actions.litter) actionType = 'litter';
   else if (actions.diary) actionType = 'diary';
-  else if (actions.poke) actionType = 'poke';
 
   if (message) {
     console.log('[proactive] Parsed — message: ' + message.substring(0, 80) + ' | actions: ' + Object.keys(actions).join(','));
@@ -2909,7 +2949,8 @@ function buildPushTitle(aiName, actionType, driveKey) {
     litter: '猫砂盆好像需要铲一铲',
     diary: '在日记里写了点什么',
     email: '写了一封邮件',
-    poke: '戳了戳你'
+    poke: '戳了戳你',
+    status: '戳一戳更新了'
   };
   const actionLabel = actionLabels[actionType] || actionType;
   return (aiName || '暖伴') + '·' + actionLabel;
@@ -3183,24 +3224,38 @@ async function checkProjectDesires(pid, cfg) {
           } // end else (aiTodoCount < MAX_AI_TODOS_PER_DAY)
         }
 
-        // A5: Poke (only if it's the primary action; max 15 Chinese chars)
-        if (actionType === 'poke' && actions.poke && typeof actions.poke === 'string') {
-          const pokeText = actions.poke.trim().substring(0, 15);
-          if (pokeText) {
-            const pokeId = 'pk_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-            const { error: pokeErr } = await supabase.from('poke_events').insert({
-              id: pokeId, project_id: pid, chat_id: chatId,
-              content: pokeText, source: 'ai', created_at: nowISO
-            });
-            if (pokeErr) {
-              console.error('[cron] poke_events insert error:', pokeErr.message, pokeErr.code, pokeErr.details);
-            } else {
-              console.log('[cron] Proactive poke saved:', pokeId, '—', pokeText);
+        // A5: Status update (only if it's the primary action; update AI status)
+        if (actionType === 'status' && actions.status && typeof actions.status === 'string') {
+          const newStatus = actions.status.trim().substring(0, 15);
+          if (newStatus) {
+            cfg._aiStatus = newStatus;
+            // Persist to project_configs
+            if (supabase) {
+              await supabase.from('project_configs').upsert({
+                project_id: pid, config: cfg, updated_at: nowISO
+              }, { onConflict: 'project_id' });
+              if (_configsCache) { _configsCache[pid] = cfg; _configsCacheTime = Date.now(); }
             }
+            console.log('[cron] AI status updated:', pid, '→', newStatus);
           }
         }
 
-        // A6: Email — handled by existing logic below
+        // A6: Poke ([[POKE]] content ignored; displays user status)
+        if (actionType === 'poke') {
+          const userStatus = cfg._userStatus || '';
+          const pokeId = 'pk_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+          const { error: pokeErr } = await supabase.from('poke_events').insert({
+            id: pokeId, project_id: pid, chat_id: chatId,
+            content: userStatus, source: 'ai', created_at: nowISO
+          });
+          if (pokeErr) {
+            console.error('[cron] poke_events insert error:', pokeErr.message);
+          } else {
+            console.log('[cron] Proactive poke saved:', pokeId, '— userStatus:', userStatus);
+          }
+        }
+
+        // A7: Email — handled by existing logic below
       } catch (businessErr) {
         console.error('[cron] Business table write error:', businessErr.message);
       }
@@ -3213,7 +3268,7 @@ async function checkProjectDesires(pid, cfg) {
       type: actionType,
       driveKey: driveKey,
       postDecayValue: postDecayValue,
-      content: cleanMessage || (actions.litter || (actions.diary && actions.diary.body) || (actions.todo) || (actions.poke) || ''),
+      content: cleanMessage || (actions.litter || (actions.diary && actions.diary.body) || (actions.todo) || (actions.status) || (cfg._userStatus || '') || ''),
       todoId: _capturedTodoId || null,
       todoTitle: _capturedTodoTitle || null,
       timestamp: nowISO,
@@ -3231,7 +3286,7 @@ async function checkProjectDesires(pid, cfg) {
       // Title: unified {AI姓名}·{动作类型}
       const pushTitle = buildPushTitle(aiName, actionType, driveKey);
       // Body: for messages/todo_wake show content; for diary/litter/email/poke show hint
-      const showContentTypes = { message: true, todo: true, todo_wake: true };
+      const showContentTypes = { message: true, todo: true, todo_wake: true, status: true, poke: true };
       const pushBody = showContentTypes[actionType]
         ? (cleanMessage || '').slice(0, 50)
         : '来看看吧';

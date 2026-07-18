@@ -356,6 +356,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 }
 .chat-avatar.user { background: var(--accent-pale); color: var(--text); order: 2; }
 .chat-avatar.ai { background: var(--bg-card); border: 1px solid var(--border); color: var(--text-light); order: 0; font-size: 13px; }
+.chat-avatar.ai.status-changed { box-shadow: 0 0 0 2px gold; border-color: gold; }
 
 .chat-bubble {
   max-width: 78%; padding: 10px 14px; border-radius: 16px;
@@ -5562,6 +5563,7 @@ function sanitizeProactiveMessage(content) {
 function renderChatMessages(preserveScroll){
   const el=$('chatMessages'),chat=getActiveChatObj();
   const savedScrollTop = preserveScroll && el ? el.scrollTop : 0;
+  var proj=getActiveProject();
   if(!chat||chat.messages.length===0){
     el.innerHTML='<div style="text-align:center;padding:40px 20px;"><span style="font-family:var(--font-en);font-size:12px;color:var(--text-lighter);">— start a conversation —</span></div>';
     return;
@@ -5630,7 +5632,7 @@ function renderChatMessages(preserveScroll){
     const displayText = resolveArtifactRefs(sanitizeDisplayText(m.text));
 
     html+=`<div class="chat-row ${m.role}" id="msg-${msgId}">
-      <div class="chat-avatar ${m.role}" ${isUser?'':'ondblclick="handleAIAvatarDblClick()" title="双击戳一戳"'} style="${isUser?'':'cursor:pointer;'}">${isUser?'MY':'✦'}</div>
+      <div class="chat-avatar ${m.role}${(!isUser&&proj&&proj._aiStatusChanged)?' status-changed':''}" ${isUser?'':'ondblclick="handleAIAvatarDblClick()" title="双击戳一戳"'} style="${isUser?'':'cursor:pointer;'}">${isUser?'MY':'✦'}</div>
       <div class="chat-bubble-wrap">
         <div class="${bubbleCls}"
              onclick="handleBubbleClick(event,'${msgId}','${i}')"
@@ -6708,18 +6710,42 @@ ${recentMsgIds}` });
     handleEmailSend(chat, subject, emailData.body);
   }
 
-  // ── Extract POKE markers from AI response ──
-  var pokeMatch = displayResponse.match(/\[\[POKE:([^\]]+)\]\]/i);
+  // ── Extract POKE markers from AI response (content ignored; displays user status) ──
+  var pokeMatch = displayResponse.match(/\[\[POKE(?:\:[^\]]*)?\]\]/i);
   if (pokeMatch) {
-    var pokeContent = (pokeMatch[1] || '').trim().substring(0, 15);
-    displayResponse = displayResponse.replace(/\[\[POKE:[^\]]+\]\]/, '').trim();
+    displayResponse = displayResponse.replace(pokeMatch[0], '').trim();
     var aiName = getAIName();
-    chat.messages.push({role:'system',contentType:'poke_notification',text:aiName+' 戳了戳 mays，'+pokeContent,time:bubbleTime,id:generateMsgId()});
-    // Also persist poke to Supabase
+    var userStatus = (proj&&proj._userStatus)?proj._userStatus:'';
+    var pokeText = aiName+' 戳了戳 mays，'+(userStatus?'她'+userStatus:'她什么也没发生。');
+    chat.messages.push({role:'system',contentType:'poke_notification',text:pokeText,time:bubbleTime,id:generateMsgId()});
+    // If user status is empty, inject system message for AI to see
+    if(!userStatus){
+      chat.messages.push({role:'system',contentType:'poke_hint',text:'她现在没有状态。',time:bubbleTime,id:generateMsgId()});
+    }
+    // Persist poke to Supabase
     if(proj){
       fetch(BACKEND_URL+'/api/poke-events',{
         method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({projectId:proj.id,chatId:chat.id,content:pokeContent,source:'ai'})
+        body:JSON.stringify({projectId:proj.id,chatId:chat.id,content:userStatus,source:'ai'})
+      }).catch(function(){});
+      // Clear status changed flag since AI has acknowledged
+      proj._userStatusChanged = false;
+    }
+  }
+
+  // ── Extract STATUS markers from AI response (updates AI status) ──
+  var statusMatch = displayResponse.match(/\[\[STATUS:([^\]]+)\]\]/i);
+  if (statusMatch) {
+    var newStatus = (statusMatch[1] || '').trim().substring(0, 15);
+    displayResponse = displayResponse.replace(/\[\[STATUS:[^\]]+\]\]/, '').trim();
+    if(proj && newStatus){
+      proj._aiStatus = newStatus;
+      proj._aiStatusChanged = true;
+      saveStore();
+      // Sync to backend
+      fetch(BACKEND_URL+'/api/projects/sync-configs',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({projectId:proj.id,config:{_aiStatus:newStatus}})
       }).catch(function(){});
     }
   }
@@ -6913,12 +6939,12 @@ function closeMoreMenu(){
   if(menu)menu.style.display='none';
 }
 
-// ── Poke settings ──
+// ── Status settings (replaces old poke settings) ──
 function openPokeSettings(){
   var proj=getActiveProject();
-  var currentMsg=(proj&&proj._pokeMessage)?proj._pokeMessage:'在吗';
-  showModal('TA 戳了戳你，','<div style="text-align:center;">'+
-    '<input class="modal-input" id="pokeMessageInput" placeholder="在吗" value="'+escapeHtml(currentMsg)+'" maxlength="15" style="text-align:center;font-size:16px;">'+
+  var currentStatus=(proj&&proj._userStatus)?proj._userStatus:'';
+  showModal('你当前的状态','<div style="text-align:center;">'+
+    '<input class="modal-input" id="pokeMessageInput" placeholder="输入你的状态" value="'+escapeHtml(currentStatus)+'" maxlength="15" style="text-align:center;font-size:16px;">'+
     '<div style="font-size:11px;color:var(--text-lighter);margin-top:6px;">（最多15字）</div>'+
     '</div>',[
     {label:'cancel',cls:'cancel',onclick:closeModal},
@@ -6928,33 +6954,40 @@ function openPokeSettings(){
 function savePokeSettings(){
   var input=$('pokeMessageInput');
   if(!input)return;
-  var msg=input.value.trim()||'在吗';
-  msg=msg.substring(0,15);
+  var status=input.value.trim().substring(0,15);
   var proj=getActiveProject();
   if(proj){
-    proj._pokeMessage=msg;
+    proj._userStatus=status;
+    proj._userStatusChanged=true;
     saveStore();
-    syncProjectConfigToBackend();
+    // Sync to backend
+    fetch(BACKEND_URL+'/api/user-status',{
+      method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({projectId:proj.id,status:status})
+    }).catch(function(e){console.warn('[status] PUT failed:',e.message);});
   }
-  closeModal();toast('戳一戳已设置');
+  closeModal();toast('状态已更新');
 }
 
-// ── Double-click AI avatar → poke ──
+// ── Double-click AI avatar → poke (displays AI status) ──
 function handleAIAvatarDblClick(){
   var proj=getActiveProject();
   var chat=getActiveChatObj();
   if(!proj||!chat)return;
-  var pokeMsg=(proj&&proj._pokeMessage)?proj._pokeMessage:'在吗';
+  var aiStatus=(proj&&proj._aiStatus)?proj._aiStatus:'';
   var aiName=getAIName();
+  var statusText=aiStatus?'TA'+aiStatus:'TA什么也没发生';
   var now=new Date();
   var timeStr=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
-  chat.messages.push({role:'system',contentType:'poke_notification',text:'mays 戳了戳 '+aiName+'，'+pokeMsg,time:timeStr,id:generateMsgId()});
+  chat.messages.push({role:'system',contentType:'poke_notification',text:'mays 戳了戳 '+aiName+'，'+statusText,time:timeStr,id:generateMsgId()});
+  // Clear golden border on poke
+  if(proj._aiStatusChanged){proj._aiStatusChanged=false;}
   renderChatMessages();
   saveStore();
   // Persist to Supabase
   fetch(BACKEND_URL+'/api/poke-events',{
     method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({projectId:proj.id,chatId:chat.id,content:pokeMsg,source:'user'})
+    body:JSON.stringify({projectId:proj.id,chatId:chat.id,content:aiStatus,source:'user'})
   }).catch(function(){});
   toast('戳了戳 '+aiName);
 }
@@ -7289,7 +7322,17 @@ async function sendMessage(){
     typingArea.innerHTML='<div class="typing-indicator">对方正在输入中<span class="streaming-cursor">|</span></div>';
   }
 
-  await triggerAIResponse(chat, text, diaryIntent);
+  // ── Append status hint if user status has changed ──
+  var sendText = text;
+  if(proj && proj._userStatusChanged){
+    sendText = text + '\n\n[她的状态有更新，戳一戳？]';
+  }
+  // Clear golden border on user interaction
+  if(proj && proj._aiStatusChanged){
+    proj._aiStatusChanged = false;
+    saveStore();
+  }
+  await triggerAIResponse(chat, sendText, diaryIntent);
 }
 
 function maybeAddMemory(ut,at){
@@ -7591,7 +7634,8 @@ function syncProjectConfigToBackend(updateChatTime){
       webSearch: ais.webSearch || false
     },
     weatherText: (store.weather && store.weather.text) ? store.weather.text : '',
-    _pokeMessage: proj._pokeMessage || '在吗'
+    _userStatus: proj._userStatus || '',
+    _aiStatus: proj._aiStatus || ''
   };
 
   // Only update lastUserMessageTime when the user actually sent a message.
@@ -7743,9 +7787,12 @@ async function reconcileFromBackend() {
       console.log('[reconcile] Desire state reconciled from backend:', JSON.stringify(proj.desireSystem.drives));
     }
 
-    // Reconcile poke message from backend
-    if (data.config && data.config._pokeMessage !== undefined && !proj._pokeMessage) {
-      proj._pokeMessage = data.config._pokeMessage;
+    // Reconcile user/AI status from backend
+    if (data.config && data.config._userStatus !== undefined && !proj._userStatus) {
+      proj._userStatus = data.config._userStatus;
+    }
+    if (data.config && data.config._aiStatus !== undefined) {
+      proj._aiStatus = data.config._aiStatus;
     }
 
     // Immediately pull latest system events (don't wait for 30s poll)
@@ -7932,11 +7979,20 @@ function pollSystemEvents(){
           var todo=store.todos.find(function(t){return t.id===evt.todoId;});
           if(todo){todo.triggered=true;saveStore();}
         }
+      }else if(evt.type==='ai_status_change'){
+        // AI status changed — update local + golden border
+        if(evt.content){
+          proj._aiStatus = evt.content;
+          proj._aiStatusChanged = true;
+          saveStore();
+        }
+        chat.messages.push({role:'system',contentType:'status_notification',text:'戳一戳更新了',time:timeLabel});
       }else if(evt.type==='poke'){
-        // AI poked user — insert system message
+        // AI poked user — display user's status
         var aiName=getAIName();
-        var pokeContent=evt.content||'在吗';
-        chat.messages.push({role:'system',contentType:'poke_notification',text:aiName+' 戳了戳 mays，'+pokeContent,time:timeLabel});
+        var userStatus=evt.content||'';
+        var pokeText=aiName+' 戳了戳 mays，'+(userStatus?'她'+userStatus:'她什么也没发生。');
+        chat.messages.push({role:'system',contentType:'poke_notification',text:pokeText,time:timeLabel});
       }
       // Sync desire state using backend's exact post-decay value
       if (evt.driveKey && evt.postDecayValue !== undefined && evt.postDecayValue !== null && proj.desireSystem && proj.desireSystem.drives) {
