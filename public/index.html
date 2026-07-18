@@ -1393,11 +1393,12 @@ function migrateStore() {
         chatMap[p.chats[j].id] = p.id;
       }
     }
+    var totalMoved = 0;
+    var affectedProjects = {};
     for (var i = 0; i < store.projects.length; i++) {
       var proj = store.projects[i];
       var cml = proj.coreMemoryLayers;
       if (!cml) continue;
-      // Fix AEM, USM, DiaryLitter — all three layers
       ['aiEmotionalMemories','userStarredMemories','diaryAndLitterbox'].forEach(function(layer){
         var items = cml[layer];
         if (!items) return;
@@ -1414,8 +1415,23 @@ function migrateStore() {
                 tcml[layer].unshift(item);
               }
               items.splice(k, 1);
+              totalMoved++;
+              affectedProjects[proj.id] = true;
+              affectedProjects[owner] = true;
             }
           }
+        }
+      });
+    }
+    if (totalMoved > 0) {
+      console.log('[repair] 跨项目修复: 移回 ' + totalMoved + ' 条记忆');
+      // Persist repaired store to localforage
+      saveStore();
+      // Also update per-window memory files so syncProjectMemories won't overwrite
+      Object.keys(affectedProjects).forEach(function(pid){
+        var proj = store.projects.find(function(x){return x.id===pid;});
+        if (proj && proj.chats && proj.chats[0]) {
+          flushMemoryFile(pid, proj.chats[0].id, 'cross_project_repair');
         }
       });
     }
@@ -4650,6 +4666,8 @@ async function loadMemoryFilesForAllProjects() {
       cml2.aiEmotionalMemories.length = 200;
     }
   }
+  // Persist after loading from files
+  saveStore();
 }
 
 async function readMemoryFile(projectId, windowId) {
