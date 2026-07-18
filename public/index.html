@@ -1384,8 +1384,7 @@ function migrateStore() {
   // ============ v2.3: Load AEMs from per-window memory files for each project ============
   loadMemoryFilesForAllProjects().catch(function(e){ console.warn('[migrate] Memory file loading failed:', e.message); });
 
-  // ============ v2.4: Repair cross-project AEM misplacement ============
-  // Build chat→project map, then move AEMs back to their correct project
+  // ============ v2.4: Repair cross-project memory misplacement (AEM + USM + DiaryLitter) ============
   (function(){
     var chatMap = {};
     for (var i = 0; i < store.projects.length; i++) {
@@ -1397,56 +1396,78 @@ function migrateStore() {
     for (var i = 0; i < store.projects.length; i++) {
       var proj = store.projects[i];
       var cml = proj.coreMemoryLayers;
-      if (!cml || !cml.aiEmotionalMemories) continue;
-      var aems = cml.aiEmotionalMemories;
-      for (var k = aems.length - 1; k >= 0; k--) {
-        var aem = aems[k];
-        var sc = aem.sourceChatId || aem.sourceWindowId || '';
-        var owner = chatMap[sc];
-        if (owner && owner !== proj.id) {
-          // This AEM belongs to another project — move it
-          var target = store.projects.find(function(x){return x.id===owner;});
-          if (target && target.coreMemoryLayers) {
-            var tcml = target.coreMemoryLayers;
-            if (!tcml.aiEmotionalMemories) tcml.aiEmotionalMemories = [];
-            // Avoid duplicates
-            if (!tcml.aiEmotionalMemories.some(function(m){return m.id===aem.id;})) {
-              tcml.aiEmotionalMemories.unshift(aem);
+      if (!cml) continue;
+      // Fix AEM, USM, DiaryLitter — all three layers
+      ['aiEmotionalMemories','userStarredMemories','diaryAndLitterbox'].forEach(function(layer){
+        var items = cml[layer];
+        if (!items) return;
+        for (var k = items.length - 1; k >= 0; k--) {
+          var item = items[k];
+          var sc = item.sourceChatId || item.sourceWindowId || item.sourceWindow || '';
+          var owner = chatMap[sc];
+          if (owner && owner !== proj.id) {
+            var target = store.projects.find(function(x){return x.id===owner;});
+            if (target && target.coreMemoryLayers) {
+              var tcml = target.coreMemoryLayers;
+              if (!tcml[layer]) tcml[layer] = [];
+              if (!tcml[layer].some(function(m){return m.id===item.id;})) {
+                tcml[layer].unshift(item);
+              }
+              items.splice(k, 1);
             }
-            aems.splice(k, 1);
           }
         }
-      }
+      });
     }
   })();
 
   // ============ v2.1: derivedRelationalPatterns — moved to per-project ============
-  const oldDRP = ms.derivedRelationalPatterns;  // legacy global (may exist from old localStorage)
-  const oldPP = ms.personalityProfiles;          // legacy global (may exist from old localStorage)
   for (const proj of store.projects) {
     if (!proj.derivedRelationalPatterns) {
-      if (oldDRP && proj === store.projects[0]) {
-        proj.derivedRelationalPatterns = oldDRP;
-      } else {
-        proj.derivedRelationalPatterns = { lastDerived: null, triggerCount: 0, patterns: [] };
-      }
+      proj.derivedRelationalPatterns = { lastDerived: null, triggerCount: 0, patterns: [] };
     }
     const drp = proj.derivedRelationalPatterns;
     if (!drp.patterns) drp.patterns = [];
     if (drp.triggerCount === undefined) drp.triggerCount = 0;
+    // Detach shared object reference from old migration bug
+    if (!proj._drpDetached) {
+      proj.derivedRelationalPatterns = {
+        lastDerived: drp.lastDerived,
+        triggerCount: drp.triggerCount,
+        patterns: (drp.patterns||[]).slice()
+      };
+      proj._drpDetached = true;
+    }
 
     if (!proj.personalityProfiles) {
-      if (oldPP && proj === store.projects[0]) {
-        proj.personalityProfiles = oldPP;
-      } else {
-        proj.personalityProfiles = {
-          lastDerived: null,
-          user: { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] },
-          ai: { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] }
-        };
-      }
+      proj.personalityProfiles = {
+        lastDerived: null,
+        user: { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] },
+        ai: { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] }
+      };
     }
     const pp = proj.personalityProfiles;
+    // Detach shared object reference from old migration bug
+    if (!proj._ppDetached) {
+      proj.personalityProfiles = {
+        lastDerived: pp.lastDerived,
+        user: {
+          coreTraits: (pp.user&&pp.user.coreTraits||[]).slice(),
+          communicationStyle: (pp.user&&pp.user.communicationStyle||''),
+          emotionalPatterns: (pp.user&&pp.user.emotionalPatterns||[]).slice(),
+          growthMoments: (pp.user&&pp.user.growthMoments||[]).slice(),
+          hiddenInsecurities: (pp.user&&pp.user.hiddenInsecurities||[]).slice(),
+          evidenceIds: (pp.user&&pp.user.evidenceIds||[]).slice()
+        },
+        ai: {
+          dominantEmotions: (pp.ai&&pp.ai.dominantEmotions||[]).slice(),
+          reactionPatterns: (pp.ai&&pp.ai.reactionPatterns||[]).slice(),
+          growthMoments: (pp.ai&&pp.ai.growthMoments||[]).slice(),
+          evidenceIds: (pp.ai&&pp.ai.evidenceIds||[]).slice()
+        }
+      };
+      proj._ppDetached = true;
+    }
     if (!pp.user) pp.user = { coreTraits: [], communicationStyle: '', emotionalPatterns: [], growthMoments: [], hiddenInsecurities: [], evidenceIds: [] };
     if (!pp.ai) pp.ai = { dominantEmotions: [], reactionPatterns: [], growthMoments: [], evidenceIds: [] };
     ['coreTraits','emotionalPatterns','growthMoments','hiddenInsecurities','evidenceIds'].forEach(k => {
