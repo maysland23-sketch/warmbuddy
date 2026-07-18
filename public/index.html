@@ -1427,6 +1427,7 @@ async function migrateStoreAsync() {
     }
     if (totalMoved > 0) {
       console.log('[repair] 跨项目修复: 移回 ' + totalMoved + ' 条记忆');
+      toast('🔧 修复: 移回 ' + totalMoved + ' 条记忆');
       // Write per-window files first (await completion), then save store
       var pids = Object.keys(affectedProjects);
       for (var pi = 0; pi < pids.length; pi++) {
@@ -1443,6 +1444,11 @@ async function migrateStoreAsync() {
       // Now persist store (per-window files are already updated)
       saveStore();
     }
+    // Always show current state after repair
+    var counts = store.projects.map(function(p){
+      return p.name + ':' + ((p.coreMemoryLayers&&p.coreMemoryLayers.aiEmotionalMemories)||[]).length;
+    }).join(' ');
+    console.log('[repair] AEM counts: ' + counts);
   })();
 
   // ============ v2.1: derivedRelationalPatterns — moved to per-project ============
