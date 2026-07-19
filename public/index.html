@@ -1445,14 +1445,22 @@ async function migrateStoreAsync() {
     if (totalMoved > 0) {
       console.log('[repair] 跨项目修复: 移回 ' + totalMoved + ' 条记忆');
     }
-    // [v3] Sync repaired CML back to MemoryModule for each project
+    // [v3] Sync repaired CML back to MemoryModule for each project.
+    // For patterns/profiles: pull authoritative data FROM MemoryModule TO store
+    // (MemoryModule was freshly loaded via loadMemoryFilesForAllProjects above).
     for (var pi = 0; pi < store.projects.length; pi++) {
       var tp = store.projects[pi];
       if (tp && tp.coreMemoryLayers) {
         MemoryModule.save(tp.id);
-        // Also sync derived patterns and personality profiles
-        if (tp.derivedRelationalPatterns) MemoryModule.setProjectMeta(tp.id, tp.derivedRelationalPatterns, null);
-        if (tp.personalityProfiles) MemoryModule.setProjectMeta(tp.id, null, tp.personalityProfiles);
+        // Pull fresh patterns/profiles from MemoryModule (authoritative) to store
+        var freshDrp = MemoryModule.getDerivedPatterns(tp.id);
+        if (freshDrp && freshDrp.patterns && freshDrp.patterns.length > 0) {
+          tp.derivedRelationalPatterns = Object.assign({}, freshDrp);
+        }
+        var freshPp = MemoryModule.getPersonalityProfiles(tp.id);
+        if (freshPp && (freshPp.user || freshPp.ai)) {
+          tp.personalityProfiles = Object.assign({}, freshPp);
+        }
       }
     }
     saveStore();
@@ -2504,6 +2512,12 @@ async function deriveRelationalInsights() {
     ms._aemSinceLastDerive = 0;
     ms._usmSinceLastDerive = 0;
 
+    // Sync fresh insights back to store before persisting (prevents stale overwrite on next load)
+    var proj = getActiveProject();
+    if (proj) {
+      proj.derivedRelationalPatterns = Object.assign({}, getDerivedPatterns());
+      proj.personalityProfiles = Object.assign({}, getPersonalityProfiles());
+    }
     // Write memory file with new insights
     flushMemoryFile(store.activeProject, store.activeChat,'insights_derived');
     saveStore();
@@ -3072,7 +3086,7 @@ function renderMemoryPanelBody(){
     b.innerHTML = '<div style="padding:4px;">' +
       (aems.length === 0 ? '<div class="empty-state">no core memories yet.<br><span style="font-size:10px;color:var(--text-lighter);">high-intensity emotional moments will appear here</span></div>' : '') +
       // ── v2.0: AI Emotional Memories ──
-      '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;"><button onclick="backfillAEMRawDialogue()" style="font-size:9px;padding:2px 8px;margin-right:6px;border-radius:10px;border:1px solid var(--border-light);background:var(--bg);color:var(--text-light);cursor:pointer;display:' + ((cml.aiEmotionalMemories||[]).filter(function(a){return !a.rawDialogue||a.rawDialogue.length===0;}).length>0?'inline-block':'none') + '">📝 回填原文</button>AI EMOTIONAL MEMORIES (' + aems.length + ')</div>' +
+      '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;">AI EMOTIONAL MEMORIES (' + aems.length + ')</div>' +
       aems.slice(0, (coreTabPage+1)*CORE_PAGE_SIZE).map(aem => {
         // Fallback chain for older migration entries that use different field names
         var aiL = (aem.aiSelfEval && aem.aiSelfEval.label)
@@ -5829,53 +5843,6 @@ async function regenerateUSM(entryId) {
   }
 }
 
-// ==================== AEM RAW DIALOGUE BACKFILL ====================
-// Backfills rawDialogue for existing AEMs that don't have it,
-// using sourceChatId + timestamp to find matching messages in chat history.
-async function backfillAEMRawDialogue() {
-  var proj = getActiveProject(); if (!proj) return;
-  var cml = getCoreMemoryLayers();
-  var aems = cml.aiEmotionalMemories || [];
-  var needBackfill = aems.filter(function(a) { return !a.rawDialogue || a.rawDialogue.length === 0; });
-  if (needBackfill.length === 0) { toast('所有AEM都已有对话原文'); return; }
-
-  var fixed = 0, skipped = 0;
-  toast('📝 回填中（0/' + needBackfill.length + '）...');
-
-  for (var i = 0; i < needBackfill.length; i++) {
-    var aem = needBackfill[i];
-    if (!aem.sourceChatId) { skipped++; continue; }
-    var chat = (proj.chats || []).find(function(c) { return c.id === aem.sourceChatId; });
-    if (!chat || !chat.messages || chat.messages.length === 0) { skipped++; continue; }
-
-    // Find closest user + AI messages near AEM timestamp
-    var aemDate = (aem.timestamp || '').slice(0, 10);
-    var userMsg = null, aiMsg = null;
-    for (var j = chat.messages.length - 1; j >= 0; j--) {
-      var m = chat.messages[j];
-      var mDate = (m.time || '').slice(0, 10);
-      if (!userMsg && m.role === 'user' && mDate <= aemDate) userMsg = m;
-      if (!aiMsg && m.role === 'ai' && mDate <= aemDate) aiMsg = m;
-      if (userMsg && aiMsg) break;
-    }
-    // Fallback: take the first user/AI message if none found before AEM date
-    if (!userMsg) userMsg = chat.messages.find(function(m) { return m.role === 'user'; });
-    if (!aiMsg) aiMsg = chat.messages.find(function(m) { return m.role === 'ai'; });
-    if (!userMsg && !aiMsg) { skipped++; continue; }
-
-    var rd = [];
-    if (userMsg) rd.push({ role: 'user', text: (userMsg.text || '').slice(0, 200), time: userMsg.time || '', msgId: userMsg.id || '' });
-    if (aiMsg) rd.push({ role: 'assistant', text: (aiMsg.text || '').slice(0, 200), time: aiMsg.time || '', msgId: aiMsg.id || '' });
-
-    MemoryModule.update(store.activeProject, aem.id, { rawDialogue: rd });
-    fixed++;
-  }
-
-  MemoryModule.save(store.activeProject);
-  saveStore();
-  renderMemoryPanelBody();
-  toast('✅ 已回填 ' + fixed + ' 条，跳过 ' + skipped + ' 条（无聊天记录）');
-}
 function toggleBubbleActions(event, idx){
   event.stopPropagation();
   const el=document.getElementById('bubbleActions_'+idx);
