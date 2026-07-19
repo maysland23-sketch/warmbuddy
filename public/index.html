@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#F5F0EB">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="暖伴">
@@ -1705,25 +1706,7 @@ function applyForgettingCurve() {
   for (var i = 0; i < store.projects.length; i++) {
     MemoryModule.applyDecay(store.projects[i].id);
   }
-  // Legacy decay for proj.memories (backward compat)
-      if (mem.starred) continue;
-      if (mem.isCoreMemory) continue;
-      if (mem.decayFactor === 0) continue;
-
-      const age = daysBetween(mem.date, today);
-
-      if (age <= ms.retention.full) {
-        mem.decayFactor = 1.0;
-      } else if (age <= ms.retention.half) {
-        mem.decayFactor = 0.5;
-      } else if (age <= ms.retention.quarter) {
-        mem.decayFactor = 0.25;
-      } else {
-        // 30+ days: keep only first+last per week
-        mem.decayFactor = isWeekBoundary(mem, proj) ? 0.25 : 0;
-      }
-    }
-  }
+  // [v3] Decay handled by MemoryModule for each project
   ms.lastMaintenance = today;
 
   // EDA: natural drive decay (daily -10%)
