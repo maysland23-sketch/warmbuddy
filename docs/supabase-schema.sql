@@ -170,9 +170,25 @@ CREATE INDEX IF NOT EXISTS idx_poke_events_project ON poke_events(project_id, cr
 ALTER TABLE poke_events DISABLE ROW LEVEL SECURITY;
 GRANT ALL ON poke_events TO PUBLIC;
 
+-- Table 9: Memories (AEM + USM + DLB) — authoritative cloud store
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'aem',
+  layer TEXT NOT NULL DEFAULT 'ai_emotional',
+  starred BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  metadata JSONB DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id, created_at);
+ALTER TABLE memories DISABLE ROW LEVEL SECURITY;
+
 -- Grant access
 GRANT ALL ON project_configs TO PUBLIC;
 GRANT ALL ON app_state TO PUBLIC;
 GRANT ALL ON project_todos TO PUBLIC;
 GRANT ALL ON chat_messages TO PUBLIC;
+GRANT ALL ON memories TO PUBLIC;
 GRANT USAGE ON SCHEMA public TO PUBLIC;

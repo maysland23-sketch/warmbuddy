@@ -3478,6 +3478,128 @@ app.use((err, req, res, next) => {
   });
 });
 
+// ── Memories API ──
+
+// GET /api/memories/:projectId — fetch all memories for a project
+app.get('/api/memories/:projectId', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const { projectId } = req.params;
+    const { data, error } = await supabase
+      .from('memories')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    const aems = (data || []).filter(m => m.layer === 'ai_emotional');
+    const usms = (data || []).filter(m => m.layer === 'user_starred');
+    const dlbs = (data || []).filter(m => m.layer === 'diary_litter');
+    res.json({ aems, usms, dlbs, total: (data || []).length });
+  } catch (e) {
+    console.error('[memories] GET error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/memories — batch upsert (ON CONFLICT DO UPDATE)
+app.post('/api/memories', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const { projectId, memories } = req.body || {};
+    if (!projectId || !Array.isArray(memories) || memories.length === 0) {
+      return res.status(400).json({ error: 'projectId and memories[] required' });
+    }
+    const rows = memories.map(m => ({
+      id: m.id,
+      project_id: projectId,
+      content: (m.content || m.summary || '').slice(0, 500),
+      type: m.type || 'aem',
+      layer: m.layer || 'ai_emotional',
+      starred: m.starred || false,
+      updated_at: new Date().toISOString(),
+      metadata: m.metadata || m
+    }));
+    const { data, error } = await supabase
+      .from('memories')
+      .upsert(rows, { onConflict: 'id' });
+    if (error) throw error;
+    res.json({ ok: true, count: rows.length });
+  } catch (e) {
+    console.error('[memories] POST error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/memories/:id — update a single memory (star, content, type)
+app.put('/api/memories/:id', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const { id } = req.params;
+    const { content, type, starred, metadata } = req.body || {};
+    const updates = { updated_at: new Date().toISOString() };
+    if (content !== undefined) updates.content = content;
+    if (type !== undefined) updates.type = type;
+    if (starred !== undefined) updates.starred = starred;
+    if (metadata !== undefined) updates.metadata = metadata;
+    const { error } = await supabase.from('memories').update(updates).eq('id', id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[memories] PUT error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/memories/:id — delete a single memory
+app.delete('/api/memories/:id', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const { id } = req.params;
+    const { error } = await supabase.from('memories').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[memories] DELETE error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/memories/sync — full sync (delete all + insert all, for migration)
+app.post('/api/memories/sync', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const { projectId, memories } = req.body || {};
+    if (!projectId || !Array.isArray(memories)) {
+      return res.status(400).json({ error: 'projectId and memories[] required' });
+    }
+    // Delete all existing memories for this project
+    const { error: delErr } = await supabase
+      .from('memories')
+      .delete()
+      .eq('project_id', projectId);
+    if (delErr) throw delErr;
+    // Insert all
+    if (memories.length > 0) {
+      const rows = memories.map(m => ({
+        id: m.id,
+        project_id: projectId,
+        content: (m.content || m.summary || '').slice(0, 500),
+        type: m.type || 'aem',
+        layer: m.layer || 'ai_emotional',
+        starred: m.starred || false,
+        updated_at: new Date().toISOString(),
+        metadata: m.metadata || m
+      }));
+      const { error: insErr } = await supabase.from('memories').insert(rows);
+      if (insErr) throw insErr;
+    }
+    res.json({ ok: true, count: memories.length });
+  } catch (e) {
+    console.error('[memories] SYNC error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 // Always export the Express app (for Vercel serverless and local testing)
