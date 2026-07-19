@@ -3453,15 +3453,6 @@ app.post('/api/push/send', async (req, res) => {
   }
 });
 
-// ==================== 404 HANDLER FOR API ROUTES ====================
-// Return JSON for unmatched API paths instead of default HTML/text response
-app.use('/api', (req, res) => {
-  res.status(404).json({
-    error: `Route not found: ${req.method} ${req.path}`,
-    code: 'NOT_FOUND'
-  });
-});
-
 // ==================== GLOBAL ERROR HANDLER ====================
 // Express 5 default error handler may return HTML — force JSON for all errors
 app.use((err, req, res, next) => {
@@ -3598,6 +3589,16 @@ app.post('/api/memories/sync', async (req, res) => {
     console.error('[memories] SYNC error:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ==================== 404 HANDLER FOR API ROUTES ====================
+// Return JSON for unmatched API paths instead of default HTML/text response
+// MUST be defined AFTER all /api routes
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: `Route not found: ${req.method} ${req.path}`,
+    code: 'NOT_FOUND'
+  });
 });
 
 const PORT = process.env.PORT || 3000;
