@@ -40,7 +40,13 @@ self.addEventListener('fetch', event => {
   // HTML: network-first (so users always get latest)
   if (event.request.mode === 'navigate' || url.pathname === '/') {
     event.respondWith(
-      fetch(event.request).catch(() => caches.match('/index.html'))
+      fetch(event.request).catch(() => caches.match('/').then(cached => {
+        if (cached) return cached;
+        return new Response('Offline — please connect to the internet', {
+          status: 503,
+          headers: { 'Content-Type': 'text/plain' }
+        });
+      }))
     );
     return;
   }

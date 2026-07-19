@@ -3453,31 +3453,6 @@ app.post('/api/push/send', async (req, res) => {
   }
 });
 
-// ==================== 404 HANDLER FOR API ROUTES ====================
-// Return JSON for unmatched API paths instead of default HTML/text response
-app.use('/api', (req, res) => {
-  res.status(404).json({
-    error: `Route not found: ${req.method} ${req.path}`,
-    code: 'NOT_FOUND'
-  });
-});
-
-// ==================== GLOBAL ERROR HANDLER ====================
-// Express 5 default error handler may return HTML — force JSON for all errors
-app.use((err, req, res, next) => {
-  console.error('[error] Caught error:', err.message);
-  console.error('[error] Stack:', err.stack);
-  // Ensure we haven't already sent headers (e.g. SSE streaming)
-  if (res.headersSent) {
-    return next(err);
-  }
-  const status = err.status || err.statusCode || 500;
-  res.status(status).json({
-    error: err.message || 'Internal server error',
-    code: err.code || 'UNKNOWN'
-  });
-});
-
 // ── Memories API ──
 
 // GET /api/memories/:projectId — fetch all memories for a project
@@ -3598,6 +3573,32 @@ app.post('/api/memories/sync', async (req, res) => {
     console.error('[memories] SYNC error:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ==================== 404 HANDLER FOR API ROUTES ====================
+// Return JSON for unmatched API paths instead of default HTML/text response
+// NOTE: Must be AFTER all /api/* route definitions
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: `Route not found: ${req.method} ${req.path}`,
+    code: 'NOT_FOUND'
+  });
+});
+
+// ==================== GLOBAL ERROR HANDLER ====================
+// Express 5 default error handler may return HTML — force JSON for all errors
+app.use((err, req, res, next) => {
+  console.error('[error] Caught error:', err.message);
+  console.error('[error] Stack:', err.stack);
+  // Ensure we haven't already sent headers (e.g. SSE streaming)
+  if (res.headersSent) {
+    return next(err);
+  }
+  const status = err.status || err.statusCode || 500;
+  res.status(status).json({
+    error: err.message || 'Internal server error',
+    code: err.code || 'UNKNOWN'
+  });
 });
 
 const PORT = process.env.PORT || 3000;
