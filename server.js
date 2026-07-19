@@ -16,7 +16,7 @@ if (OUTBOUND_PROXY) {
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 const cookieParser = require('cookie-parser');
 app.use(cookieParser());
@@ -146,6 +146,11 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static('public'));
+
+// Redirect favicon.ico to icon-192.png (avoid 404 on default browser request)
+app.get('/favicon.ico', (req, res) => {
+  res.redirect('/icon-192.png');
+});
 
 // ==================== MODEL REGISTRY ====================
 

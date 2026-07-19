@@ -311,7 +311,7 @@
         // legacy flat array
         aemItems = data;
       } else if (data.memories && Array.isArray(data.memories)) {
-        aemItems = data.memories.map(function(m) { return { id: m.id, summary: m.content, type: m.type, timestamp: m.date, metadata: m }; });
+        aemItems = data.memories.map(function(m) { return { id: m.id, summary: m.content, type: m.type, timestamp: m.date, metadata: slimMetadata(m) }; });
       }
 
       var allItems = [
@@ -523,7 +523,7 @@
                   layer: 'ai_emotional',
                   starred: aem.starred || false,
                   created_at: aem.timestamp || new Date().toISOString(),
-                  metadata: aem
+                  metadata: slimMetadata(aem)
                 });
               });
               (cml.userStarredMemories || []).forEach(function(usm) {
@@ -535,7 +535,7 @@
                   layer: 'user_starred',
                   starred: true,
                   created_at: usm.timestamp || new Date().toISOString(),
-                  metadata: usm
+                  metadata: slimMetadata(usm)
                 });
               });
               (cml.diaryAndLitterbox || []).forEach(function(dlb) {
@@ -547,7 +547,7 @@
                   layer: 'diary_litter',
                   starred: false,
                   created_at: dlb.timestamp || new Date().toISOString(),
-                  metadata: dlb
+                  metadata: slimMetadata(dlb)
                 });
               });
             }
@@ -748,52 +748,42 @@
    */
   function mergeFromSupabase(projectId, supAEMs, supUSMs, supDLBs) {
     var c = _cache[projectId];
-    // Build ID map from cache
-    var cacheById = {};
-    c.aems.forEach(function(m) { cacheById[m.id] = { layer: 'aems', idx: c.aems.indexOf(m) }; });
-    c.usms.forEach(function(m) { cacheById[m.id] = { layer: 'usms', idx: c.usms.indexOf(m) }; });
-    c.dlbs.forEach(function(m) { cacheById[m.id] = { layer: 'dlbs', idx: c.dlbs.indexOf(m) }; });
+    // Merge helper: Supabase data updates matching cache items,
+    // but cache-only items (e.g. from importJSON) are preserved.
+    function mergeLayer(layerName, supRows) {
+      if (!supRows || supRows.length === 0) return; // no Supabase data → keep cache as-is
+      var cacheMap = {};
+      (c[layerName] || []).forEach(function(m, i) { cacheMap[m.id] = { idx: i, item: m }; });
+      var merged = [];
+      var seenIds = {};
+      // Process Supabase rows
+      supRows.forEach(function(row) {
+        var mem = row.metadata || row;
+        mem.id = row.id;
+        mem.content = row.content;
+        mem.type = row.type;
+        mem.starred = row.starred;
+        mem.created_at = row.created_at;
+        mem.updated_at = row.updated_at;
+        seenIds[row.id] = true;
+        if (cacheMap[row.id]) {
+          // Update: Supabase metadata wins, but preserve local-only fields
+          var local = cacheMap[row.id].item;
+          mem.rawDialogue = local.rawDialogue || mem.rawDialogue;
+          mem.semanticKey = local.semanticKey || mem.semanticKey;
+        }
+        merged.push(mem);
+      });
+      // Append cache-only items (not in Supabase)
+      (c[layerName] || []).forEach(function(m) {
+        if (!seenIds[m.id]) merged.push(m);
+      });
+      c[layerName] = merged;
+    }
 
-    // Merge AEMs
-    var newAEMs = [];
-    supAEMs.forEach(function(row) {
-      var mem = row.metadata || row;
-      mem.id = row.id;
-      mem.content = row.content;
-      mem.type = row.type;
-      mem.starred = row.starred;
-      mem.created_at = row.created_at;
-      mem.updated_at = row.updated_at;
-      newAEMs.push(mem);
-    });
-    c.aems = newAEMs;
-
-    // Merge USMs
-    var newUSMs = [];
-    supUSMs.forEach(function(row) {
-      var mem = row.metadata || row;
-      mem.id = row.id;
-      mem.content = row.content;
-      mem.type = row.type;
-      mem.starred = row.starred;
-      mem.created_at = row.created_at;
-      mem.updated_at = row.updated_at;
-      newUSMs.push(mem);
-    });
-    c.usms = newUSMs;
-
-    // Merge DLBs
-    var newDLBs = [];
-    supDLBs.forEach(function(row) {
-      var mem = row.metadata || row;
-      mem.id = row.id;
-      mem.content = row.content;
-      mem.type = row.type;
-      mem.created_at = row.created_at;
-      mem.updated_at = row.updated_at;
-      newDLBs.push(mem);
-    });
-    c.dlbs = newDLBs;
+    mergeLayer('aems', supAEMs);
+    mergeLayer('usms', supUSMs);
+    mergeLayer('dlbs', supDLBs);
   }
 
   async function persistCache(projectId) {
@@ -836,19 +826,30 @@
     }
   }
 
+  // Strip large fields (rawDialogue, raw_quote) from metadata before syncing to Supabase.
+  // These fields are already cached client-side; syncing them wastes bandwidth and hits 413 limits.
+  function slimMetadata(m) {
+    if (!m || typeof m !== 'object') return m;
+    var slim = {};
+    for (var k in m) {
+      if (k !== 'rawDialogue' && k !== 'raw_quote') slim[k] = m[k];
+    }
+    return slim;
+  }
+
   async function pushToSupabase(projectId) {
     var c = _cache[projectId];
     if (!c || !c._loaded) return;
 
     var allMems = [];
     c.aems.forEach(function(m) {
-      allMems.push({ id: m.id, content: m.summary || m.content || '', type: m.type || 'aem', layer: 'ai_emotional', starred: m.starred || false, metadata: m });
+      allMems.push({ id: m.id, content: m.summary || m.content || '', type: m.type || 'aem', layer: 'ai_emotional', starred: m.starred || false, metadata: slimMetadata(m) });
     });
     c.usms.forEach(function(m) {
-      allMems.push({ id: m.id, content: m.summary || m.content || '', type: m.type || 'usm', layer: 'user_starred', starred: m.starred || false, metadata: m });
+      allMems.push({ id: m.id, content: m.summary || m.content || '', type: m.type || 'usm', layer: 'user_starred', starred: m.starred || false, metadata: slimMetadata(m) });
     });
     c.dlbs.forEach(function(m) {
-      allMems.push({ id: m.id, content: m.summary || m.content || '', type: m.type || 'dlb', layer: 'diary_litter', starred: false, metadata: m });
+      allMems.push({ id: m.id, content: m.summary || m.content || '', type: m.type || 'dlb', layer: 'diary_litter', starred: false, metadata: slimMetadata(m) });
     });
 
     if (allMems.length === 0) return;

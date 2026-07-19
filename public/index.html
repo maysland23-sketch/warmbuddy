@@ -7,6 +7,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="icon" type="image/svg+xml" href="/icon-192.svg">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <meta name="apple-mobile-web-app-title" content="暖伴">
 <link rel="manifest" href="/manifest.json">
 <title>暖伴 · 朝夕</title>
@@ -2588,8 +2590,19 @@ async function checkLongTermMemory(chat) {
       // Avoid duplicates
       if (isNearDuplicate(memContent, proj)) return;
 
+      // Capture recent user/AI messages for rawDialogue display in core tab
+      var lastUser = null, lastAi = null;
+      for (var mi = last10.length - 1; mi >= 0; mi--) {
+        if (!lastUser && last10[mi].role === 'user') lastUser = last10[mi];
+        if (!lastAi && last10[mi].role === 'ai') lastAi = last10[mi];
+        if (lastUser && lastAi) break;
+      }
+      var ltRawDialogue = [];
+      if (lastUser) ltRawDialogue.push({ role: 'user', text: (lastUser.text || '').slice(0, 200), time: lastUser.time || '', msgId: lastUser.id || '' });
+      if (lastAi) ltRawDialogue.push({ role: 'assistant', text: (lastAi.text || '').slice(0, 200), time: lastAi.time || '', msgId: lastAi.id || '' });
+
       // migrated to MemoryModule
-      MemoryModule.addAEM(store.activeProject, {id:'ltm_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),summary:memContent,timestamp:new Date().toISOString(),sourceChatId:store.activeChat,sourceProjectId:store.activeProject,triggerSource:'long_term',aiSelfEval:{},userStateAtTime:{},rawDialogue:[],semanticKey:semanticKey});
+      MemoryModule.addAEM(store.activeProject, {id:'ltm_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),summary:memContent,timestamp:new Date().toISOString(),sourceChatId:store.activeChat,sourceProjectId:store.activeProject,triggerSource:'long_term',aiSelfEval:{},userStateAtTime:{},rawDialogue:ltRawDialogue,semanticKey:semanticKey});
       store.memorySystem.bm25Index._dirty = true;
       saveStore();
     }
@@ -3061,10 +3074,17 @@ function renderMemoryPanelBody(){
       // ── v2.0: AI Emotional Memories ──
       '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;"><button onclick="batchRepairAEM()" style="font-size:9px;padding:2px 8px;margin-right:6px;border-radius:10px;border:1px solid var(--border-light);background:var(--bg);color:var(--text-light);cursor:pointer;">🔄 批量修复</button>AI EMOTIONAL MEMORIES (' + aems.length + ')</div>' +
       aems.slice(0, (coreTabPage+1)*CORE_PAGE_SIZE).map(aem => {
-        const aiL = aem.aiSelfEval && aem.aiSelfEval.label ? aem.aiSelfEval.label : '?';
-        const uL = aem.userStateAtTime && aem.userStateAtTime.label ? aem.userStateAtTime.label : '?';
-        const aiI = aem.aiSelfEval && aem.aiSelfEval.intensity ? aem.aiSelfEval.intensity : 0;
-        const uI = aem.userStateAtTime && aem.userStateAtTime.intensity ? aem.userStateAtTime.intensity : 0;
+        // Fallback chain for older migration entries that use different field names
+        var aiL = (aem.aiSelfEval && aem.aiSelfEval.label)
+          || (aem.affect_first && aem.affect_first.ai && aem.affect_first.ai.label)
+          || aem.affectLabel || '?';
+        var uL = (aem.userStateAtTime && aem.userStateAtTime.label)
+          || (aem.affect_first && aem.affect_first.user && aem.affect_first.user.label) || '?';
+        var aiI = (aem.aiSelfEval && aem.aiSelfEval.intensity)
+          || (aem.affect_first && aem.affect_first.ai && aem.affect_first.ai.intensity) || 0;
+        var uI = (aem.userStateAtTime && aem.userStateAtTime.intensity)
+          || (aem.affect_first && aem.affect_first.user && aem.affect_first.user.intensity) || 0;
+        var summaryText = aem.summary || aem.event_summary || aem.eventSummary || '(no summary)';
         const ts = toLocalDisplayTime(aem.timestamp);
         const rawPreview = aem.rawDialogue && aem.rawDialogue.length > 0
           ? aem.rawDialogue.map(d => '<span style="font-size:10px;color:var(--text-lighter);">' + (d.role==='user'?'用户':'AI') + ': ' + (d.text||'').slice(0,60) + '</span>').join('<br>')
@@ -3074,13 +3094,36 @@ function renderMemoryPanelBody(){
             <span class="affect-badge" style="background:linear-gradient(135deg,#C4877B,#D4A09A);color:#fff;">AI ${aiL} (${aiI})</span>
             <span class="affect-badge" style="background:linear-gradient(135deg,#6B7C93,#8A9BB5);color:#fff;">用户 ${uL} (${uI})</span>
           </div>
-          <div class="memory-item-content" style="font-size:13px;">${aem.summary || '(no summary)'}</div>
+          <div class="memory-item-content" style="font-size:13px;">${summaryText}</div>
           ${rawPreview ? `<div style="margin-top:4px;padding:4px 8px;background:var(--bg);border-radius:6px;line-height:1.4;">${rawPreview}</div>` : ''}
           ${aem.aiSelfEval && aem.aiSelfEval.internalNote ? `<div style="font-size:10px;color:var(--text-lighter);font-style:italic;margin-top:2px;">🔒 ${(aem.aiSelfEval.internalNote||'').slice(0,80)}</div>` : ''}
           <div class="memory-item-meta">${ts} · ${aem.triggerSource||'?'}</div>
         </div>`;
       }).join('') +
       (aems.length > (coreTabPage+1)*CORE_PAGE_SIZE ? '<div style="text-align:center;padding:10px;"><button onclick="coreTabPage++;renderMemoryPanelBody();" style="padding:6px 20px;border-radius:12px;border:1px solid var(--border-light);background:var(--bg);font-size:11px;color:var(--text-light);cursor:pointer;">加载更多 (显示'+((coreTabPage+1)*CORE_PAGE_SIZE)+'/'+aems.length+')</button></div>' : '') +
+      // ── v3: User Starred Memories (USMs) in core tab ──
+      (() => {
+        var usms = cml.userStarredMemories || [];
+        if (usms.length === 0) return '';
+        var usmHtml = '<div style="margin-top:16px;padding-top:8px;border-top:1px solid var(--border-light);">' +
+          '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;">✦ USER STARRED MEMORIES (' + usms.length + ')</div>';
+        usms.slice(0, (coreTabPage+1)*CORE_PAGE_SIZE).forEach(function(usm) {
+          var usmPreview = usm.rawDialogue && usm.rawDialogue.length > 0
+            ? usm.rawDialogue.map(function(d) { return '<span style="font-size:10px;color:var(--text-lighter);">' + (d.role==='user'?'用户':'AI') + ': ' + (d.text||'').slice(0,60) + '</span>'; }).join('<br>')
+            : '';
+          var usmTs = toLocalDisplayTime(usm.timestamp);
+          usmHtml += '<div class="memory-list-item" style="flex-direction:column;align-items:stretch;gap:6px;">' +
+            '<div style="display:flex;gap:6px;">' +
+              '<span class="affect-badge" style="background:linear-gradient(135deg,#F0D060,#F5E080);color:#4A4543;">★ 星标</span>' +
+            '</div>' +
+            '<div class="memory-item-content" style="font-size:13px;">' + (usm.summary || '(no summary)') + '</div>' +
+            (usmPreview ? '<div style="margin-top:4px;padding:4px 8px;background:var(--bg);border-radius:6px;line-height:1.4;">' + usmPreview + '</div>' : '') +
+            '<div class="memory-item-meta">' + usmTs + ' · user_starred</div>' +
+          '</div>';
+        });
+        usmHtml += '</div>';
+        return usmHtml;
+      })() +
       // ── v2.0: Derived patterns summary ──
       (() => {
         const drp = getDerivedPatterns();
@@ -5616,11 +5659,9 @@ async function createUserStarredMemory(selectedMsgIds) {
   // Mark messages as starred-once (irreversible)
   msgs.forEach(m => { m._starredOnce = true; m._starred = true; });
 
-  // LLM summary
-  const summary = await generateStarredMemorySummary(rawDialogue);
-
-  // Create USM entry
+  // === PHASE 1: Immediate save with fast summary (no LLM wait) ===
   const usmId = 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+  var fastSummary = (rawDialogue[0]?.text || '').slice(0, 15) || '(未命名记忆)';
   const usm = {
     id: usmId,
     timestamp: new Date().toISOString(),
@@ -5628,7 +5669,7 @@ async function createUserStarredMemory(selectedMsgIds) {
     sourceWindowId: store.activeChat,
     sourceProjectId: store.activeProject,
     rawDialogue,
-    summary,
+    summary: fastSummary,
     starredMsgIds: selectedMsgIds,
     userNote: ''
   };
@@ -5636,13 +5677,21 @@ async function createUserStarredMemory(selectedMsgIds) {
   // [v3] MemoryModule handles persistence
   MemoryModule.addUSM(store.activeProject, usm);
 
-  // migrated to MemoryModule — proj.memories write removed
-
   // Trigger derivation
   checkDeriveInsightsTrigger('usm');
 
   saveStore();
-  toast('✦ 已保存星标记忆：' + summary);
+  toast('✦ 已保存星标记忆');
+
+  // === PHASE 2: Background LLM summary (fire-and-forget) ===
+  generateStarredMemorySummary(rawDialogue).then(function(llmSummary) {
+    if (llmSummary && llmSummary.length >= 3 && llmSummary !== fastSummary && MemoryModule.update) {
+      MemoryModule.update(store.activeProject, usmId, { summary: llmSummary });
+      MemoryModule.save(store.activeProject);
+    }
+  }).catch(function(e) {
+    console.log('[starred-summary] Background LLM failed:', e.message);
+  });
 }
 
 async function generateStarredMemorySummary(rawDialogue, retries) {
@@ -7052,7 +7101,10 @@ function maybeAddMemory(ut,at){
     const chat=getActiveChatObj(); if(chat){if(!chat.sharedMemoryIds.includes(chatMemId))chat.sharedMemoryIds.push(chatMemId);}
     store.memorySystem.bm25Index._dirty = true;
     // [v3] Also persist through MemoryModule
-    MemoryModule.addAEM(store.activeProject, {id:'aem_chat_'+gid(''),summary:content,timestamp:new Date().toISOString(),sourceChatId:store.activeChat,sourceProjectId:store.activeProject,triggerSource:'random',type:'chat',aiSelfEval:{},userStateAtTime:{},rawDialogue:[]});
+    var randRawDialogue = [];
+    if (ut) randRawDialogue.push({ role: 'user', text: (ut || '').slice(0, 200), time: nowTime() });
+    if (at) randRawDialogue.push({ role: 'assistant', text: (at || '').slice(0, 200), time: nowTime() });
+    MemoryModule.addAEM(store.activeProject, {id:'aem_chat_'+gid(''),summary:content,timestamp:new Date().toISOString(),sourceChatId:store.activeChat,sourceProjectId:store.activeProject,triggerSource:'random',type:'chat',aiSelfEval:{},userStateAtTime:{},rawDialogue:randRawDialogue});
   }
 }
 
