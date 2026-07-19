@@ -87,7 +87,7 @@
       // 3. Rebuild search index
       _bm25[projectId] = { _dirty: true, _lastBuild: null, _docCount: 0, index: {} };
 
-      return getCML(projectId);
+      return MemoryModule.getCML(projectId);
     },
 
     /**
@@ -133,6 +133,12 @@
         c.aems[idx] = aem; // update
       } else {
         c.aems.unshift(aem);
+        // Decay-based eviction: remove fully-decayed (30d+) unstarred AEMs first.
+        // This gives memories a natural lifecycle instead of silent hard-truncation.
+        c.aems = c.aems.filter(function(m) {
+          return m.starred || (m.decayFactor || 0) > 0;
+        });
+        // Hard cap as safety net (should rarely trigger with decay active)
         if (c.aems.length > AEM_CAP) c.aems.length = AEM_CAP;
       }
       _bm25[projectId] = rebuildBM25Sync(projectId);
