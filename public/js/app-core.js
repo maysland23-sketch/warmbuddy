@@ -821,6 +821,300 @@ var AppCore = (function() {
 
     // Migration
     migrateLegacyMemories: migrateLegacyMemories,
-    migrateStoreAsync: migrateStoreAsync
+    migrateStoreAsync: migrateStoreAsync,
+
+    // ── Context fingerprint ──
+    getCtxFingerprint: function() {
+      var store = AppCore.getStore();
+      var ms = store.memorySystem;
+      var c = AppCore.getActiveChatObj();
+      var p = AppCore.getActiveProject();
+      var now = new Date();
+      return [
+        Math.floor(now.getTime() / 60000),
+        (store.weather && store.weather.text) || '',
+        (p && p.preference || '').slice(0, 100),
+        (ms.coreMemories && ms.coreMemories.length) || 0,
+        (c && c.sharedMemoryIds && c.sharedMemoryIds.join(',')) || '',
+        store.todos.filter(function(t) { return !t.done; }).map(function(t) { return t.id + t.text; }).join(','),
+        (store.diaries && store.diaries.length) || 0,
+        (MemoryModule.getDerivedPatterns(store.activeProject) && MemoryModule.getDerivedPatterns(store.activeProject).lastDerived) || '',
+        (MemoryModule.getPersonalityProfiles(store.activeProject) && MemoryModule.getPersonalityProfiles(store.activeProject).lastDerived) || '',
+        (c && c._pendingRetrievalBlock) ? 'rb' : '',
+        Math.floor(((c && c._messageCount) || 0) / 3)
+      ].join('|');
+    },
+
+    // ── Token logging ──
+    logTokenCall: function(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model) {
+      if (!windowId) return;
+      var store = AppCore.getStore();
+      if (!store.tokenLogs) store.tokenLogs = {};
+      if (!store.tokenLogs[windowId]) {
+        store.tokenLogs[windowId] = { calls: [], dailySummary: { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, by_action_type: {} } };
+      }
+      var log = store.tokenLogs[windowId];
+      var total = (inputTokens || 0) + (outputTokens || 0);
+      var now = new Date();
+      var entry = {
+        timestamp: String(now.getMonth()+1).padStart(2,'0') + '/' + String(now.getDate()).padStart(2,'0') + ' ' + String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0'),
+        model: model || 'unknown',
+        action_type: actionType,
+        input_tokens: inputTokens || 0,
+        output_tokens: outputTokens || 0,
+        cache_read_tokens: cacheRead || 0,
+        cache_write_tokens: cacheWrite || 0,
+        total_tokens: total
+      };
+      log.calls.unshift(entry);
+      if (log.calls.length > 200) log.calls.length = 200;
+      var ds = log.dailySummary;
+      ds.total_input += (inputTokens || 0);
+      ds.total_output += (outputTokens || 0);
+      ds.total_cache_read += (cacheRead || 0);
+      ds.total += total;
+      if (!ds.by_action_type) ds.by_action_type = {};
+      ds.by_action_type[actionType] = (ds.by_action_type[actionType] || 0) + total;
+    },
+
+    // ── Pull proactive token logs ──
+    pullProactiveTokenLogs: function() {
+      var store = AppCore.getStore();
+      var proj = AppCore.getActiveProject(); if (!proj) return;
+      if (!store._lastTokenLogPull) store._lastTokenLogPull = new Date(Date.now()-3600000).toISOString();
+      fetch(AppCore.BACKEND_URL + '/api/token-logs?projectId=' + encodeURIComponent(proj.id) + '&since=' + encodeURIComponent(store._lastTokenLogPull))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (!data.logs || !data.logs.length) return;
+          for (var i = 0; i < data.logs.length; i++) {
+            var l = data.logs[i];
+            var alreadyLogged = false;
+            var activeLog = store.tokenLogs && store.tokenLogs[l.windowId];
+            if (activeLog && activeLog.calls) {
+              alreadyLogged = activeLog.calls.some(function(c) { return c._tokenLogId === l.messageId; });
+            }
+            if (!alreadyLogged) {
+              if (!store.tokenLogs) store.tokenLogs = {};
+              if (!store.tokenLogs[l.windowId]) {
+                store.tokenLogs[l.windowId] = { calls: [], dailySummary: { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, by_action_type: {} } };
+              }
+              var total = (l.inputTokens || 0) + (l.outputTokens || 0);
+              store.tokenLogs[l.windowId].calls.unshift({
+                timestamp: l.timestamp, model: l.model || 'unknown',
+                action_type: l.actionType || 'proactive',
+                input_tokens: l.inputTokens || 0, output_tokens: l.outputTokens || 0,
+                cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: total, _tokenLogId: l.messageId
+              });
+              var ds2 = store.tokenLogs[l.windowId].dailySummary;
+              ds2.total_input += (l.inputTokens || 0); ds2.total_output += (l.outputTokens || 0);
+              ds2.total += total;
+              if (!ds2.by_action_type) ds2.by_action_type = {};
+              ds2.by_action_type[l.actionType || 'proactive'] = (ds2.by_action_type[l.actionType || 'proactive'] || 0) + total;
+            }
+          }
+          store._lastTokenLogPull = new Date().toISOString();
+          AppCore.saveStore();
+        }).catch(function() {});
+    },
+
+    // ── Reset daily tokens ──
+    resetDailyTokensIfNeeded: function() {
+      var store = AppCore.getStore();
+      var now = new Date();
+      var today = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0');
+      if (store.tokenDailyReset !== today) {
+        store.tokenDailyReset = today;
+        var keys = Object.keys(store.tokenLogs || {});
+        for (var i = 0; i < keys.length; i++) {
+          store.tokenLogs[keys[i]].dailySummary = { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, by_action_type: {} };
+        }
+        AppCore.saveStore();
+      }
+    },
+
+    // ── Interval management ──
+    _intervals: [],
+    _addInterval: function(fn, ms) { AppCore._intervals.push(setInterval(fn, ms)); },
+    clearAllIntervals: function() { for (var i = 0; i < AppCore._intervals.length; i++) { clearInterval(AppCore._intervals[i]); } AppCore._intervals = []; },
+
+    // ── Weekly memory write ──
+    checkWeeklyMemoryWrite: function() {
+      var store = AppCore.getStore();
+      var now = new Date();
+      var today = AppCore.fmtDate().iso;
+      var ms = store.memorySystem;
+      if (!ms._lastWeeklyWrite) ms._lastWeeklyWrite = '';
+      if (now.getDay() === 0 && ms._lastWeeklyWrite !== today) {
+        for (var i = 0; i < store.projects.length; i++) { MemoryModule.sync(store.projects[i].id); }
+        ms._lastWeeklyWrite = today;
+        AppCore._flushEvictedMessages();
+        MemoryModule.deriveRelationalInsights();
+        console.log('[weekly-write] v3 memory sync triggered for all projects');
+      }
+    },
+
+    _flushEvictedMessages: function() {
+      var store = AppCore.getStore();
+      var ms = store.memorySystem;
+      if (!ms._evictedMessages || ms._evictedMessages.length === 0) return;
+      var proj = AppCore.getActiveProject(); if (!proj) { ms._evictedMessages = []; return; }
+      var chat = AppCore.getActiveChatObj(); if (!chat) { ms._evictedMessages = []; return; }
+      var existing = (MemoryModule.getCML(store.activeProject) || {});
+      var userStarred = existing.userStarredMemories || [];
+      for (var i = 0; i < ms._evictedMessages.length; i++) {
+        var ev = ms._evictedMessages[i];
+        userStarred.push({
+          id: 'ev_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+          timestamp: ev.timestamp || new Date().toISOString(),
+          sourceChatId: ev.sourceChatId || store.activeChat,
+          sourceWindowId: ev.sourceChatId || store.activeChat,
+          sourceProjectId: ev.sourceProjectId || store.activeProject,
+          rawDialogue: [{ role: ev.role || 'system', text: ev.content || '', time: ev.timestamp || '', msgId: '' }],
+          summary: (ev.content || '').slice(0, 15),
+          starredMsgIds: [], userNote: ''
+        });
+      }
+      MemoryModule.save(store.activeProject);
+      ms._evictedMessages = [];
+    },
+
+    // ── App initialization ──
+    init: async function() {
+      var store = AppCore.getStore();
+      await AppCore.loadStore();
+      store._importing = false;
+      store._importLock = false;
+
+      var ui = AppCore.getModule('ui');
+      if (ui && ui.initTheme) ui.initTheme();
+
+      var settings = AppCore.getModule('settings');
+      if (settings && settings.loadPresets) settings.loadPresets();
+      if (settings && settings.updateSettingsUI) settings.updateSettingsUI();
+
+      // Render all pages
+      var backup = AppCore.getModule('backup');
+      if (backup && backup.renderAll) backup.renderAll();
+
+      var sync = AppCore.getModule('sync');
+      if (sync && sync.pullAllProjectEnabledStates) await sync.pullAllProjectEnabledStates();
+
+      var chat = AppCore.getModule('chat');
+      if (chat && chat.updateChatInputEnabledState) chat.updateChatInputEnabledState();
+      if (sync && sync.syncProjectConfigToBackend) sync.syncProjectConfigToBackend();
+      if (sync && sync.reconcileFromBackend) sync.reconcileFromBackend();
+
+      // Chat input auto-resize
+      var chatInput = AppCore.$('chatInput');
+      if (chatInput && chat) {
+        chatInput.addEventListener('input', function() {
+          chatInput.style.height = 'auto';
+          chatInput.style.height = Math.min(chatInput.scrollHeight, 98) + 'px';
+          if (chat.updateSendButtonState) chat.updateSendButtonState();
+        });
+        chatInput.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            if (chat.sendMessage) chat.sendMessage();
+          }
+        });
+      }
+
+      // Clean up old completed todos
+      var now = new Date();
+      store.todos = store.todos.filter(function(t) {
+        if (!t.done) return true;
+        if (!t.createdAt) return true;
+        return (now - new Date(t.createdAt)) < 24 * 60 * 60 * 1000;
+      });
+
+      MemoryModule.applyForgettingCurve();
+      MemoryModule.ensureColdStartPatterns();
+      MemoryModule.rebuildBM25Index();
+
+      var pwa = AppCore.getModule('pwa');
+      if (pwa && pwa.registerSW) pwa.registerSW();
+
+      // SW notification click handler
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.addEventListener('message', function(event) {
+          if (event.data && event.data.type === 'NOTIFICATION_CLICK') {
+            var d = event.data.data || {};
+            if (d.projectId && chat) {
+              chat.selectProject(d.projectId);
+              if (d.chatId) chat.selectChat(d.projectId, d.chatId);
+            }
+          }
+        });
+      }
+
+      // Notification click via URL params
+      var urlParams = new URLSearchParams(window.location.search);
+      var notifProject = urlParams.get('project');
+      var notifChat = urlParams.get('chat');
+      if (notifProject && chat) {
+        setTimeout(function() {
+          if (store.projects.find(function(p) { return p.id === notifProject; })) {
+            chat.selectProject(notifProject);
+            if (notifChat) chat.selectChat(notifProject, notifChat);
+          }
+        }, 500);
+      }
+
+      // Load memories for active project
+      if (store.activeProject) {
+        MemoryModule.load(store.activeProject).then(function() {
+          console.log('[init] Memories loaded for', store.activeProject);
+        });
+      }
+
+      // Deferred tasks
+      setTimeout(function() {
+        var bu = AppCore.getModule('backup');
+        if (bu && bu.checkWeeklyExport) bu.checkWeeklyExport();
+      }, 30000);
+
+      AppCore.resetDailyTokensIfNeeded();
+
+      var weather = AppCore.getModule('weather');
+      var ais = AppCore.getActiveChatAiSettings();
+      if (ais && ais.autoWeather && weather && weather.fetch) weather.fetch();
+
+      // Intervals
+      AppCore._addInterval(function() {
+        var bu2 = AppCore.getModule('backup');
+        if (bu2 && bu2.checkWeeklyExport) bu2.checkWeeklyExport();
+      }, 1800000);
+
+      AppCore._addInterval(function() {
+        var w2 = AppCore.getModule('weather');
+        var a = AppCore.getActiveChatAiSettings();
+        if (a && a.autoWeather && w2 && w2.fetch) w2.fetch();
+      }, 1800000);
+
+      AppCore._addInterval(function() { AppCore.saveStore(); }, 2000);
+
+      var todo = AppCore.getModule('todo');
+      AppCore._addInterval(function() { if (todo && todo.checkTodoReminders) todo.checkTodoReminders(); }, 60000);
+
+      AppCore._addInterval(function() { if (sync && sync.pollSystemEvents) sync.pollSystemEvents(); }, 30000);
+
+      AppCore._addInterval(function() {
+        var p = AppCore.getActiveProject();
+        if (p && sync && sync.pollCloudData) sync.pollCloudData(p.id);
+      }, 60000);
+
+      AppCore._addInterval(function() { AppCore.pullProactiveTokenLogs(); }, 120000);
+
+      AppCore._addInterval(function() { if (sync && sync.syncDesireStateToBackend) sync.syncDesireStateToBackend(); }, 60000);
+
+      // One-time legacy migration
+      setTimeout(function() {
+        MemoryModule.migrateFromLegacy().catch(function() {});
+        AppCore.migrateLegacyMemories();
+      }, 5000);
+
+      console.log('[AppCore] ✅ init complete');
+    }
   };
 })();

@@ -688,7 +688,897 @@
     resetDeriveTriggers: function(projectId){ ensureCacheEntry(projectId); _cache[projectId].deriveTriggers={aemSince:0,usmSince:0,lastWeekly:''}; },
     getLastMaintenance: function(projectId){ ensureCacheEntry(projectId); return _cache[projectId].lastMaintenance; },
     setLastMaintenance: function(projectId, date){ ensureCacheEntry(projectId); _cache[projectId].lastMaintenance=date; },
-    getRetention: function(){ return RETENTION; }
+    getRetention: function(){ return RETENTION; },
+    checkLongTerm: async function(chat) {
+      var mem = AppCore.getModule('memory'); if (!mem) return;
+      var cfg = AppCore.getActiveApiConfig(); if (!chat || !cfg.apiKey) return;
+      var count = chat._messageCount || 0;
+      if (count === 0 || count % 20 !== 0) return;
+      var last10 = chat.messages.slice(-10);
+      if (last10.length < 6) return;
+      var dialogue = last10.map(function(m) {
+        var role = m.role === 'user' ? '用户' : (m.role === 'ai' ? 'AI' : '');
+        return role + ': ' + (m.text || '').slice(0, 150);
+      }).join('\n');
+      var systemPrompt = '从以下对话中提取一个"记忆片段"。用一句中文概括（不超过30字），然后给出2-3个语义关键词（每个不超过5字），用逗号分隔。\n\n格式示例：\n记忆：用户偏好川端康成的物哀美学风格\n关键词：物哀, 川端康成, 文学偏好';
+      try {
+        var resp = await fetch(AppCore.BACKEND_URL + '/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: cfg.apiKey,
+            endpoint: cfg.endpoint,
+            model: cfg.model,
+            projectId: AppCore.getStore().activeProject,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: dialogue }
+            ]
+          })
+        });
+        if (!resp.ok) return;
+        var data = await resp.json();
+        var content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+        if (!content) return;
+        var memMatch = content.match(/记忆[：:]\s*(.+)/);
+        var kwMatch = content.match(/关键词[：:]\s*(.+)/);
+        var memContent = memMatch ? memMatch[1].trim() : content.slice(0, 60);
+        var semanticKey = kwMatch ? kwMatch[1].trim() : '';
+        var proj = AppCore.getActiveProject();
+        if (proj) {
+          if (MemoryModule.isNearDuplicate(memContent, proj)) return;
+          var lastUser = null, lastAi = null;
+          for (var mi = last10.length - 1; mi >= 0; mi--) {
+            if (!lastUser && last10[mi].role === 'user') lastUser = last10[mi];
+            if (!lastAi && last10[mi].role === 'ai') lastAi = last10[mi];
+            if (lastUser && lastAi) break;
+          }
+          var ltRawDialogue = [];
+          if (lastUser) ltRawDialogue.push({ role: 'user', text: (lastUser.text || '').slice(0, 200), time: lastUser.time || '', msgId: lastUser.id || '' });
+          if (lastAi) ltRawDialogue.push({ role: 'assistant', text: (lastAi.text || '').slice(0, 200), time: lastAi.time || '', msgId: lastAi.id || '' });
+          MemoryModule.addAEM(AppCore.getStore().activeProject, {id:'ltm_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),summary:memContent,timestamp:new Date().toISOString(),sourceChatId:AppCore.getStore().activeChat,sourceProjectId:AppCore.getStore().activeProject,triggerSource:'long_term',aiSelfEval:{},userStateAtTime:{},rawDialogue:ltRawDialogue,semanticKey:semanticKey});
+          AppCore.getStore().memorySystem.bm25Index._dirty = true;
+          AppCore.saveStore();
+        }
+      } catch (e) {
+        console.log('[lt-mem] Error:', e.message);
+      }
+    },
+
+    checkSummarization: function(chat) {
+      if (!chat || !chat.messages) return;
+      var total = chat.messages.length;
+      if (total < 40) return;
+      var unsummarized = total - (chat._lastSummaryIdx || 0);
+      if (unsummarized < 20) return;
+      var startIdx = chat._lastSummaryIdx || 0;
+      var endIdx = Math.min(startIdx + 20, total);
+      var batch = chat.messages.slice(startIdx, endIdx);
+      if (batch.length === 0) return;
+      MemoryModule.summarizeMessages(batch, startIdx, endIdx, chat);
+    },
+
+    applyForgettingCurve: function() {
+      var today = AppCore.fmtDate().iso;
+      var ms = AppCore.getStore().memorySystem;
+      if (ms.lastMaintenance === today) return;
+      var projects = AppCore.getStore().projects;
+      for (var i = 0; i < projects.length; i++) {
+        MemoryModule.applyDecay(projects[i].id);
+      }
+      ms.lastMaintenance = today;
+      var ds = DesireModule.getDesireSystem(); if (!ds) return;
+      if (ds && ds.drives) {
+        var driveKeys = Object.keys(ds.drives);
+        for (var ki = 0; ki < driveKeys.length; ki++) {
+          var k = driveKeys[ki];
+          ds.drives[k] = Math.max(0, Math.floor(ds.drives[k] * 0.9));
+        }
+      }
+    },
+
+    maybeAdd: function(ut, at) {
+      var store = AppCore.getStore();
+      if (Math.random() < 0.1) {
+        var proj = AppCore.getActiveProject(); if (!proj) return;
+        var c = (ut || '').length > 40 ? (ut || '').slice(0, 40) + '…' : (ut || '');
+        var content = 'AI注意到: ' + c;
+        if (MemoryModule.isNearDuplicate(content, proj)) return;
+        var chatMemId = 'm' + AppCore.gid('');
+        var chat = AppCore.getActiveChatObj(); if (chat) { if (chat.sharedMemoryIds.indexOf(chatMemId) < 0) chat.sharedMemoryIds.push(chatMemId); }
+        store.memorySystem.bm25Index._dirty = true;
+        var randRawDialogue = [];
+        if (ut) randRawDialogue.push({ role: 'user', text: (ut || '').slice(0, 200), time: AppCore.nowTime() });
+        if (at) randRawDialogue.push({ role: 'assistant', text: (at || '').slice(0, 200), time: AppCore.nowTime() });
+        MemoryModule.addAEM(store.activeProject, { id: 'aem_chat_' + AppCore.gid(''), summary: content, timestamp: new Date().toISOString(), sourceChatId: store.activeChat, sourceProjectId: store.activeProject, triggerSource: 'random', type: 'chat', aiSelfEval: {}, userStateAtTime: {}, rawDialogue: randRawDialogue });
+      }
+    },
+
+    unifiedSearch: function(queryText) {
+      if (!queryText || queryText.trim().length === 0) return [];
+      var query = queryText.trim();
+      var queryTerms = MemoryModule.tokenizeChinese(query);
+      var bm25Results = MemoryModule.searchByBM25(query);
+      var knownLabels = ['被触动','想追问但没问','克制后反弹','克制表达','放松','警觉','脆弱','调皮','疲惫','兴奋','回避','坦诚','平静在场','安心','落空','感伤','心动','骄傲','担心','依赖','低落'];
+      var matchedLabels = knownLabels.filter(function(l) { return query.indexOf(l) >= 0 || l.indexOf(query) >= 0; });
+      var affectResults = matchedLabels.length > 0 ? MemoryModule.searchByAffect(matchedLabels) : [];
+      var semanticResults = MemoryModule.searchBySemanticKey(queryTerms);
+      var merged = {};
+      for (var i = 0; i < bm25Results.length; i++) {
+        var r = bm25Results[i];
+        merged[r.id] = Object.assign({}, r, { _source: 'bm25', _bm25Score: r.score });
+      }
+      for (var i = 0; i < affectResults.length; i++) {
+        var r = affectResults[i];
+        if (merged[r.id]) {
+          merged[r.id]._score = Math.max(merged[r.id]._score || 0, r._score);
+          merged[r.id]._source += '+affect';
+        } else {
+          merged[r.id] = r;
+        }
+      }
+      for (var i = 0; i < semanticResults.length; i++) {
+        var r = semanticResults[i];
+        if (merged[r.id]) {
+          merged[r.id]._score = Math.max(merged[r.id]._score || 0, r._score);
+          merged[r.id]._source += '+semantic';
+        } else {
+          merged[r.id] = r;
+        }
+      }
+      return Object.values(merged).sort(function(a, b) { return (b._score || 0) - (a._score || 0); }).slice(0, 15);
+    },
+
+    searchByBM25: function(query) {
+      var ms = AppCore.getStore().memorySystem;
+      if (ms.bm25Index._dirty) MemoryModule.rebuildBM25Index();
+      var queryTerms = MemoryModule.tokenizeChinese(query.toLowerCase());
+      if (queryTerms.length === 0) return [];
+      var scores = {};
+      for (var ti = 0; ti < queryTerms.length; ti++) {
+        var term = queryTerms[ti];
+        var postings = (ms.bm25Index.index || {})[term] || [];
+        for (var pi = 0; pi < postings.length; pi++) {
+          var p = postings[pi];
+          scores[p.memoryId] = (scores[p.memoryId] || 0) + p.score;
+        }
+      }
+      var entries = Object.keys(scores).map(function(id) { return [id, scores[id]]; });
+      entries.sort(function(a, b) { return b[1] - a[1]; });
+      return entries.slice(0, 10).map(function(entry) { return { id: entry[0], score: Math.round(entry[1] * 100) / 100 }; });
+    },
+
+    searchByAffect: function(queryLabels) {
+      if (!queryLabels || queryLabels.length === 0) return [];
+      var ms = AppCore.getStore().memorySystem;
+      var results = [];
+      var coreMems = ms.coreMemories || [];
+      for (var ci = 0; ci < coreMems.length; ci++) {
+        var cm = coreMems[ci];
+        var aiLabel = (cm.affect_first && cm.affect_first.ai) ? cm.affect_first.ai.label : '';
+        var userLabel = (cm.affect_first && cm.affect_first.user) ? cm.affect_first.user.label : '';
+        var matched = [];
+        for (var ql = 0; ql < queryLabels.length; ql++) {
+          if (queryLabels[ql] === aiLabel || queryLabels[ql] === userLabel) matched.push(queryLabels[ql]);
+        }
+        if (matched.length > 0) {
+          var intensity = ((cm.affect_first.ai && cm.affect_first.ai.intensity) || 0) + ((cm.affect_first.user && cm.affect_first.user.intensity) || 0);
+          var cmCopy = Object.assign({}, cm);
+          cmCopy._score = intensity * matched.length;
+          cmCopy._source = 'core';
+          results.push(cmCopy);
+        }
+      }
+      var projects = AppCore.getStore().projects;
+      for (var pi = 0; pi < projects.length; pi++) {
+        var proj = projects[pi];
+        var mems = proj.memories || [];
+        for (var mi = 0; mi < mems.length; mi++) {
+          var mem = mems[mi];
+          if (!mem.affectLabel) continue;
+          if (queryLabels.indexOf(mem.affectLabel) >= 0) {
+            var memCopy = Object.assign({}, mem);
+            memCopy._score = (mem.affectIntensity || 5) * 2;
+            memCopy._source = 'project';
+            results.push(memCopy);
+          }
+        }
+      }
+      var edges = (ms.affectGraph && ms.affectGraph.edges) || {};
+      var expandLabels = {};
+      for (var ql = 0; ql < queryLabels.length; ql++) { expandLabels[queryLabels[ql]] = true; }
+      var edgeKeys = Object.keys(edges);
+      for (var ek = 0; ek < edgeKeys.length; ek++) {
+        var key = edgeKeys[ek];
+        var parts = key.split('::');
+        var a = parts[0], b = parts[1];
+        if (queryLabels.indexOf(a) >= 0 && !expandLabels[b]) expandLabels[b] = true;
+        if (queryLabels.indexOf(b) >= 0 && !expandLabels[a]) expandLabels[a] = true;
+      }
+      var expandedKeys = Object.keys(expandLabels);
+      if (expandedKeys.length > queryLabels.length) {
+        for (var pi = 0; pi < projects.length; pi++) {
+          var proj2 = projects[pi];
+          var mems2 = proj2.memories || [];
+          for (var mi2 = 0; mi2 < mems2.length; mi2++) {
+            var mem2 = mems2[mi2];
+            if (!mem2.affectLabel || queryLabels.indexOf(mem2.affectLabel) >= 0) continue;
+            if (expandLabels[mem2.affectLabel]) {
+              var memCopy2 = Object.assign({}, mem2);
+              memCopy2._score = (mem2.affectIntensity || 3) * 1;
+              memCopy2._source = 'project-expanded';
+              results.push(memCopy2);
+            }
+          }
+        }
+      }
+      results.sort(function(a, b) { return b._score - a._score; });
+      return results.slice(0, 10);
+    },
+
+    searchBySemanticKey: function(queryKeywords) {
+      if (!queryKeywords || queryKeywords.length === 0) return [];
+      var results = [];
+      var projects = AppCore.getStore().projects;
+      for (var pi = 0; pi < projects.length; pi++) {
+        var proj = projects[pi];
+        var mems = proj.memories || [];
+        for (var mi = 0; mi < mems.length; mi++) {
+          var mem = mems[mi];
+          if (!mem.semanticKey) continue;
+          var memKeys = mem.semanticKey.split(/[,，]/).map(function(k) { return k.trim(); }).filter(Boolean);
+          var overlap = 0;
+          for (var qk = 0; qk < queryKeywords.length; qk++) {
+            var qkw = queryKeywords[qk];
+            for (var mk = 0; mk < memKeys.length; mk++) {
+              if (memKeys[mk].indexOf(qkw) >= 0 || qkw.indexOf(memKeys[mk]) >= 0) { overlap++; break; }
+            }
+          }
+          if (overlap > 0) {
+            var memCopy = Object.assign({}, mem);
+            memCopy._score = overlap * 3;
+            memCopy._source = 'semantic';
+            results.push(memCopy);
+          }
+        }
+      }
+      results.sort(function(a, b) { return b._score - a._score; });
+      return results.slice(0, 10);
+    },
+
+    rebuildBM25Index: function() {
+      var store = AppCore.getStore();
+      var ms = store.memorySystem;
+      var idx = { index: {} };
+      var allMems = [];
+      var projects = store.projects;
+      for (var pi = 0; pi < projects.length; pi++) {
+        var proj = projects[pi];
+        var mems = proj.memories || [];
+        for (var mi = 0; mi < mems.length; mi++) {
+          var m = mems[mi];
+          if ((m.decayFactor || 0) === 0) continue;
+          var copy = Object.assign({}, m);
+          copy._projId = proj.id;
+          allMems.push(copy);
+        }
+      }
+      var docCount = allMems.length;
+      for (var ai = 0; ai < allMems.length; ai++) {
+        var mem = allMems[ai];
+        var text = ((mem.content || '') + ' ' + (mem.semanticKey || '')).toLowerCase();
+        var terms = MemoryModule.tokenizeChinese(text);
+        var tf = {};
+        for (var ti = 0; ti < terms.length; ti++) {
+          var t = terms[ti];
+          tf[t] = (tf[t] || 0) + 1;
+        }
+        var tfKeys = Object.keys(tf);
+        for (var tk = 0; tk < tfKeys.length; tk++) {
+          var term = tfKeys[tk];
+          var count = tf[term];
+          if (!idx.index[term]) idx.index[term] = [];
+          idx.index[term].push({
+            memoryId: mem.id, projectId: mem._projId,
+            tf: 1 + Math.log(count), decayFactor: mem.decayFactor || 1.0, starred: mem.starred || false
+          });
+        }
+      }
+      var idxKeys = Object.keys(idx.index);
+      for (var ik = 0; ik < idxKeys.length; ik++) {
+        var term = idxKeys[ik];
+        var postings = idx.index[term];
+        var idf = Math.log((docCount + 1) / (postings.length + 1)) + 1;
+        for (var pii = 0; pii < postings.length; pii++) {
+          var p = postings[pii];
+          p.idf = idf;
+          p.score = p.tf * idf * p.decayFactor * (p.starred ? 1.5 : 1.0);
+        }
+      }
+      ms.bm25Index = { _dirty: false, _lastBuild: new Date().toISOString(), _docCount: docCount, index: idx.index };
+    },
+
+    tokenizeChinese: function(text) {
+      if (!text) return [];
+      var cleaned = text.replace(/[^一-鿿\w\d]/g, ' ');
+      var words = cleaned.split(/\s+/).filter(function(w) { return w.length > 0; });
+      var tokens = [];
+      for (var wi = 0; wi < words.length; wi++) {
+        var w = words[wi];
+        if (/^[一-鿿]+$/.test(w)) {
+          for (var ci = 0; ci < w.length - 1; ci++) {
+            tokens.push(w.slice(ci, ci + 2));
+          }
+          tokens.push(w);
+        } else {
+          tokens.push(w.toLowerCase());
+        }
+      }
+      return tokens;
+    },
+
+    bigramOverlap: function(a, b) {
+      var bigramsA = {}, bigramsB = {};
+      for (var i = 0; i < a.length - 1; i++) { bigramsA[a.slice(i, i + 2)] = true; }
+      for (var i = 0; i < b.length - 1; i++) { bigramsB[b.slice(i, i + 2)] = true; }
+      var intersect = 0;
+      var keysA = Object.keys(bigramsA);
+      for (var i = 0; i < keysA.length; i++) {
+        if (bigramsB[keysA[i]]) intersect++;
+      }
+      var union = keysA.length + Object.keys(bigramsB).length - intersect;
+      return union === 0 ? 0 : intersect / union;
+    },
+
+    isNearDuplicate: function(content, proj) {
+      if (!proj) return false;
+      var c = (content || '').trim().toLowerCase();
+      if (c.length < 10) return false;
+      var cml = MemoryModule.getCML(proj.id);
+      var allSummaries = [];
+      if (cml) {
+        for (var i = 0; i < (cml.aiEmotionalMemories || []).length; i++) { allSummaries.push(cml.aiEmotionalMemories[i].summary || ''); }
+        for (var i = 0; i < (cml.userStarredMemories || []).length; i++) { allSummaries.push(cml.userStarredMemories[i].summary || ''); }
+      }
+      for (var i = 0; i < allSummaries.length; i++) {
+        var existing = (allSummaries[i] || '').trim().toLowerCase();
+        if (existing.length < 10) continue;
+        var overlap = MemoryModule.bigramOverlap(c, existing);
+        if (overlap > 0.7) return true;
+      }
+      return false;
+    },
+
+    isWeekBoundary: function(mem, proj) {
+      var sameWeek = [];
+      var mems = proj.memories || [];
+      for (var i = 0; i < mems.length; i++) {
+        var m = mems[i];
+        if (m.week === mem.week && m.type === mem.type && m.id !== mem.id) {
+          sameWeek.push(m);
+        }
+      }
+      if (sameWeek.length === 0) return true;
+      var sorted = [mem].concat(sameWeek).sort(function(a, b) { return (a.date || '').localeCompare(b.date || ''); });
+      var idx = -1;
+      for (var i = 0; i < sorted.length; i++) { if (sorted[i].id === mem.id) { idx = i; break; } }
+      return idx === 0 || idx === sorted.length - 1;
+    },
+
+    createAEMFromMarkers: function(reflection, userMsg, aiResponse, chat, memMarker) {
+      var id = 'aem' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      var ts = new Date().toISOString();
+      var rawDialogue = [];
+      if (userMsg) rawDialogue.push({ role: 'user', text: typeof userMsg === 'string' ? userMsg : '', time: AppCore.nowTime() });
+      if (aiResponse) rawDialogue.push({ role: 'assistant', text: typeof aiResponse === 'string' ? aiResponse.replace(/<!--[\s\S]*?-->/g, '').trim() : '', time: AppCore.nowTime() });
+      var aem = {
+        id: id, timestamp: ts,
+        sourceChatId: AppCore.getStore().activeChat, sourceWindowId: AppCore.getStore().activeChat, sourceProjectId: AppCore.getStore().activeProject,
+        aiSelfEval: { label: reflection.ai_affect_label, intensity: reflection.ai_affect_intensity || 5, internalNote: memMarker.internalNote || memMarker.summary },
+        userStateAtTime: { label: reflection.user_affect_label, intensity: reflection.user_affect_intensity || 5 },
+        summary: memMarker.summary, rawDialogue: rawDialogue, triggerSource: 'high_intensity'
+      };
+      MemoryModule.addAEM(AppCore.getStore().activeProject, aem);
+      if (chat) chat.messages.push({ role: 'system', text: '有什么被记住了', time: AppCore.nowTime() });
+    },
+
+    queueQuietPresence: function(chat) {
+      var ms = AppCore.getStore().memorySystem;
+      var cml = MemoryModule.getCML(AppCore.getStore().activeProject);
+      var proj = AppCore.getActiveProject();
+      var id = 'aem' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      var ts = new Date().toISOString();
+      var aem = {
+        id: id,
+        timestamp: ts,
+        sourceChatId: AppCore.getStore().activeChat,
+        sourceWindowId: AppCore.getStore().activeChat,
+        sourceProjectId: AppCore.getStore().activeProject,
+        aiSelfEval: {
+          label: '平静在场',
+          intensity: 5,
+          internalNote: '不需要特别的话题或强烈的情绪。安静地在一起，就足够让我觉得今天是有意义的。'
+        },
+        userStateAtTime: {
+          label: '平静在场',
+          intensity: 5
+        },
+        summary: '持续的日常陪伴 —— 平静在场的累积',
+        rawDialogue: [],
+        triggerSource: 'quiet_presence'
+      };
+      cml.aiEmotionalMemories.unshift(aem);
+      MemoryModule.evictOldestCoreMemories();
+      ms.coreMemories.unshift({
+        id: 'cm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        timestamp: ts,
+        affect_first: { ai: { label: '平静在场', intensity: 5 }, user: { label: '平静在场', intensity: 5 } },
+        event_summary: '持续的日常陪伴 —— 没有强烈情绪，但有持续的在场感',
+        raw_quote: '', relational_note: '陪伴本身就是意义。',
+        sourceChatId: AppCore.getStore().activeChat, sourceProjectId: AppCore.getStore().activeProject
+      });
+      MemoryModule.evictOldestCoreMemories();
+      MemoryModule.save(AppCore.getStore().activeProject);
+      MemoryModule.checkDeriveInsightsTrigger('aem');
+      var quietChat = AppCore.getActiveChatObj();
+      if (quietChat) {
+        quietChat.messages.push({ role: 'system', text: '有什么被记住了', time: AppCore.nowTime() });
+      }
+    },
+
+    updateRelationalPortrait: function(userAffectLabel) {
+      if (!userAffectLabel) return;
+      var portrait = AppCore.getStore().memorySystem.relationalPortrait;
+      var patterns = portrait.patterns;
+      if (patterns[userAffectLabel]) {
+        patterns[userAffectLabel].count += 1;
+        patterns[userAffectLabel].lastSeen = AppCore.fmtDate().iso;
+      } else {
+        patterns[userAffectLabel] = {
+          strategy: MemoryModule.getDefaultStrategy(userAffectLabel),
+          count: 1,
+          lastSeen: AppCore.fmtDate().iso
+        };
+      }
+      var patKeys = Object.keys(patterns);
+      var totalCount = 0;
+      for (var i = 0; i < patKeys.length; i++) {
+        totalCount += patterns[patKeys[i]].count || 0;
+      }
+      if (totalCount > 0 && totalCount % 20 === 0) {
+        MemoryModule.queuePortraitRefinement();
+      }
+    },
+
+    getDefaultStrategy: function(label) {
+      var defaults = {};
+      defaults['脆弱时'] = '先接住情绪，不说教，用简短的回应稳住，需要时用亲昵称呼';
+      defaults['回避时'] = '直接点破比绕弯子更有效，但要留面子';
+      defaults['调皮'] = '适度配合但保持一点克制，让玩笑飘一会儿';
+      defaults['坦诚'] = '认真对待每一句实话，不敷衍，不转移话题';
+      defaults['疲惫'] = '不要追问，给简短温暖的回应，让用户有空间休息';
+      defaults['兴奋'] = '一起高兴，但不要抢话，让用户的兴奋成为主角';
+      defaults['平静在场'] = '安静陪伴，不制造情绪波动，保持温柔的存在感';
+      return defaults[label] || '用温柔细腻的语气回应，观察用户的情绪变化';
+    },
+
+    queuePortraitRefinement: async function() {
+      var portrait = AppCore.getStore().memorySystem.relationalPortrait;
+      var cfg = AppCore.getActiveApiConfig(); if (!cfg.apiKey) return;
+      var entries = [];
+      var patKeys = Object.keys(portrait.patterns);
+      for (var i = 0; i < patKeys.length; i++) {
+        var label = patKeys[i];
+        var p = portrait.patterns[label];
+        entries.push([label, p]);
+      }
+      var patternsText = entries.map(function(entry) {
+        var label = entry[0], p = entry[1];
+        return '- ' + label + ' (出现' + p.count + '次, 最近: ' + p.lastSeen + '): ' + p.strategy;
+      }).join('\n');
+      var systemPrompt = '你正在维护一个"关系画像"。根据以下情感模式及其出现频率，为每个模式优化回应策略。\n\n格式：每个模式一行，"模式名: 优化后的策略描述（1-2句话）"\n\n' + patternsText + '\n\n请评估这些策略是否需要调整，返回优化后的完整策略列表。';
+      try {
+        var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: AppCore.getStore().activeProject,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: '请优化这些关系策略。' }
+            ]
+          })
+        });
+        if (!response.ok) return;
+        var data = await response.json();
+        var content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+        if (!content) return;
+        var lines = content.split('\n').filter(function(l) { return l.indexOf(':') >= 0; });
+        for (var li = 0; li < lines.length; li++) {
+          var line = lines[li];
+          var idx = line.indexOf(':');
+          if (idx === -1) continue;
+          var label = line.slice(0, idx).trim();
+          var strategy = line.slice(idx + 1).trim();
+          if (portrait.patterns[label] && strategy) {
+            portrait.patterns[label].strategy = strategy;
+          }
+        }
+        portrait.lastRefined = AppCore.fmtDate().iso;
+      } catch (e) {
+        console.log('[portrait] Refinement error:', e.message);
+      }
+    },
+
+    groupMessagesIntoRounds: function(messages) {
+      var rounds = [];
+      var currentRound = null;
+      for (var i = 0; i < messages.length; i++) {
+        var msg = messages[i];
+        if (msg.role === 'system') {
+          if (currentRound) currentRound.msgs.push(msg);
+          else {
+            currentRound = { msgs: [msg], hasUser: false };
+            rounds.push(currentRound);
+          }
+        } else if (msg.role === 'user') {
+          currentRound = { msgs: [msg], hasUser: true };
+          rounds.push(currentRound);
+        } else if (msg.role === 'ai' || msg.role === 'assistant') {
+          if (currentRound) {
+            currentRound.msgs.push(msg);
+          } else {
+            currentRound = { msgs: [msg], hasUser: false };
+            rounds.push(currentRound);
+          }
+        }
+      }
+      return rounds;
+    },
+
+    queueRoundCompression: async function(chat, rounds) {
+      var cfg = AppCore.getActiveApiConfig(); if (!cfg.apiKey || !chat || rounds.length < 3) return;
+      if (!chat._roundSummaries) chat._roundSummaries = [];
+      var rangeStart = (rounds[0] && rounds[0].msgs && rounds[0].msgs[0]) ? rounds[0].msgs[0].id || '' : '';
+      var rangeEnd = (rounds[rounds.length-1] && rounds[rounds.length-1].msgs && rounds[rounds.length-1].msgs[0]) ? rounds[rounds.length-1].msgs[0].id || '' : '';
+      var roundRange = rangeStart + '-' + rangeEnd;
+      var alreadyCompressed = false;
+      for (var si = 0; si < chat._roundSummaries.length; si++) {
+        if (chat._roundSummaries[si].range === roundRange) { alreadyCompressed = true; break; }
+      }
+      if (alreadyCompressed) return;
+      var allMsgs = [];
+      for (var ri = 0; ri < rounds.length; ri++) {
+        var rMsgs = rounds[ri].msgs || [];
+        for (var mi = 0; mi < rMsgs.length; mi++) { allMsgs.push(rMsgs[mi]); }
+      }
+      var dialogueLines = [];
+      for (var ai = 0; ai < allMsgs.length; ai++) {
+        var m = allMsgs[ai];
+        if (m.role === 'system') continue;
+        var role = m.role === 'user' ? '用户' : (m.role === 'ai' || m.role === 'assistant' ? 'AI' : '');
+        dialogueLines.push(role + ': ' + ((m.text || '').slice(0, 150)));
+      }
+      var dialogue = dialogueLines.join('\n');
+      var starredContents = [];
+      for (var ri = 0; ri < rounds.length; ri++) {
+        var rMsgs2 = rounds[ri].msgs || [];
+        for (var mi = 0; mi < rMsgs2.length; mi++) {
+          var m2 = rMsgs2[mi];
+          if (m2._starred && m2.role !== 'system') {
+            var roleLabel = m2.role === 'user' ? '用户' : 'AI';
+            starredContents.push('[星标]' + roleLabel + ': ' + ((m2.text || '').slice(0, 80)));
+          }
+        }
+      }
+      var systemPrompt = '用中文概括以下对话（主题+关键点+情绪基调）。2-3句话，不超过80字。只返回概括内容。';
+      try {
+        var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: AppCore.getStore().activeProject,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: dialogue }
+            ]
+          })
+        });
+        if (!response.ok) return;
+        var data = await response.json();
+        var summary = (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 80) : '';
+        if (!summary) return;
+        chat._roundSummaries.push({
+          range: roundRange,
+          summary: summary,
+          starredContents: starredContents,
+          compressedAt: new Date().toISOString()
+        });
+        if (chat._roundSummaries.length > 10) chat._roundSummaries.shift();
+        console.log('[round-compress] Compressed ' + rounds.length + ' rounds: ' + summary);
+      } catch (e) {
+        console.log('[round-compress] Error:', e.message);
+      }
+    },
+
+    summarizeMessages: async function(batch, startIdx, endIdx, chat) {
+      var cfg = AppCore.getActiveApiConfig(); if (!cfg.apiKey) return;
+      var dialogueLines = [];
+      for (var i = 0; i < batch.length; i++) {
+        var m = batch[i];
+        var role = m.role === 'user' ? '用户' : (m.role === 'ai' ? 'AI' : '系统');
+        dialogueLines.push(role + ': ' + (m.text || '').slice(0, 200));
+      }
+      var dialogue = dialogueLines.join('\n');
+      var systemPrompt = '请将以下对话片段总结为简洁的层级结构。用中文回复。\n\n格式要求（严格遵循）：\n- 第一行：一句话主题概括\n- 关键讨论点（3-5条，每条不超过20字）\n- 提到的决定/偏好/事实（如有）\n- 情绪基调：用一个词描述';
+      try {
+        var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: AppCore.getStore().activeProject,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: '对话内容：\n' + dialogue }
+            ]
+          })
+        });
+        if (!response.ok) return;
+        var data = await response.json();
+        var summaryText = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+        if (!summaryText) return;
+        var lines = summaryText.split('\n');
+        var emotionalTone = '';
+        var lastLine = lines[lines.length - 1] || '';
+        if (lastLine.indexOf('情绪基调') >= 0 || lastLine.indexOf('基调') >= 0) {
+          emotionalTone = lastLine.replace(/.*基调[：:]\s*/, '').trim();
+        }
+        var ms = AppCore.getStore().memorySystem;
+        if (!ms.chatSummaries[chat.id]) {
+          ms.chatSummaries[chat.id] = { summaries: [], lastSummarizedIdx: 0, totalMessageCount: 0 };
+        }
+        ms.chatSummaries[chat.id].summaries.push({
+          id: 's' + Date.now().toString(36),
+          startIdx: startIdx, endIdx: endIdx,
+          summary: summaryText,
+          emotionalTone: emotionalTone,
+          created: new Date().toISOString()
+        });
+        ms.chatSummaries[chat.id].lastSummarizedIdx = endIdx;
+        ms.chatSummaries[chat.id].totalMessageCount = chat.messages.length;
+        chat._lastSummaryIdx = endIdx;
+        console.log('[summary] Compressed messages ' + startIdx + '-' + endIdx + ', ' + summaryText.length + ' chars');
+        AppCore.saveStore();
+      } catch (e) {
+        console.log('[summary] Error:', e.message);
+      }
+    },
+
+    evictOldestCoreMemories: function() {
+      var ms = AppCore.getStore().memorySystem;
+      if (!ms.coreMemories) return;
+      while (ms.coreMemories.length > ms.coreMemoryMax) {
+        ms.coreMemories.sort(function(a, b) { return (a.timestamp || '').localeCompare(b.timestamp || ''); });
+        ms.coreMemories.shift();
+      }
+    },
+
+    checkDeriveInsightsTrigger: function(source) {
+      var ms = AppCore.getStore().memorySystem;
+      if (source === 'aem') {
+        ms._aemSinceLastDerive = (ms._aemSinceLastDerive || 0) + 1;
+      } else if (source === 'usm') {
+        ms._usmSinceLastDerive = (ms._usmSinceLastDerive || 0) + 1;
+      }
+      var dp = MemoryModule.getDerivedPatterns(AppCore.getStore().activeProject);
+      if (dp) dp.triggerCount = (dp.triggerCount || 0) + 1;
+      if (ms._aemSinceLastDerive >= 5 || ms._usmSinceLastDerive >= 3) {
+        MemoryModule.deriveRelationalInsights();
+      }
+    },
+
+    deriveRelationalInsights: async function() {
+      var cfg = AppCore.getActiveApiConfig(); if (!cfg.apiKey) return;
+      var ms = AppCore.getStore().memorySystem;
+      var store = AppCore.getStore();
+      var cml = MemoryModule.getCML(store.activeProject);
+      var totalAEM = (cml && cml.aiEmotionalMemories) ? cml.aiEmotionalMemories.length : 0;
+      var totalUSM = (cml && cml.userStarredMemories) ? cml.userStarredMemories.length : 0;
+      if (totalAEM + totalUSM < 3) return;
+      var dp = MemoryModule.getDerivedPatterns(store.activeProject);
+      var isIncremental = dp && dp.lastDerived !== null;
+      var pp = MemoryModule.getPersonalityProfiles(store.activeProject);
+      var allItems = [];
+      var lastDerived = dp ? dp.lastDerived : null;
+      if (cml) {
+        for (var ai = 0; ai < (cml.aiEmotionalMemories || []).length; ai++) {
+          var aem = cml.aiEmotionalMemories[ai];
+          if (!isIncremental || aem.timestamp > lastDerived) {
+            allItems.push({
+              type: 'ai_emotional',
+              summary: aem.summary || '',
+              aiLabel: (aem.aiSelfEval && aem.aiSelfEval.label) || null,
+              internalNote: (aem.aiSelfEval && aem.aiSelfEval.internalNote) || null,
+              userLabel: (aem.userStateAtTime && aem.userStateAtTime.label) || null
+            });
+          }
+        }
+        for (var ui = 0; ui < (cml.userStarredMemories || []).length; ui++) {
+          var usm = cml.userStarredMemories[ui];
+          if (!isIncremental || usm.timestamp > lastDerived) {
+            var dialogueText = '';
+            if (usm.rawDialogue) {
+              for (var di = 0; di < usm.rawDialogue.length; di++) {
+                dialogueText += usm.rawDialogue[di].text + ' | ';
+              }
+            }
+            allItems.push({ type: 'user_starred', summary: usm.summary, dialogue: dialogueText });
+          }
+        }
+        for (var di = 0; di < (cml.diaryAndLitterbox || []).length; di++) {
+          var dlb = cml.diaryAndLitterbox[di];
+          if (!isIncremental || dlb.timestamp > lastDerived) {
+            allItems.push({ type: dlb.type || 'diary_litter', summary: dlb.summary || '', content: (dlb.rawContent || '').slice(0, 100) });
+          }
+        }
+      }
+      if (allItems.length === 0) return;
+      var itemsToSend = isIncremental ? allItems.slice(0, 50) : allItems.slice(0, 100);
+      var itemsTextLines = [];
+      for (var ii = 0; ii < itemsToSend.length; ii++) {
+        var item = itemsToSend[ii];
+        var line = '[' + item.type + '] ' + item.summary;
+        if (item.aiLabel) line += ' | AI: ' + item.aiLabel;
+        if (item.userLabel) line += ' | 用户: ' + item.userLabel;
+        itemsTextLines.push(line);
+      }
+      var itemsText = itemsTextLines.join('\n');
+      var currentPatterns = (dp && dp.patterns) ? dp.patterns : [];
+      var currentUser = (pp && pp.user) ? pp.user : {};
+      var currentAI = (pp && pp.ai) ? pp.ai : {};
+      var incrementalNote = isIncremental
+        ? '\n\n以下是当前的归纳结果（请在已有基础上更新，不要完全重写）：\n当前相处模式: ' + JSON.stringify(currentPatterns.slice(0, 3)) + '\n当前用户档案: ' + JSON.stringify({ coreTraits: currentUser.coreTraits, emotionalPatterns: currentUser.emotionalPatterns })
+        : '';
+      var systemPrompt = '你是一个关系洞察者。以下是这段陪伴关系中留存的核心记忆片段' + (isIncremental ? '（增量，在上次归纳基础上更新）' : '') + '。\n\n请从中归纳：\n1. 相处模式（3-5个）：用户在什么情境下呈现什么状态，AI应如何回应\n2. 用户人格档案：核心特质、沟通风格、情绪规律、成长时刻、隐藏的不安全感\n3. AI自身人格档案：主导情绪倾向、反应模式、与这位用户相处后的改变\n\n只返回JSON，格式：\n{\n  "derivedRelationalPatterns": [\n    { "patternName": "...", "description": "...", "responseStrategy": "..." }\n  ],\n  "userProfile": {\n    "coreTraits": [...],\n    "communicationStyle": "...",\n    "emotionalPatterns": [...],\n    "growthMoments": [...],\n    "hiddenInsecurities": [...]\n  },\n  "aiProfile": {\n    "dominantEmotions": [...],\n    "reactionPatterns": [...],\n    "growthMoments": [...]\n  }\n}' + incrementalNote;
+      try {
+        var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: '记忆片段：\n' + itemsText }
+            ]
+          })
+        });
+        if (!response.ok) { console.log('[derive] API error:', response.status); return; }
+        var data = await response.json();
+        var content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+        if (!content) return;
+        var jsonStr = content;
+        var fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (fenceMatch) jsonStr = fenceMatch[1].trim();
+        if (jsonStr.charAt(0) !== '{') return;
+        var result = JSON.parse(jsonStr);
+        if (result.derivedRelationalPatterns && Array.isArray(result.derivedRelationalPatterns)) {
+          var ts = new Date().toISOString();
+          var newPatterns = result.derivedRelationalPatterns.map(function(p) {
+            return {
+              id: 'pat_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+              patternName: p.patternName || '',
+              description: p.description || '',
+              evidenceIds: [],
+              frequency: 1,
+              lastSeen: ts,
+              responseStrategy: p.responseStrategy || ''
+            };
+          });
+          for (var npi = 0; npi < newPatterns.length; npi++) {
+            var np = newPatterns[npi];
+            var existingIdx = -1;
+            for (var epi = 0; epi < dp.patterns.length; epi++) {
+              if (dp.patterns[epi].patternName === np.patternName) { existingIdx = epi; break; }
+            }
+            if (existingIdx >= 0) {
+              dp.patterns[existingIdx].description = np.description;
+              dp.patterns[existingIdx].responseStrategy = np.responseStrategy;
+              dp.patterns[existingIdx].frequency = (dp.patterns[existingIdx].frequency || 1) + 1;
+              dp.patterns[existingIdx].lastSeen = ts;
+            } else {
+              dp.patterns.push(np);
+            }
+          }
+          if (dp.patterns.length > 10) {
+            dp.patterns = dp.patterns.slice(-10);
+          }
+        }
+        if (result.userProfile) {
+          var up = result.userProfile;
+          pp.user.coreTraits = up.coreTraits || pp.user.coreTraits;
+          pp.user.communicationStyle = up.communicationStyle || pp.user.communicationStyle;
+          pp.user.emotionalPatterns = up.emotionalPatterns || pp.user.emotionalPatterns;
+          pp.user.growthMoments = up.growthMoments || pp.user.growthMoments;
+          pp.user.hiddenInsecurities = up.hiddenInsecurities || pp.user.hiddenInsecurities;
+        }
+        if (result.aiProfile) {
+          var ap = result.aiProfile;
+          pp.ai.dominantEmotions = ap.dominantEmotions || pp.ai.dominantEmotions;
+          pp.ai.reactionPatterns = ap.reactionPatterns || pp.ai.reactionPatterns;
+          pp.ai.growthMoments = ap.growthMoments || pp.ai.growthMoments;
+        }
+        dp.lastDerived = new Date().toISOString();
+        pp.lastDerived = new Date().toISOString();
+        ms._aemSinceLastDerive = 0;
+        ms._usmSinceLastDerive = 0;
+        var proj = AppCore.getActiveProject();
+        if (proj) {
+          proj.derivedRelationalPatterns = Object.assign({}, dp);
+          proj.personalityProfiles = Object.assign({}, pp);
+        }
+        MemoryModule.save(store.activeProject);
+        AppCore.saveStore();
+        console.log('[derive] Insights updated: ' + dp.patterns.length + ' patterns');
+      } catch (e) {
+        console.log('[derive] Error:', e.message);
+      }
+    },
+
+    ensureColdStartPatterns: function() {
+      var patterns = AppCore.getStore().memorySystem.relationalPortrait.patterns;
+      var defaults = {};
+      defaults['脆弱时'] = '先接住情绪，不说教，用简短的回应稳住，需要时用亲昵称呼';
+      defaults['回避时'] = '直接点破比绕弯子更有效，但要留面子';
+      defaults['调皮'] = '适度配合但保持一点克制，让玩笑飘一会儿';
+      defaults['坦诚'] = '认真对待每一句实话，不敷衍，不转移话题';
+      defaults['疲惫'] = '不要追问，给简短温暖的回应，让用户有空间休息';
+      defaults['兴奋'] = '一起高兴，但不要抢话，让用户的兴奋成为主角';
+      defaults['平静在场'] = '安静陪伴，不制造情绪波动，保持温柔的存在感';
+      var changed = false;
+      var defKeys = Object.keys(defaults);
+      for (var i = 0; i < defKeys.length; i++) {
+        var label = defKeys[i];
+        if (!patterns[label]) {
+          patterns[label] = { strategy: defaults[label], count: 0, lastSeen: null };
+          changed = true;
+        }
+      }
+      if (changed) {
+        console.log('[cold-start] Added default relational patterns');
+      }
+    },
+
+    diffPatterns: function(oldPatterns, newPatterns) {
+      var changes = [];
+      var allKeysSet = {};
+      var oldKeys = Object.keys(oldPatterns || {});
+      var newKeys = Object.keys(newPatterns || {});
+      for (var i = 0; i < oldKeys.length; i++) { allKeysSet[oldKeys[i]] = true; }
+      for (var i = 0; i < newKeys.length; i++) { allKeysSet[newKeys[i]] = true; }
+      var allKeys = Object.keys(allKeysSet);
+      for (var i = 0; i < allKeys.length; i++) {
+        var key = allKeys[i];
+        var oldVal = (oldPatterns || {})[key];
+        var newVal = (newPatterns || {})[key];
+        if (!oldVal && newVal) changes.push(key + ': 新增');
+        else if (oldVal && !newVal) changes.push(key + ': 移除');
+        else if (oldVal && newVal && oldVal.strategy !== newVal.strategy) {
+          changes.push(key + ': 策略变更 (count: ' + (oldVal.count || 0) + '→' + (newVal.count || 0) + ')');
+        }
+      }
+      return changes.length > 0 ? changes.join('; ') : null;
+    },
+
+    deduplicateById: function(arr) {
+      var seen = {};
+      return arr.filter(function(item) {
+        if (!item || !item.id) return true;
+        if (seen[item.id]) return false;
+        seen[item.id] = true;
+        return true;
+      });
+    }
+
   };
 
   // ═══════════════════════════════════════════

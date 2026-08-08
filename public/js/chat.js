@@ -282,7 +282,7 @@ var ChatModule = (function() {
 
   function buildRetrievalBlock(userQuery) {
     if (!userQuery) return null;
-    var results = unifiedSearch(userQuery);
+    var results = (AppCore.getModule('memory')||{}).unifiedSearch(userQuery);
     if (results.length === 0) return null;
     var items = results.slice(0, 3).map(function(r) {
       var content = (r.content || r.event_summary || '').slice(0, 150);
@@ -2295,12 +2295,12 @@ var ChatModule = (function() {
     renderChatMessages();
     renderProjectList();
 
-    maybeAddMemory(userText, fullResponse);
-    triggerLitterBox(userText, fullResponse);
-    maybeAICommentOnDiary(fullResponse);
-    applyForgettingCurve();
-    checkSummarization(chat);
-    checkLongTermMemory(chat);
+    (AppCore.getModule('memory')||{}).maybeAdd(userText, fullResponse);
+    (AppCore.getModule('litterbox')||{}).trigger(userText, fullResponse);
+    (AppCore.getModule('diary')||{}).maybeComment(fullResponse);
+    (AppCore.getModule('memory')||{}).applyForgettingCurve();
+    (AppCore.getModule('memory')||{}).checkSummarization(chat);
+    (AppCore.getModule('memory')||{}).checkLongTerm(chat);
 
     chat.lastInteractionTime = new Date().toISOString();
 
@@ -2787,24 +2787,8 @@ var ChatModule = (function() {
   }
 
   // ═══════════════════════════════════════════
-  //  Block 14: maybeAddMemory, maybeAICommentOnDiary
+  //  Block 14: maybeAICommentOnDiary
   // ═══════════════════════════════════════════
-  function maybeAddMemory(ut, at) {
-    var store = AppCore.getStore();
-    if (Math.random() < 0.1) {
-      var proj = getActiveProject(); if (!proj) return;
-      var c = ut.length > 40 ? ut.slice(0, 40) + '…' : ut;
-      var content = 'AI注意到: ' + c;
-      if (isNearDuplicate(content, proj)) return;
-      var chatMemId = 'm' + AppCore.gid('');
-      var chat = getActiveChatObj(); if (chat) { if (chat.sharedMemoryIds.indexOf(chatMemId) < 0) chat.sharedMemoryIds.push(chatMemId); }
-      store.memorySystem.bm25Index._dirty = true;
-      var randRawDialogue = [];
-      if (ut) randRawDialogue.push({ role: 'user', text: (ut || '').slice(0, 200), time: AppCore.nowTime() });
-      if (at) randRawDialogue.push({ role: 'assistant', text: (at || '').slice(0, 200), time: AppCore.nowTime() });
-      MemoryModule.addAEM(store.activeProject, { id: 'aem_chat_' + AppCore.gid(''), summary: content, timestamp: new Date().toISOString(), sourceChatId: store.activeChat, sourceProjectId: store.activeProject, triggerSource: 'random', type: 'chat', aiSelfEval: {}, userStateAtTime: {}, rawDialogue: randRawDialogue });
-    }
-  }
 
   function maybeAICommentOnDiary(aiResponse) {
     var store = AppCore.getStore();
@@ -2996,7 +2980,6 @@ var ChatModule = (function() {
     sendMessage: sendMessage,
 
     // Memory hooks
-    maybeAddMemory: maybeAddMemory,
     maybeAICommentOnDiary: maybeAICommentOnDiary
   };
 })();

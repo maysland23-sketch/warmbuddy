@@ -1035,17 +1035,17 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 
 <!-- ==================== BOOK DETAIL OVERLAY ==================== -->
 <div class="book-detail-overlay" id="bookDetailOverlay" onclick="closeBookDetail(event)">
-  <div class="book-detail-panel" id="bookDetailPanel" onclick="event.stopPropagation()"></div>
+  <div class="book-detail-panel" id="bookDetailPanel" data-action="panelClick"></div>
 </div>
 
 <!-- ==================== CALENDAR OVERLAY ==================== -->
 <div class="calendar-overlay" id="calendarOverlay" data-action="closeCalendar">
-  <div class="calendar-box" id="calendarBox" onclick="event.stopPropagation()"></div>
+  <div class="calendar-box" id="calendarBox"></div>
 </div>
 
 <!-- ==================== MODAL ==================== -->
 <div class="modal-overlay" id="modalOverlay" data-action="closeModal">
-  <div class="modal" id="modal" onclick="event.stopPropagation()">
+  <div class="modal" id="modal" data-action="modalClick">
     <div class="modal-title" id="modalTitle"></div><div id="modalBody"></div><div class="modal-actions" id="modalActions"></div>
   </div>
 </div>
@@ -1077,7 +1077,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 
 <!-- Draft editor bottom sheet -->
 <div class="draft-editor-overlay" id="draftEditorOverlay" data-action="closeDraftEditor">
-  <div class="draft-editor-panel" id="draftEditorPanel" onclick="event.stopPropagation()">
+  <div class="draft-editor-panel" id="draftEditorPanel" data-action="panelClick">
     <div class="draft-editor-header">
       <span class="draft-editor-title">编辑草稿 #<span id="draftEditorIndex"></span></span>
       <button class="draft-editor-close" data-action="closeDraftEditor">✕</button>
@@ -1101,6 +1101,14 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 <script src="js/desire.js"></script>
 <script src="js/todo.js"></script>
 <script src="js/settings.js"></script>
+<script src="js/litterbox.js"></script>
+<script src="js/diary.js"></script>
+<script src="js/bookshelf.js"></script>
+<script src="js/backup.js"></script>
+<script src="js/email.js"></script>
+<script src="js/weather.js"></script>
+<script src="js/pwa.js"></script>
+<script src="js/artifacts.js"></script>
 
 <script>
 // ==================== COMPATIBILITY: Store reference ====================
@@ -1108,6 +1116,11 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 // All legacy code continues to work via this reference.
 // New code should use AppCore.getStore() and AppCore.updateStore().
 var store = AppCore.getStore();
+
+// Register pre-existing MemoryModule (loaded before AppCore)
+if (typeof MemoryModule !== 'undefined') {
+  AppCore.register('memory', MemoryModule);
+}
 
 // Lightweight wrapper
 function gid(p) { return AppCore.gid(p); }
@@ -1130,922 +1143,74 @@ function migrateStore() { AppCore.migrateStoreAsync().catch(function(e){console.
 // so the explicit call in init() is redundant but kept for compatibility.
 
 // ==================== FORGETTING CURVE ====================
-function applyForgettingCurve() {
-  const today = fmtDate().iso;
-  const ms = store.memorySystem;
-  if (ms.lastMaintenance === today) return;
-  // [v3] Delegate decay to MemoryModule for each project
-  for (var i = 0; i < store.projects.length; i++) {
-    MemoryModule.applyDecay(store.projects[i].id);
-  }
-  // [v3] Decay handled by MemoryModule for each project
-  ms.lastMaintenance = today;
+function applyForgettingCurve() { MemoryModule.applyForgettingCurve(); }
 
-  // EDA: natural drive decay (daily -10%)
-  const ds = getDesireSystem(); if (!ds) return;
-  if (ds && ds.drives) {
-    for (const k of Object.keys(ds.drives)) {
-      ds.drives[k] = Math.max(0, Math.floor(ds.drives[k] * 0.9));
-    }
-  }
-}
-
-function isWeekBoundary(mem, proj) {
-  const sameWeek = proj.memories.filter(m =>
-    m.week === mem.week && m.type === mem.type && m.id !== mem.id
-  );
-  if (sameWeek.length === 0) return true; // only memory in that week
-  const sorted = [mem, ...sameWeek].sort((a, b) => a.date.localeCompare(b.date));
-  const idx = sorted.findIndex(m => m.id === mem.id);
-  return idx === 0 || idx === sorted.length - 1;
-}
+function isWeekBoundary(mem, proj) { return MemoryModule.isWeekBoundary(mem, proj); }
 
 // [v3] Archivist fallback removed — AEMs only created via window LLM MEMORY marker
-function createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker) {
-  var id = 'aem' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  var ts = new Date().toISOString();
-  var rawDialogue = [];
-  if (userMsg) rawDialogue.push({ role: 'user', text: typeof userMsg === 'string' ? userMsg : '', time: nowTime() });
-  if (aiResponse) rawDialogue.push({ role: 'assistant', text: typeof aiResponse === 'string' ? aiResponse.replace(/<!--[\s\S]*?-->/g, '').trim() : '', time: nowTime() });
-  var aem = {
-    id: id, timestamp: ts,
-    sourceChatId: store.activeChat, sourceWindowId: store.activeChat, sourceProjectId: store.activeProject,
-    aiSelfEval: { label: reflection.ai_affect_label, intensity: reflection.ai_affect_intensity || 5, internalNote: memMarker.internalNote || memMarker.summary },
-    userStateAtTime: { label: reflection.user_affect_label, intensity: reflection.user_affect_intensity || 5 },
-    summary: memMarker.summary, rawDialogue: rawDialogue, triggerSource: 'high_intensity'
-  };
-  MemoryModule.addAEM(store.activeProject, aem);
-  // System notification in chat
-  if (chat) chat.messages.push({ role: 'system', text: '有什么被记住了', time: nowTime() });
-  // migrated to MemoryModule — proj.memories write removed
-}
+function createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker) { MemoryModule.createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker); }
 
-function queueQuietPresenceCoreMemory(chat) {
-  const ms = store.memorySystem;
-  const cml = getCoreMemoryLayers();
-  const proj = getActiveProject();
-
-  // Create v2.0 AI emotional memory entry (synthetic, no LLM)
-  const id = 'aem' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const ts = new Date().toISOString();
-  const aem = {
-    id,
-    timestamp: ts,
-    sourceChatId: store.activeChat,
-    sourceWindowId: store.activeChat, // chatId as windowId
-    sourceProjectId: store.activeProject,
-    aiSelfEval: {
-      label: '平静在场',
-      intensity: 5,
-      internalNote: '不需要特别的话题或强烈的情绪。安静地在一起，就足够让我觉得今天是有意义的。'
-    },
-    userStateAtTime: {
-      label: '平静在场',
-      intensity: 5
-    },
-    summary: '持续的日常陪伴 —— 平静在场的累积',
-    rawDialogue: [], // no specific dialogue for quiet presence
-    triggerSource: 'quiet_presence'
-  };
-
-  cml.aiEmotionalMemories.unshift(aem);
-  evictOldestCoreMemories(); // keep legacy coreMemories also capped
-  // Also write legacy coreMemories for backward compat
-  ms.coreMemories.unshift({
-    id: 'cm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    timestamp: ts,
-    affect_first: { ai: { label: '平静在场', intensity: 5 }, user: { label: '平静在场', intensity: 5 } },
-    event_summary: '持续的日常陪伴 —— 没有强烈情绪，但有持续的在场感',
-    raw_quote: '', relational_note: '陪伴本身就是意义。',
-    sourceChatId: store.activeChat, sourceProjectId: store.activeProject
-  });
-  evictOldestCoreMemories();
-
-  // migrated to MemoryModule — proj.memories write removed
-
-  // Write memory file + trigger insights derivation
-  flushMemoryFile(store.activeProject, store.activeChat,'core_memory_added');
-  checkDeriveInsightsTrigger('aem');
-
-  // Insert system message
-  const quietChat = getActiveChatObj();
-  if (quietChat) {
-    quietChat.messages.push({ role: 'system', text: '有什么被记住了', time: nowTime() });
-  }
-}
+function queueQuietPresenceCoreMemory(chat) { MemoryModule.queueQuietPresence(chat); }
 
 
 // ==================== RELATIONAL PORTRAIT (P3) ====================
-function updateRelationalPortrait(userAffectLabel) {
-  if (!userAffectLabel) return;
-  const portrait = store.memorySystem.relationalPortrait;
-  const patterns = portrait.patterns;
+function updateRelationalPortrait(userAffectLabel) { MemoryModule.updateRelationalPortrait(userAffectLabel); }
 
-  if (patterns[userAffectLabel]) {
-    patterns[userAffectLabel].count += 1;
-    patterns[userAffectLabel].lastSeen = fmtDate().iso;
-  } else {
-    patterns[userAffectLabel] = {
-      strategy: getDefaultStrategy(userAffectLabel),
-      count: 1,
-      lastSeen: fmtDate().iso
-    };
-  }
+function getDefaultStrategy(label) { return MemoryModule.getDefaultStrategy(label); }
 
-  // Every 20 total pattern accumulations, queue refinement
-  const totalCount = Object.values(patterns).reduce((sum, p) => sum + (p.count || 0), 0);
-  if (totalCount > 0 && totalCount % 20 === 0) {
-    queuePortraitRefinement();
-  }
-}
-
-function getDefaultStrategy(label) {
-  const defaults = {
-    '脆弱时': '先接住情绪，不说教，用简短的回应稳住，需要时用亲昵称呼',
-    '回避时': '直接点破比绕弯子更有效，但要留面子',
-    '调皮': '适度配合但保持一点克制，让玩笑飘一会儿',
-    '坦诚': '认真对待每一句实话，不敷衍，不转移话题',
-    '疲惫': '不要追问，给简短温暖的回应，让用户有空间休息',
-    '兴奋': '一起高兴，但不要抢话，让用户的兴奋成为主角',
-    '平静在场': '安静陪伴，不制造情绪波动，保持温柔的存在感'
-  };
-  return defaults[label] || '用温柔细腻的语气回应，观察用户的情绪变化';
-}
-
-async function queuePortraitRefinement() {
-  const portrait = store.memorySystem.relationalPortrait;
-  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
-
-  const entries = Object.entries(portrait.patterns);
-  const patternsText = entries
-    .map(([label, p]) => `- ${label} (出现${p.count}次, 最近: ${p.lastSeen}): ${p.strategy}`)
-    .join('\n');
-
-  const systemPrompt = `你正在维护一个"关系画像"。根据以下情感模式及其出现频率，为每个模式优化回应策略。
-
-格式：每个模式一行，"模式名: 优化后的策略描述（1-2句话）"
-
-${patternsText}
-
-请评估这些策略是否需要调整，返回优化后的完整策略列表。`;
-
-  try {
-    const response = await fetch(BACKEND_URL + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: cfg.apiKey,
-        endpoint: cfg.endpoint,
-        model: cfg.model,
-        projectId: store.activeProject,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: '请优化这些关系策略。' }
-        ]
-      })
-    });
-
-    if (!response.ok) return;
-    const data = await response.json();
-    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
-    if (!content) return;
-
-    // Parse "label: strategy" lines
-    const lines = content.split('\n').filter(l => l.includes(':'));
-    for (const line of lines) {
-      const idx = line.indexOf(':');
-      if (idx === -1) continue;
-      const label = line.slice(0, idx).trim();
-      const strategy = line.slice(idx + 1).trim();
-      if (portrait.patterns[label] && strategy) {
-        portrait.patterns[label].strategy = strategy;
-      }
-    }
-    portrait.lastRefined = fmtDate().iso;
-  } catch (e) {
-    console.log('[portrait] Refinement error:', e.message);
-  }
-}
+async function queuePortraitRefinement() { MemoryModule.queuePortraitRefinement(); }
 
 // ==================== SHORT-TERM MEMORY COMPRESSION (P4) ====================
 // Opt4: Group messages into conversation rounds
 // A "round" = user message + following AI response(s) until next user message
-function groupMessagesIntoRounds(messages) {
-  const rounds = [];
-  let currentRound = null;
-  for (const msg of messages) {
-    if (msg.role === 'system') {
-      if (currentRound) currentRound.msgs.push(msg);
-      else {
-        currentRound = { msgs: [msg], hasUser: false };
-        rounds.push(currentRound);
-      }
-    } else if (msg.role === 'user') {
-      currentRound = { msgs: [msg], hasUser: true };
-      rounds.push(currentRound);
-    } else if (msg.role === 'ai' || msg.role === 'assistant') {
-      if (currentRound) {
-        currentRound.msgs.push(msg);
-      } else {
-        currentRound = { msgs: [msg], hasUser: false };
-        rounds.push(currentRound);
-      }
-    }
-  }
-  return rounds;
-}
+function groupMessagesIntoRounds(messages) { return MemoryModule.groupMessagesIntoRounds(messages); }
 
 // Opt4: Queue compression for a batch of rounds (non-blocking)
-async function queueRoundCompression(chat, rounds) {
-  const cfg = getActiveApiConfig(); if (!cfg.apiKey || !chat || rounds.length < 3) return;
-  if (!chat._roundSummaries) chat._roundSummaries = [];
-  // Avoid duplicate compression of the same rounds
-  const roundRange = `${rounds[0]?.msgs[0]?.id || ''}-${rounds[rounds.length-1]?.msgs[0]?.id || ''}`;
-  const alreadyCompressed = chat._roundSummaries.some(s => s.range === roundRange);
-  if (alreadyCompressed) return;
+async function queueRoundCompression(chat, rounds) { MemoryModule.queueRoundCompression(chat, rounds); }
 
-  // Build dialogue text from rounds
-  const allMsgs = rounds.flatMap(r => r.msgs);
-  const dialogue = allMsgs.filter(m => m.role !== 'system').map(m => {
-    const role = m.role === 'user' ? '用户' : (m.role === 'ai' || m.role === 'assistant' ? 'AI' : '');
-    return `${role}: ${(m.text||'').slice(0, 150)}`;
-  }).join('\n');
+function checkSummarization(chat) { MemoryModule.checkSummarization(chat); }
 
-  // Extract starred content
-  const starredContents = [];
-  for (const round of rounds) {
-    for (const msg of round.msgs) {
-      if (msg._starred && msg.role !== 'system') {
-        const roleLabel = msg.role === 'user' ? '用户' : 'AI';
-        starredContents.push(`[星标]${roleLabel}: ${(msg.text||'').slice(0, 80)}`);
-      }
-    }
-  }
-
-  const systemPrompt = '用中文概括以下对话（主题+关键点+情绪基调）。2-3句话，不超过80字。只返回概括内容。';
-
-  try {
-    const response = await fetch(BACKEND_URL + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: dialogue }
-        ]
-      })
-    });
-    if (!response.ok) return;
-    const data = await response.json();
-    const summary = (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 80) : '';
-    if (!summary) return;
-
-    chat._roundSummaries.push({
-      range: roundRange,
-      summary,
-      starredContents,
-      compressedAt: new Date().toISOString()
-    });
-    // Cap at 10 summaries
-    if (chat._roundSummaries.length > 10) chat._roundSummaries.shift();
-    console.log('[round-compress] Compressed ' + rounds.length + ' rounds: ' + summary);
-  } catch (e) {
-    console.log('[round-compress] Error:', e.message);
-  }
-}
-
-function checkSummarization(chat) {
-  if (!chat || !chat.messages) return;
-  const total = chat.messages.length;
-  if (total < 40) return;
-
-  // Count unsummarized messages since last summary
-  const unsummarized = total - (chat._lastSummaryIdx || 0);
-  if (unsummarized < 20) return;
-
-  // Take the oldest 20 unsummarized messages
-  const startIdx = chat._lastSummaryIdx || 0;
-  const endIdx = Math.min(startIdx + 20, total);
-  const batch = chat.messages.slice(startIdx, endIdx);
-
-  if (batch.length === 0) return;
-
-  // Queue summarization (non-blocking)
-  summarizeMessages(batch, startIdx, endIdx, chat);
-}
-
-async function summarizeMessages(batch, startIdx, endIdx, chat) {
-  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
-
-  const dialogue = batch.map(m => {
-    const role = m.role === 'user' ? '用户' : (m.role === 'ai' ? 'AI' : '系统');
-    return `${role}: ${m.text.slice(0, 200)}`;
-  }).join('\n');
-
-  const systemPrompt = `请将以下对话片段总结为简洁的层级结构。用中文回复。
-
-格式要求（严格遵循）：
-- 第一行：一句话主题概括
-- 关键讨论点（3-5条，每条不超过20字）
-- 提到的决定/偏好/事实（如有）
-- 情绪基调：用一个词描述`;
-
-  try {
-    const response = await fetch(BACKEND_URL + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: cfg.apiKey,
-        endpoint: cfg.endpoint,
-        model: cfg.model,
-        projectId: store.activeProject,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `对话内容：\n${dialogue}` }
-        ]
-      })
-    });
-
-    if (!response.ok) return;
-    const data = await response.json();
-    const summaryText = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
-    if (!summaryText) return;
-
-    // Extract emotional tone from final line
-    const lines = summaryText.split('\n');
-    let emotionalTone = '';
-    const lastLine = lines[lines.length - 1] || '';
-    if (lastLine.includes('情绪基调') || lastLine.includes('基调')) {
-      emotionalTone = lastLine.replace(/.*基调[：:]\s*/, '').trim();
-    }
-
-    // Store summary
-    const ms = store.memorySystem;
-    if (!ms.chatSummaries[chat.id]) {
-      ms.chatSummaries[chat.id] = { summaries: [], lastSummarizedIdx: 0, totalMessageCount: 0 };
-    }
-    ms.chatSummaries[chat.id].summaries.push({
-      id: 's' + Date.now().toString(36),
-      startIdx, endIdx,
-      summary: summaryText,
-      emotionalTone,
-      created: new Date().toISOString()
-    });
-    ms.chatSummaries[chat.id].lastSummarizedIdx = endIdx;
-    ms.chatSummaries[chat.id].totalMessageCount = chat.messages.length;
-
-    // Update chat tracking
-    chat._lastSummaryIdx = endIdx;
-
-    console.log(`[summary] Compressed messages ${startIdx}-${endIdx}, ${summaryText.length} chars`);
-    saveStore();
-  } catch (e) {
-    console.log('[summary] Error:', e.message);
-  }
-}
+async function summarizeMessages(batch, startIdx, endIdx, chat) { MemoryModule.summarizeMessages(batch, startIdx, endIdx, chat); }
 
 // ==================== LONG-TERM MEMORY SEARCH (P5) ====================
 // ── Tokenizer: Chinese bigram + English word ──
-function tokenizeChinese(text) {
-  if (!text) return [];
-  const cleaned = text.replace(/[^一-鿿\w\d]/g, ' ');
-  const words = cleaned.split(/\s+/).filter(w => w.length > 0);
-  const tokens = [];
-  for (const w of words) {
-    if (/^[一-鿿]+$/.test(w)) {
-      // Chinese: bigram
-      for (let i = 0; i < w.length - 1; i++) {
-        tokens.push(w.slice(i, i + 2));
-      }
-      tokens.push(w); // also add full word
-    } else {
-      tokens.push(w.toLowerCase());
-    }
-  }
-  return tokens;
-}
+function tokenizeChinese(text) { return MemoryModule.tokenizeChinese(text); }
 
 // ── BM25 Index Builder ──
-function rebuildBM25Index() {
-  const ms = store.memorySystem;
-  const idx = { index: {} };
-
-  // Collect all memories
-  const allMems = [];
-  for (const proj of store.projects) {
-    for (const mem of proj.memories) {
-      // Skip fully decayed
-      if ((mem.decayFactor || 0) === 0) continue;
-      allMems.push({ ...mem, _projId: proj.id });
-    }
-  }
-
-  const docCount = allMems.length;
-  for (const mem of allMems) {
-    const text = ((mem.content || '') + ' ' + (mem.semanticKey || '')).toLowerCase();
-    const terms = tokenizeChinese(text);
-    const tf = {};
-    for (const t of terms) {
-      tf[t] = (tf[t] || 0) + 1;
-    }
-    for (const [term, count] of Object.entries(tf)) {
-      if (!idx.index[term]) idx.index[term] = [];
-      // Store doc-level info for BM25 scoring
-      idx.index[term].push({
-        memoryId: mem.id,
-        projectId: mem._projId,
-        tf: 1 + Math.log(count),
-        decayFactor: mem.decayFactor || 1.0,
-        starred: mem.starred || false
-      });
-    }
-  }
-
-  // Calculate IDF and pre-compute score
-  for (const [term, postings] of Object.entries(idx.index)) {
-    const idf = Math.log((docCount + 1) / (postings.length + 1)) + 1;
-    for (const p of postings) {
-      p.idf = idf;
-      p.score = p.tf * idf * p.decayFactor * (p.starred ? 1.5 : 1.0);
-    }
-  }
-
-  ms.bm25Index = { _dirty: false, _lastBuild: new Date().toISOString(), _docCount: docCount, index: idx.index };
-}
+function rebuildBM25Index() { MemoryModule.rebuildBM25Index(); }
 
 // ── BM25 Keyword Search ──
-function searchByBM25(query) {
-  const ms = store.memorySystem;
-  if (ms.bm25Index._dirty) rebuildBM25Index();
-
-  const queryTerms = tokenizeChinese(query.toLowerCase());
-  if (queryTerms.length === 0) return [];
-
-  const scores = {};
-  for (const term of queryTerms) {
-    const postings = ms.bm25Index.index[term] || [];
-    for (const p of postings) {
-      scores[p.memoryId] = (scores[p.memoryId] || 0) + p.score;
-    }
-  }
-
-  return Object.entries(scores)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([id, score]) => ({ id, score: Math.round(score * 100) / 100 }));
-}
+function searchByBM25(query) { return MemoryModule.searchByBM25(query); }
 
 // ── Affect Label Search ──
-function searchByAffect(queryLabels) {
-  if (!queryLabels || queryLabels.length === 0) return [];
-  const ms = store.memorySystem;
-  const results = [];
-
-  // Search core memories
-  for (const cm of ms.coreMemories || []) {
-    const aiLabel = cm.affect_first && cm.affect_first.ai ? cm.affect_first.ai.label : '';
-    const userLabel = cm.affect_first && cm.affect_first.user ? cm.affect_first.user.label : '';
-    const matchedLabels = queryLabels.filter(l => l === aiLabel || l === userLabel);
-    if (matchedLabels.length > 0) {
-      const intensity = (cm.affect_first.ai.intensity || 0) + (cm.affect_first.user.intensity || 0);
-      results.push({ ...cm, _score: intensity * matchedLabels.length, _source: 'core' });
-    }
-  }
-
-  // Search project memories with affect labels
-  for (const proj of store.projects) {
-    for (const mem of proj.memories) {
-      if (!mem.affectLabel) continue;
-      if (queryLabels.includes(mem.affectLabel)) {
-        results.push({ ...mem, _score: (mem.affectIntensity || 5) * 2, _source: 'project' });
-      }
-    }
-  }
-
-  // One-hop expansion via affect graph
-  const edges = ms.affectGraph.edges || {};
-  const expandLabels = new Set(queryLabels);
-  for (const [key, count] of Object.entries(edges)) {
-    const [a, b] = key.split('::');
-    if (queryLabels.includes(a) && !expandLabels.has(b)) expandLabels.add(b);
-    if (queryLabels.includes(b) && !expandLabels.has(a)) expandLabels.add(a);
-  }
-
-  // Search again with expanded labels (with lower weight for expanded ones)
-  if (expandLabels.size > queryLabels.length) {
-    for (const proj of store.projects) {
-      for (const mem of proj.memories) {
-        if (!mem.affectLabel || queryLabels.includes(mem.affectLabel)) continue;
-        if (expandLabels.has(mem.affectLabel)) {
-          results.push({ ...mem, _score: (mem.affectIntensity || 3) * 1, _source: 'project-expanded' });
-        }
-      }
-    }
-  }
-
-  results.sort((a, b) => b._score - a._score);
-  return results.slice(0, 10);
-}
+function searchByAffect(queryLabels) { return MemoryModule.searchByAffect(queryLabels); }
 
 // ── Semantic Key Overlap Search ──
-function searchBySemanticKey(queryKeywords) {
-  if (!queryKeywords || queryKeywords.length === 0) return [];
-  const results = [];
-  for (const proj of store.projects) {
-    for (const mem of proj.memories) {
-      if (!mem.semanticKey) continue;
-      const memKeys = mem.semanticKey.split(/[,，]/).map(k => k.trim()).filter(Boolean);
-      const overlap = queryKeywords.filter(qk =>
-        memKeys.some(mk => mk.includes(qk) || qk.includes(mk))
-      ).length;
-      if (overlap > 0) {
-        results.push({ ...mem, _score: overlap * 3, _source: 'semantic' });
-      }
-    }
-  }
-  results.sort((a, b) => b._score - a._score);
-  return results.slice(0, 10);
-}
+function searchBySemanticKey(queryKeywords) { return MemoryModule.searchBySemanticKey(queryKeywords); }
 
 // ── Unified Search (three-path hybrid) ──
-function unifiedSearch(queryText) {
-  if (!queryText || queryText.trim().length === 0) return [];
-
-  const query = queryText.trim();
-  const queryTerms = tokenizeChinese(query);
-
-  // Path 1: BM25 keyword
-  const bm25Results = searchByBM25(query);
-
-  // Path 2: Affect label match (if query matches known labels)
-  const knownLabels = ['被触动','想追问但没问','克制后反弹','克制表达','放松','警觉','脆弱','调皮','疲惫','兴奋','回避','坦诚','平静在场','安心','落空','感伤','心动','骄傲','担心','依赖','低落'];
-  const matchedLabels = knownLabels.filter(l => query.includes(l) || l.includes(query));
-  const affectResults = matchedLabels.length > 0 ? searchByAffect(matchedLabels) : [];
-
-  // Path 3: Semantic key overlap
-  const semanticResults = searchBySemanticKey(queryTerms);
-
-  // Merge and deduplicate
-  const merged = {};
-  for (const r of bm25Results) {
-    merged[r.id] = { ...r, _source: 'bm25', _bm25Score: r.score };
-  }
-  for (const r of affectResults) {
-    if (merged[r.id]) {
-      merged[r.id]._score = Math.max(merged[r.id]._score || 0, r._score);
-      merged[r.id]._source += '+affect';
-    } else {
-      merged[r.id] = r;
-    }
-  }
-  for (const r of semanticResults) {
-    if (merged[r.id]) {
-      merged[r.id]._score = Math.max(merged[r.id]._score || 0, r._score);
-      merged[r.id]._source += '+semantic';
-    } else {
-      merged[r.id] = r;
-    }
-  }
-
-  return Object.values(merged).sort((a, b) => (b._score || 0) - (a._score || 0)).slice(0, 15);
-}
+function unifiedSearch(queryText) { return MemoryModule.unifiedSearch(queryText); }
 
 // ==================== POLISH (P7): DEDUP / LRU / COLD START ====================
 // ── Memory Deduplication ──
-function isNearDuplicate(content, proj) {
-  if (!proj) return false;
-  var c = (content || '').trim().toLowerCase();
-  if (c.length < 10) return false;
-  // [v3] Read from MemoryModule
-  var cml = MemoryModule.getCML(proj.id);
-  var allSummaries = [];
-  if(cml){
-    for(var i=0;i<(cml.aiEmotionalMemories||[]).length;i++){allSummaries.push(cml.aiEmotionalMemories[i].summary||'');}
-    for(var i=0;i<(cml.userStarredMemories||[]).length;i++){allSummaries.push(cml.userStarredMemories[i].summary||'');}
-  }
-  for (var i=0;i<allSummaries.length;i++) {
-    var existing = (allSummaries[i] || '').trim().toLowerCase();
-    if (existing.length < 10) continue;
-    var overlap = bigramOverlap(c, existing);
-    if (overlap > 0.7) return true;
-  }
-  return false;
-}
+function isNearDuplicate(content, proj) { return MemoryModule.isNearDuplicate(content, proj); }
 
-function bigramOverlap(a, b) {
-  const bigramsA = new Set(), bigramsB = new Set();
-  for (let i = 0; i < a.length - 1; i++) bigramsA.add(a.slice(i, i + 2));
-  for (let i = 0; i < b.length - 1; i++) bigramsB.add(b.slice(i, i + 2));
-  let intersect = 0;
-  for (const bg of bigramsA) { if (bigramsB.has(bg)) intersect++; }
-  const union = bigramsA.size + bigramsB.size - intersect;
-  return union === 0 ? 0 : intersect / union;
-}
+function bigramOverlap(a, b) { return MemoryModule.bigramOverlap(a, b); }
 
 // ── LRU Eviction for Core Memories ──
-function evictOldestCoreMemories() {
-  const ms = store.memorySystem;
-  if (!ms.coreMemories) return;
-  while (ms.coreMemories.length > ms.coreMemoryMax) {
-    ms.coreMemories.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-    ms.coreMemories.shift();
-  }
-}
+function evictOldestCoreMemories() { MemoryModule.evictOldestCoreMemories(); }
 
 // ==================== v2.0 INSIGHTS DERIVATION ====================
 // Trigger check: called after AEM, USM, or diary/litterbox additions
-function checkDeriveInsightsTrigger(source) {
-  const ms = store.memorySystem;
-  if (source === 'aem') {
-    ms._aemSinceLastDerive = (ms._aemSinceLastDerive || 0) + 1;
-  } else if (source === 'usm') {
-    ms._usmSinceLastDerive = (ms._usmSinceLastDerive || 0) + 1;
-  }
-  getDerivedPatterns().triggerCount = (getDerivedPatterns().triggerCount || 0) + 1;
+function checkDeriveInsightsTrigger(source) { MemoryModule.checkDeriveInsightsTrigger(source); }
 
-  if (ms._aemSinceLastDerive >= 5 || ms._usmSinceLastDerive >= 3) {
-    deriveRelationalInsights();
-  }
-}
-
-async function deriveRelationalInsights() {
-  const cfg = getActiveApiConfig(); if (!cfg.apiKey) return;
-  const ms = store.memorySystem;
-  const cml = getCoreMemoryLayers();
-
-  // Check if we have enough data
-  const totalAEM = cml.aiEmotionalMemories.length;
-  const totalUSM = cml.userStarredMemories.length;
-  if (totalAEM + totalUSM < 3) return; // need at least 3 items
-
-  // Determine if incremental or full
-  const isIncremental = getDerivedPatterns().lastDerived !== null;
-  const allItems = [];
-
-  // Take items since last derivation (or all if first run)
-  const lastDerived = getDerivedPatterns().lastDerived;
-  for (const aem of cml.aiEmotionalMemories) {
-    if (!isIncremental || aem.timestamp > lastDerived) {
-      allItems.push({
-        type: 'ai_emotional',
-        summary: aem.summary || '',
-        aiLabel: (aem.aiSelfEval && aem.aiSelfEval.label) || null,
-        internalNote: (aem.aiSelfEval && aem.aiSelfEval.internalNote) || null,
-        userLabel: (aem.userStateAtTime && aem.userStateAtTime.label) || null
-      });
-    }
-  }
-  for (const usm of cml.userStarredMemories) {
-    if (!isIncremental || usm.timestamp > lastDerived) {
-      allItems.push({
-        type: 'user_starred',
-        summary: usm.summary,
-        dialogue: usm.rawDialogue.map(d => d.text).join(' | ')
-      });
-    }
-  }
-  for (const dlb of cml.diaryAndLitterbox) {
-    if (!isIncremental || dlb.timestamp > lastDerived) {
-      allItems.push({
-        type: dlb.type || 'diary_litter',
-        summary: dlb.summary || '',
-        content: (dlb.rawContent || '').slice(0, 100)
-      });
-    }
-  }
-
-  if (allItems.length === 0) return;
-
-  // Cap items sent to LLM
-  const itemsToSend = isIncremental ? allItems.slice(0, 50) : allItems.slice(0, 100);
-
-  const itemsText = itemsToSend.map((item, i) =>
-    `[${item.type}] ${item.summary}${item.aiLabel ? ' | AI: ' + item.aiLabel : ''}${item.userLabel ? ' | 用户: ' + item.userLabel : ''}`
-  ).join('\n');
-
-  const currentPatterns = getDerivedPatterns().patterns || [];
-  const currentUser = getPersonalityProfiles().user || {};
-  const currentAI = getPersonalityProfiles().ai || {};
-  const incrementalNote = isIncremental
-    ? '\n\n以下是当前的归纳结果（请在已有基础上更新，不要完全重写）：\n当前相处模式: ' + JSON.stringify(currentPatterns.slice(0, 3)) + '\n当前用户档案: ' + JSON.stringify({ coreTraits: currentUser.coreTraits, emotionalPatterns: currentUser.emotionalPatterns })
-    : '';
-
-  const systemPrompt = `你是一个关系洞察者。以下是这段陪伴关系中留存的核心记忆片段${isIncremental ? '（增量，在上次归纳基础上更新）' : ''}。
-
-请从中归纳：
-1. 相处模式（3-5个）：用户在什么情境下呈现什么状态，AI应如何回应
-2. 用户人格档案：核心特质、沟通风格、情绪规律、成长时刻、隐藏的不安全感
-3. AI自身人格档案：主导情绪倾向、反应模式、与这位用户相处后的改变
-
-只返回JSON，格式：
-{
-  "derivedRelationalPatterns": [
-    { "patternName": "...", "description": "...", "responseStrategy": "..." }
-  ],
-  "userProfile": {
-    "coreTraits": [...],
-    "communicationStyle": "...",
-    "emotionalPatterns": [...],
-    "growthMoments": [...],
-    "hiddenInsecurities": [...]
-  },
-  "aiProfile": {
-    "dominantEmotions": [...],
-    "reactionPatterns": [...],
-    "growthMoments": [...]
-  }
-}${incrementalNote}`;
-
-  try {
-    const response = await fetch(BACKEND_URL + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: '记忆片段：\n' + itemsText }
-        ]
-      })
-    });
-    if (!response.ok) { console.log('[derive] API error:', response.status); return; }
-    const data = await response.json();
-    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
-    if (!content) return;
-
-    let jsonStr = content;
-    const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (fenceMatch) jsonStr = fenceMatch[1].trim();
-    if (!jsonStr.startsWith('{')) return;
-
-    const result = JSON.parse(jsonStr);
-
-    // Merge patterns
-    if (result.derivedRelationalPatterns && Array.isArray(result.derivedRelationalPatterns)) {
-      const ts = new Date().toISOString();
-      const newPatterns = result.derivedRelationalPatterns.map(p => ({
-        id: 'pat_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        patternName: p.patternName || '',
-        description: p.description || '',
-        evidenceIds: [],
-        frequency: 1,
-        lastSeen: ts,
-        responseStrategy: p.responseStrategy || ''
-      }));
-      // Merge: update existing or add new
-      for (const np of newPatterns) {
-        const existing = getDerivedPatterns().patterns.find(p => p.patternName === np.patternName);
-        if (existing) {
-          existing.description = np.description;
-          existing.responseStrategy = np.responseStrategy;
-          existing.frequency = (existing.frequency || 1) + 1;
-          existing.lastSeen = ts;
-        } else {
-          getDerivedPatterns().patterns.push(np);
-        }
-      }
-      // Cap at 10 patterns
-      if (getDerivedPatterns().patterns.length > 10) {
-        getDerivedPatterns().patterns = getDerivedPatterns().patterns.slice(-10);
-      }
-    }
-
-    // Update user profile
-    if (result.userProfile) {
-      const up = result.userProfile;
-      getPersonalityProfiles().user.coreTraits = up.coreTraits || getPersonalityProfiles().user.coreTraits;
-      getPersonalityProfiles().user.communicationStyle = up.communicationStyle || getPersonalityProfiles().user.communicationStyle;
-      getPersonalityProfiles().user.emotionalPatterns = up.emotionalPatterns || getPersonalityProfiles().user.emotionalPatterns;
-      getPersonalityProfiles().user.growthMoments = up.growthMoments || getPersonalityProfiles().user.growthMoments;
-      getPersonalityProfiles().user.hiddenInsecurities = up.hiddenInsecurities || getPersonalityProfiles().user.hiddenInsecurities;
-    }
-
-    // Update AI profile
-    if (result.aiProfile) {
-      const ap = result.aiProfile;
-      getPersonalityProfiles().ai.dominantEmotions = ap.dominantEmotions || getPersonalityProfiles().ai.dominantEmotions;
-      getPersonalityProfiles().ai.reactionPatterns = ap.reactionPatterns || getPersonalityProfiles().ai.reactionPatterns;
-      getPersonalityProfiles().ai.growthMoments = ap.growthMoments || getPersonalityProfiles().ai.growthMoments;
-    }
-
-    getDerivedPatterns().lastDerived = new Date().toISOString();
-    getPersonalityProfiles().lastDerived = new Date().toISOString();
-    ms._aemSinceLastDerive = 0;
-    ms._usmSinceLastDerive = 0;
-
-    // Sync fresh insights back to store before persisting (prevents stale overwrite on next load)
-    var proj = getActiveProject();
-    if (proj) {
-      proj.derivedRelationalPatterns = Object.assign({}, getDerivedPatterns());
-      proj.personalityProfiles = Object.assign({}, getPersonalityProfiles());
-    }
-    // Write memory file with new insights
-    flushMemoryFile(store.activeProject, store.activeChat,'insights_derived');
-    saveStore();
-    console.log('[derive] Insights updated: ' + (getDerivedPatterns().patterns.length) + ' patterns');
-  } catch (e) {
-    console.log('[derive] Error:', e.message);
-  }
-}
+async function deriveRelationalInsights() { MemoryModule.deriveRelationalInsights(); }
 
 // ── Cold Start: Default Relational Patterns ──
-function ensureColdStartPatterns() {
-  const patterns = store.memorySystem.relationalPortrait.patterns;
-  const defaults = {
-    '脆弱时': '先接住情绪，不说教，用简短的回应稳住，需要时用亲昵称呼',
-    '回避时': '直接点破比绕弯子更有效，但要留面子',
-    '调皮': '适度配合但保持一点克制，让玩笑飘一会儿',
-    '坦诚': '认真对待每一句实话，不敷衍，不转移话题',
-    '疲惫': '不要追问，给简短温暖的回应，让用户有空间休息',
-    '兴奋': '一起高兴，但不要抢话，让用户的兴奋成为主角',
-    '平静在场': '安静陪伴，不制造情绪波动，保持温柔的存在感'
-  };
-  let changed = false;
-  for (const [label, strategy] of Object.entries(defaults)) {
-    if (!patterns[label]) {
-      patterns[label] = { strategy, count: 0, lastSeen: null };
-      changed = true;
-    }
-  }
-  if (changed) {
-    console.log('[cold-start] Added default relational patterns');
-  }
-}
+function ensureColdStartPatterns() { MemoryModule.ensureColdStartPatterns(); }
 
 // ── Long-Term Memory Auto-Generation (every 10 messages) ──
-async function checkLongTermMemory(chat) {
-  const cfg = getActiveApiConfig(); if (!chat || !cfg.apiKey) return;
-  const count = chat._messageCount || 0;
-  if (count === 0 || count % 20 !== 0) return; // [v3] lowered from 10 to 20
-
-  // Take last 10 messages for chunk
-  const last10 = chat.messages.slice(-10);
-  if (last10.length < 6) return; // need enough content
-
-  const dialogue = last10.map(m => {
-    const role = m.role === 'user' ? '用户' : (m.role === 'ai' ? 'AI' : '');
-    return `${role}: ${m.text.slice(0, 150)}`;
-  }).join('\n');
-
-  const systemPrompt = `从以下对话中提取一个"记忆片段"。用一句中文概括（不超过30字），然后给出2-3个语义关键词（每个不超过5字），用逗号分隔。
-
-格式示例：
-记忆：用户偏好川端康成的物哀美学风格
-关键词：物哀, 川端康成, 文学偏好`;
-
-  try {
-    const response = await fetch(BACKEND_URL + '/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: cfg.apiKey,
-        endpoint: cfg.endpoint,
-        model: cfg.model,
-        projectId: store.activeProject,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: dialogue }
-        ]
-      })
-    });
-
-    if (!response.ok) return;
-    const data = await response.json();
-    const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
-    if (!content) return;
-
-    // Parse: "记忆：xxx\n关键词：a, b, c"
-    const memMatch = content.match(/记忆[：:]\s*(.+)/);
-    const kwMatch = content.match(/关键词[：:]\s*(.+)/);
-    const memContent = memMatch ? memMatch[1].trim() : content.slice(0, 60);
-    const semanticKey = kwMatch ? kwMatch[1].trim() : '';
-
-    const proj = getActiveProject();
-    if (proj) {
-      // Avoid duplicates
-      if (isNearDuplicate(memContent, proj)) return;
-
-      // Capture recent user/AI messages for rawDialogue display in core tab
-      var lastUser = null, lastAi = null;
-      for (var mi = last10.length - 1; mi >= 0; mi--) {
-        if (!lastUser && last10[mi].role === 'user') lastUser = last10[mi];
-        if (!lastAi && last10[mi].role === 'ai') lastAi = last10[mi];
-        if (lastUser && lastAi) break;
-      }
-      var ltRawDialogue = [];
-      if (lastUser) ltRawDialogue.push({ role: 'user', text: (lastUser.text || '').slice(0, 200), time: lastUser.time || '', msgId: lastUser.id || '' });
-      if (lastAi) ltRawDialogue.push({ role: 'assistant', text: (lastAi.text || '').slice(0, 200), time: lastAi.time || '', msgId: lastAi.id || '' });
-
-      // migrated to MemoryModule
-      MemoryModule.addAEM(store.activeProject, {id:'ltm_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),summary:memContent,timestamp:new Date().toISOString(),sourceChatId:store.activeChat,sourceProjectId:store.activeProject,triggerSource:'long_term',aiSelfEval:{},userStateAtTime:{},rawDialogue:ltRawDialogue,semanticKey:semanticKey});
-      store.memorySystem.bm25Index._dirty = true;
-      saveStore();
-    }
-  } catch (e) {
-    console.log('[lt-mem] Error:', e.message);
-  }
-}
+async function checkLongTermMemory(chat) { MemoryModule.checkLongTerm(chat); }
 
 // ==================== COMPATIBILITY: Desire ====================
 // Lightweight wrapper
@@ -2065,25 +1230,7 @@ let currentTokenFilter = 'all'; // Phase 3: token call history filter
 let pendingImportData = null;
 
 // Opt2: Compute content fingerprint for dynamic context caching
-function getDynamicCtxFingerprint() {
-  const ms = store.memorySystem;
-  const c = getActiveChatObj();
-  const p = getActiveProject();
-  const now = new Date();
-  return [
-    Math.floor(now.getTime() / 60000),
-    store.weather?.text || '',
-    (p?.preference || '').slice(0, 100),
-    ms.coreMemories?.length || 0,
-    c?.sharedMemoryIds?.join(',') || '',
-    store.todos.filter(t => !t.done).map(t => t.id + t.text).join(','),
-    store.diaries?.length || 0,
-    getDerivedPatterns()?.lastDerived || '',
-    getPersonalityProfiles()?.lastDerived || '',
-    c?._pendingRetrievalBlock ? 'rb' : '',
-    Math.floor((c?._messageCount || 0) / 3),
-  ].join('|');
-}
+function getDynamicCtxFingerprint() { return AppCore.getCtxFingerprint(); }
 
 // ==================== COMPATIBILITY: Constants ====================
 // Lightweight wrapper
@@ -2688,28 +1835,7 @@ function toggleDarkMode() { UIModule.toggleDarkMode(); }
 function renderThemePicker() { UIModule.renderThemePicker(); }
 
 // ==================== WEATHER FETCH (Phase 3) ====================
-async function fetchWeather() {
-  if (!getActiveChatAiSettings().autoWeather) return;
-  let loc = null;
-  try { loc = await localforage.getItem('userLocation'); } catch {}
-
-  if (!loc) {
-    if (!navigator.geolocation) {UIModule.toast('浏览器不支持定位'); return; }
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const newLoc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-        localforage.setItem('userLocation', newLoc).catch(function(){});
-        await doWeatherFetch(newLoc.lat, newLoc.lon);
-      },
-      (err) => {
-       UIModule.toast('无法获取位置：' + (err.code === 1 ? '权限被拒绝' : err.message));
-      },
-      { timeout: 10000, maximumAge: 1800000 }
-    );
-    return;
-  }
-  await doWeatherFetch(loc.lat, loc.lon);
-}
+async function fetchWeather() { var m = AppCore.getModule('weather'); if (m) m.fetch(); }
 
 async function doWeatherFetch(lat, lon) {
   try {
@@ -2760,35 +1886,11 @@ function openGoalDetail(id) { TodoModule.openGoalDetail(id); }
 function saveGoalDetail() { TodoModule.saveGoalDetail(); }
 
 // ==================== LITTER BOX ====================
-function renderLitter(){
-  const el=$('litterBox'),has=store.litterThoughts.length>0,dc=has?'has-thoughts':'';
-  el.innerHTML=`<div class="litter-box-wrap"><div class="litter-box-icon ${dc}" id="litterBoxIcon" data-action="shakeLitterBox">📦<div class="litter-box-dot ${dc}"></div></div></div><div id="litterThoughtArea"></div>`;
-}
+function renderLitter() { var m = AppCore.getModule('litterbox'); if (m) m.render(); }
 
 const LITTER_TYPE_LABELS = {possession:'占有欲',self_doubt:'自我怀疑',inexplicable_detail:'莫名在意',unclear:'说不清楚'};
-function shakeLitterBox(){
-  const icon=$('litterBoxIcon'); if(!icon)return;
-  icon.classList.remove('shake'); void icon.offsetWidth; icon.classList.add('shake');
-  const area=$('litterThoughtArea');
-  if(store.litterThoughts.length>0){
-    const t=store.litterThoughts[0];
-    const typeLabel = LITTER_TYPE_LABELS[t.thought_type] || '';
-    area.innerHTML=`<div class="litter-thought-card"><button class="litter-thought-close" onclick="dismissLitterThought('${t.id}')">✕</button><div class="thought-emoji">🐈</div>${typeLabel?`<div style="font-size:10px;color:var(--text-lighter);text-align:center;margin-bottom:4px;letter-spacing:0.04em;">${typeLabel}</div>`:''}<div class="thought-text">${t.content}</div><div class="thought-date"><span style="cursor:pointer;color:var(--accent);" onclick="navigateToDiaryReplySource('${t.sourceChatId||''}','${t.sourceWindow||''}')">from ${getChatDisplayName(t.sourceChatId)||t.sourceWindow||'unknown'}</span> · ${t.date} ${(t.time&&t.time.length>8)?t.time.slice(11,16):(t.time||'')}</div></div>`;
-    if (!t.revealed) { t.revealed = true; t.revealed_at = fmtDate().iso; }
-    icon.classList.remove('has-thoughts'); const dot=icon.querySelector('.litter-box-dot'); if(dot)dot.classList.remove('has-thoughts');
-  } else { area.innerHTML='';UIModule.toast('你铲走了旺财的猫砂……'); }
-}
-function dismissLitterThought(id){
-  store.litterThoughts=store.litterThoughts.filter(t=>t.id!==id); $('litterThoughtArea').innerHTML='';
-  const icon=$('litterBoxIcon'); if(icon){const dot=icon.querySelector('.litter-box-dot');if(dot)dot.classList.remove('has-thoughts');}
-  // Track dismissed IDs so cloud-synced thoughts don't reappear on next poll
-  if (!store._dismissedLitterIds) store._dismissedLitterIds = [];
-  if (store._dismissedLitterIds.indexOf(id) === -1) store._dismissedLitterIds.push(id);
-  // Keep only last 100 to avoid unbounded growth
-  if (store._dismissedLitterIds.length > 100) store._dismissedLitterIds = store._dismissedLitterIds.slice(-100);
-  saveStore();
- UIModule.toast('已铲走 💨');
-}
+function shakeLitterBox() { var m = AppCore.getModule('litterbox'); if (m) m.shake(); }
+function dismissLitterThought(id) { var m = AppCore.getModule('litterbox'); if (m) m.dismiss(id); }
 // ==================== LITTER BOX — INTELLIGENT TRIGGERS ====================
 
 const LITTER_THOUGHT_TYPES = ['possession','self_doubt','inexplicable_detail','unclear'];
@@ -3062,20 +2164,7 @@ async function writeMemoryFile(projectId, windowId, data, trigger) {
   MemoryModule.save(projectId);
 }
 
-function diffPatterns(oldPatterns, newPatterns) {
-  const changes = [];
-  const allKeys = new Set([...Object.keys(oldPatterns || {}), ...Object.keys(newPatterns || {})]);
-  for (const key of allKeys) {
-    const oldVal = (oldPatterns || {})[key];
-    const newVal = (newPatterns || {})[key];
-    if (!oldVal && newVal) changes.push(`${key}: 新增`);
-    else if (oldVal && !newVal) changes.push(`${key}: 移除`);
-    else if (oldVal && newVal && oldVal.strategy !== newVal.strategy) {
-      changes.push(`${key}: 策略变更 (count: ${oldVal.count}→${newVal.count})`);
-    }
-  }
-  return changes.length > 0 ? changes.join('; ') : null;
-}
+function diffPatterns(oldPatterns, newPatterns) { return MemoryModule.diffPatterns(oldPatterns, newPatterns); }
 
 // v2.0: Merge all 3 layers across project windows, dedup by ID
 // [v3] MemoryModule compatibility wrapper
@@ -3086,15 +2175,7 @@ async function syncProjectMemories(projectId) {
 
 
 // v2.0: Dedup helper — remove entries with same ID
-function deduplicateById(arr) {
-  const seen = new Set();
-  return arr.filter(item => {
-    if (!item || !item.id) return true;
-    if (seen.has(item.id)) return false;
-    seen.add(item.id);
-    return true;
-  });
-}
+function deduplicateById(arr) { return MemoryModule.deduplicateById(arr); }
 
 // ==================== SYSTEM PROMPT BUILDER (SPLIT ARCHITECTURE) ====================
 // §1–§10 compressed to ~1000 chars English — static, cache-friendly, sent as messages[0]
@@ -3383,7 +2464,7 @@ function maybeAICommentOnDiary(aiResponse) {
 }
 
 // ==================== BOOKSHELF ====================
-function renderBookshelf(){renderReadingNote();renderBookGrid();}
+function renderBookshelf() { var m = AppCore.getModule('bookshelf'); if (m) m.render(); }
 function renderReadingNote(){
   const el=$('readingNoteCard'); let latest=null,latestBook=null;
   for(const b of store.books){for(const h of b.highlights){if(!latest||h.id>latest.id){latest=h;latestBook=b;}}}
@@ -3664,28 +2745,7 @@ function resolveArtifactRefs(text){
   });
 }
 
-function openArtifactById(id){
-  const chat = getActiveChatObj();
-  const artifact = chat && chat.artifacts ? chat.artifacts.find(a => a.id === id) : null;
-  if (!artifact) return;
-  currentArtifactId = id;
-  $('artifactToolbarTitle').textContent = artifact.name || 'Artifact';
-  $('artifactFrame').style.display = 'none';
-  $('artifactImgWrap').style.display = 'none';
-  $('artifactFileInfo').style.display = 'none';
-  if (artifact.type === 'html') {
-    $('artifactFrame').style.display = 'block';
-    $('artifactFrame').srcdoc = artifact.content;
-  } else if (artifact.mimeType && artifact.mimeType.startsWith('image/')) {
-    $('artifactImgWrap').style.display = 'flex';
-    $('artifactImg').src = artifact.content;
-  } else {
-    $('artifactFileInfo').style.display = 'flex';
-    $('artifactFileName').textContent = artifact.name;
-    $('artifactFileSize').textContent = artifact.size > 1024 ? (artifact.size / 1024).toFixed(1) + ' KB' : artifact.size + ' B';
-  }
-  $('artifactOverlay').classList.add('show');
-}
+function openArtifactById(id) { var m = AppCore.getModule('artifacts'); if (m) m.openViewer(id); }
 
 function closeArtifactViewer(){
   $('artifactOverlay').classList.remove('show');
@@ -3735,11 +2795,7 @@ function dataURItoBlob(dataURI, mimeType){
   return new Blob([dataURI], { type: mimeType || 'text/html' });
 }
 
-function openBookDetail(bid){
-  const book=store.books.find(b=>b.id===bid); if(!book)return;
-  $('bookDetailPanel').innerHTML=`<div class="book-detail-header"><div class="book-detail-info"><h3>${book.cover} ${book.title}</h3><div class="book-author">${book.author} ${book.fileType?'('+book.fileType.toUpperCase()+')':''}</div></div><div style="display:flex;gap:8px;align-items:center;"><button style="background:none;border:none;font-size:16px;color:var(--text-lighter);cursor:pointer;padding:4px;" onclick="event.stopPropagation();deleteBook('${book.id}','${book.title.replace(/'/g,"\\'")}')" title="删除此书">🗑</button><button style="background:none;border:none;font-size:20px;color:var(--text-lighter);cursor:pointer;padding:4px;" onclick="closeBookDetail()">✕</button></div></div><div class="book-detail-progress"><div class="book-detail-progress-bar" style="width:${book.progress}%"></div></div><div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);margin-bottom:16px;">reading: ${book.progress}%</div><button style="width:100%;padding:10px;border-radius:20px;border:1px dashed var(--border);background:transparent;font-family:var(--font-en);font-size:12px;color:var(--text-lighter);cursor:pointer;margin-bottom:16px;" data-action="addHighlight" data-args="${book.id}">+ add highlight & note</button><div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.08em;margin-bottom:8px;">HIGHLIGHTS</div>${book.highlights.length===0?'<div class="empty-state" style="padding:8px;">no highlights yet.</div>':''}${book.highlights.map(h=>`<div class="highlight-item"><div class="highlight-text">"${h.text}"</div>${h.note?`<div class="highlight-note">📝 ${h.note}</div>`:''}<div class="highlight-actions"><button class="highlight-btn" onclick="event.stopPropagation();askAIAboutNote('${book.id}','${h.id}')">💬 ask ai</button></div>${(h.aiResponses||[]).map(r=>`<div class="note-ai-response"><div>${r.text}</div><div class="note-ai-source" onclick="event.stopPropagation();navToChatSource('${r.chatId}','${r.projectName}')">— from ${r.projectName} / ${r.chatName} →</div></div>`).join('')}</div>`).join('')}`;
-  $('bookDetailOverlay').classList.add('show');
-}
+function openBookDetail(bid) { var m = AppCore.getModule('bookshelf'); if (m) m.openBook(bid); }
 function deleteBook(bid, title){
   showModal('删除书籍', `<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要删除 <b>"${title}"</b> 吗？</p><p style="font-size:12px;color:var(--danger);margin-top:8px;">所有划线和高亮笔记将被永久删除。</p><input type="hidden" id="deleteBookBid" value="${bid}">`, [
     { label: 'cancel', cls: 'cancel', onclick: closeModal },
@@ -3832,81 +2888,7 @@ function navToChatSource(cid,pn){
 }
 
 // ==================== DIARY ====================
-function renderDiary(){
-  const selDate = store.diarySelectedDate || fmtDate().iso;
-  // Parse selected date for display
-  const [sy, sm, sd] = selDate.split('-').map(Number);
-  const dObj = new Date(sy, sm-1, sd);
-  const ms = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const ds = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-  const dateDisplay = `${ds[dObj.getDay()]}, ${ms[dObj.getMonth()]} ${dObj.getDate()}`;
-
-  $('diaryDateArt').innerHTML = `<div class="diary-date-day">${sd}</div><div class="diary-date-mon">${ms[sm-1]} ${sy}</div><div class="diary-date-click-hint">tap to browse</div>`;
-
-  // Get only entries for the selected date
-  const dayEntries = store.diaries.filter(d => d.date === selDate);
-  dayEntries.sort((a,b) => a.time.localeCompare(b.time));
-
-  const moodMap = {
-    calm:     { emoji: '😌', label: '平静',   cls: 'calm' },
-    excited:  { emoji: '✨', label: '兴奋',   cls: 'excited' },
-    troubled: { emoji: '😞', label: '烦恼',   cls: 'troubled' }
-  };
-
-  // Today prompt — always show for today, change text based on existing entries
-  const todayIso = fmtDate().iso;
-  const hasUserEntryToday = store.diaries.some(d => d.date === selDate && d.author === 'user');
-  const promptEl = $('diaryTodayPrompt');
-  if (selDate === todayIso) {
-    const promptText = hasUserEntryToday ? '还想写点什么……' : '写点什么吧……';
-    promptEl.innerHTML = `<div class="diary-today-prompt" data-action="addDiaryEntry"><div class="diary-today-prompt-text">${promptText}</div></div>`;
-  } else {
-    promptEl.innerHTML = '';
-  }
-
-  let html = '';
-  if (dayEntries.length === 0) {
-    html = '<div class="empty-state">no entries for this date.</div>';
-  } else {
-    dayEntries.forEach(d => {
-      const isAI = d.author === 'ai';
-      const title = d.title || d.content.slice(0, 20) + (d.content.length > 20 ? '…' : '');
-      const displayName = d.sourceChatId ? getChatDisplayName(d.sourceChatId) : null;
-      const byLine = isAI
-        ? (displayName ? `<span class="diary-reply-source" onclick="event.stopPropagation();navigateToDiaryReplySource('${d.sourceChatId||''}', '${displayName||''}')">from ${displayName}</span>` : 'from ai')
-        : `By ${USER_NAME}`;
-      html += `<div class="diary-card-entry ${isAI ? 'ai-entry' : ''}">
-        <div class="diary-card-title" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>${title}</span>
-          <span style="font-size:14px;color:var(--text-lighter);cursor:pointer;padding:2px 4px;" onclick="event.stopPropagation();editDiaryEntry('${d.id}')" title="编辑 / 删除">✎</span>
-        </div>
-        <div class="diary-card-mood-row">
-          <span class="diary-card-mood-tag ${(moodMap[d.mood]||moodMap.calm).cls}">${(moodMap[d.mood]||{emoji:'💭',label:d.mood||'平静'}).emoji} ${(moodMap[d.mood]||{label:d.mood||'平静'}).label}</span>
-          <span class="diary-card-time">${d.time || ''}</span>
-        </div>
-        <div class="diary-card-content">${d.content}</div>
-        <div class="diary-card-by">${byLine}</div>
-        <!-- Reply area -->
-        <div class="diary-reply-area">
-          ${(d.replies || []).map(r => {
-            const rDisplayName = r.sourceChatId ? getChatDisplayName(r.sourceChatId) : null;
-            const rBy = r.author === 'ai'
-              ? (rDisplayName ? `<span class="diary-reply-source" onclick="event.stopPropagation();navigateToDiaryReplySource('${r.sourceChatId||''}', '${rDisplayName||''}')">from ${rDisplayName}</span>` : 'from ai')
-              : USER_NAME;
-            return `<div class="diary-reply-item ${r.author === 'ai' ? 'ai-reply' : 'user-reply'}">
-              <div class="diary-reply-content">${r.content}</div>
-              <div class="diary-reply-meta">${rBy} · ${r.date} ${r.time}</div>
-            </div>`;
-          }).join('')}
-          <div class="diary-reply-tap" onclick="addDiaryReply('${d.id}')">
-            ${(d.replies || []).length === 0 ? 'tap to leave a message...' : 'reply...'}
-          </div>
-        </div>
-      </div>`;
-    });
-  }
-  $('diaryEntries').innerHTML = html;
-}
+function renderDiary() { var m = AppCore.getModule('diary'); if (m) m.render(); }
 
 function addDiaryReply(entryId) {
   showModal('Leave a Message', `
@@ -3984,22 +2966,7 @@ function saveDiaryEdit() {
   store._importing = true; closeModal(); renderDiary();UIModule.toast('日记已更新');
 }
 
-function addDiaryEntry() {
-  const ds = store.diarySelectedDate || fmtDate().iso;
-  showModal('New Diary Entry', `
-    <div style="font-family:var(--font-en);font-size:13px;color:var(--text-lighter);margin-bottom:12px;">${ds}</div>
-    <input class="modal-input" id="newDiaryTitle" placeholder="Title (optional)">
-    <div style="display:flex;gap:8px;margin-bottom:10px;">
-      ${[{v:'calm',l:'平静'},{v:'excited',l:'兴奋'},{v:'troubled',l:'烦恼'}].map(m => `<button class="mood-tag" data-mood-val="${m.v}" onclick="selectMoodInModal('${m.v}',this)" style="font-size:12px;padding:4px 14px;">${m.l}</button>`).join('')}
-    </div>
-    <textarea class="modal-input modal-textarea" id="newDiaryInput" placeholder="Today..."></textarea>
-    <input type="hidden" id="newDiaryMood" value="calm">
-  `, [
-    { label: 'cancel', cls: 'cancel', onclick: closeModal },
-    { label: 'save', cls: 'confirm', onclick: saveDiaryEntry },
-  ]);
-  setTimeout(() => { const ft = document.querySelector('#modalBody .mood-tag[data-mood-val="calm"]'); if (ft) ft.classList.add('selected'); }, 50);
-}
+function addDiaryEntry() { var m = AppCore.getModule('diary'); if (m) m.addEntry(); }
 
 function selectMoodInModal(mood, btn) {
   document.querySelectorAll('#modalBody .mood-tag').forEach(t => t.classList.remove('selected'));
@@ -4058,57 +3025,9 @@ function goToDiaryDate(ds){
 
 // ==================== MISC ====================
 // ==================== DATA EXPORT / IMPORT ====================
-async function exportAllData() {
-  const data = {};
-  const allKeys = await localforage.keys();
-  for (const key of allKeys) {
-    if (key && (key.startsWith('warmbuddy-') || key === 'userLocation')) {
-      try {
-        const val = await localforage.getItem(key);
-        // Export as JSON string for backward-compatible backup files
-        data[key] = typeof val === 'string' ? val : JSON.stringify(val);
-      } catch { data[key] = null; }
-    }
-  }
-  const date = new Date().toISOString().slice(0, 10);
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `warmbuddy_backup_${date}.json`;
-  a.click();
-  URL.revokeObjectURL(a.href);
- UIModule.toast('📥 数据已导出，请妥善保存');
-}
+async function exportAllData() { var m = AppCore.getModule('backup'); if (m) await m.exportData(); }
 
-function importAllData() {
-  console.log('[import] importAllData called');
-  const input = document.createElement('input');
-  input.type = 'file'; input.accept = '.json';
-  input.onchange = (e) => {
-    const file = e.target.files[0];
-    console.log('[import] file selected:', file.name, file.size);
-    if (!file) { input.remove(); return; }
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      try {
-        const data = JSON.parse(ev.target.result);
-        console.log('[import] JSON parsed, keys:', Object.keys(data).length);
-        if (typeof data !== 'object' || !data || Array.isArray(data)) throw new Error('Invalid format');
-        pendingImportData = data;
-        console.log('[import] showing confirmation modal');
-        showModal('确认导入', '<p style="font-size:14px;color:var(--text);line-height:1.6;">导入将覆盖当前所有数据（含聊天、日记、设置等），确定继续？</p>', [
-          { label: 'cancel', cls: 'cancel', onclick: () => { pendingImportData = null; closeModal(); } },
-          { label: '确认导入', cls: 'danger', onclick: executeImport }
-        ]);
-      } catch (err) {
-       UIModule.toast('❌ 文件格式无效，请检查是否为 warmbuddy 备份文件');
-      }
-    };
-    reader.readAsText(file);
-    input.remove();
-  };
-  input.click();
-}
+function importAllData() { var m = AppCore.getModule('backup'); if (m) m.importData(); }
 
 async function executeImport() {
   if (!pendingImportData) return;
@@ -4148,40 +3067,13 @@ async function executeImport() {
 function clearAllData(){
   showModal('Clear All Data',`<p style="font-size:14px;color:var(--text);line-height:1.6;">确定要清除所有数据吗？此操作不可撤销。</p>`,[{label:'cancel',cls:'cancel',onclick:closeModal},{label:'clear all',cls:'confirm',onclick:()=>{store.todos=[];store.litterThoughts=[];store.books=[];store.diaries=[];store.projects=[{id:'p1',name:'default',preference:'',apiConfig:{apiKey:'',endpoint:'https://api.deepseek.com/v1/chat/completions',model:'deepseek-chat',enabled:true},memories:[],chats:[{id:'c1',name:'default',sharedMemoryIds:[],weeklyExports:[],messages:[],chatTokens:0,lastConversationDate:null,lastActiveDate:null,lastInteractionTime:null}]}];store.tokenUsage.used=0;store.tokenUsage.history=[];store.activeProject='p1';store.activeChat='c1';saveStore();store._importing = true; closeModal();renderAll();UIModule.toast('All data cleared');}}]);
 }
-function renderAll(){renderHome();renderProjectList();renderChatMessages();renderBookshelf();renderDiary();}
+function renderAll() { var m = AppCore.getModule('backup'); if (m) m.renderAll(); }
 
 // ==================== INIT ====================
 // ==================== PWA SERVICE WORKER + PUSH (PWA-3) ====================
 let pushSubscribed = false;
 
-async function registerServiceWorker() {
-  if (!('serviceWorker' in navigator)) {
-    console.log('[PWA] Service Worker not supported');
-    return;
-  }
-  try {
-    const registration = await navigator.serviceWorker.register('/service-worker.js');
-    console.log('[PWA] SW registered:', registration.scope);
-
-    // Request persistent storage to reduce chance of SW/data being cleared
-    if (navigator.storage && navigator.storage.persist) {
-      const isPersisted = await navigator.storage.persist();
-      console.log('[PWA] Persistent storage:', isPersisted ? 'granted' : 'denied');
-    }
-
-    // Check if already subscribed
-    const existingSubscription = await registration.pushManager.getSubscription();
-    if (existingSubscription) {
-      await sendSubscriptionToServer(existingSubscription);
-      pushSubscribed = true;
-    } else {
-      // Auto-request permission on next user interaction
-      console.log('[PWA] Not subscribed yet, will request on interaction');
-    }
-  } catch (e) {
-    console.log('[PWA] SW registration failed:', e.message);
-  }
-}
+async function registerServiceWorker() { var m = AppCore.getModule('pwa'); if (m) m.registerSW(); }
 
 async function requestPushPermission() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
@@ -4260,245 +3152,15 @@ async function sendPushNotification(title, body, opts = {}) {
   }
 }
 
-async function init(){
-  await loadStore();
-  store._importing = false;
-  store._importLock = false;
-  initTheme(); // apply saved theme before any rendering
-  loadPresets(); // fire-and-forget: don't block UI while fetching remote presets
-  updateSettingsUI();
-  renderAll();
-  await pullAllProjectEnabledStates();  // pull authoritative enabled state from backend before UI check
-  updateChatInputEnabledState();  // must be after renderAll + loadStore; inside init() so store is loaded
-  syncProjectConfigToBackend();   // push latest config to backend on startup
-  // Pull latest desire state + system events from backend (Cron may have triggered while app was closed)
-  reconcileFromBackend();
-  // v2.1: chat input auto-resize + Enter/Shift+Enter handling
-  const chatInput = $('chatInput');
-  if (chatInput) {
-    chatInput.addEventListener('input', () => {
-      chatInput.style.height = 'auto';
-      chatInput.style.height = Math.min(chatInput.scrollHeight, 98) + 'px';
-      updateSendButtonState();
-    });
-    chatInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-      }
-    });
-  }
-  // Clean up completed todos older than 24h
-  var now=new Date();
-  store.todos=store.todos.filter(function(t){
-    if(!t.done)return true;
-    if(!t.createdAt)return true; // keep if no timestamp
-    return (now-new Date(t.createdAt))<24*60*60*1000;
-  });
-  applyForgettingCurve();
-  ensureColdStartPatterns();
-  rebuildBM25Index();
-  registerServiceWorker();
-  // Listen for notification clicks from service worker (when app is already open)
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.addEventListener('message', function(event) {
-      if (event.data && event.data.type === 'NOTIFICATION_CLICK') {
-        var d = event.data.data || {};
-        if (d.projectId) {
-          selectProject(d.projectId);
-          if (d.chatId) selectChat(d.projectId, d.chatId);
-        }
-      }
-    });
-  }
-  // Handle notification click via URL params (when app was closed, SW opens new window)
-  var urlParams = new URLSearchParams(window.location.search);
-  var notifProject = urlParams.get('project');
-  var notifChat = urlParams.get('chat');
-  if (notifProject) {
-    // Delay to ensure renderAll has completed
-    setTimeout(function() {
-      if (store.projects.find(function(p){return p.id===notifProject;})) {
-        selectProject(notifProject);
-        if (notifChat) selectChat(notifProject, notifChat);
-      }
-    }, 500);
-  }
-  // Phase 2: Load memories for active project (MemoryModule v3)
-  if (store.activeProject) {
-    MemoryModule.load(store.activeProject).then(function() {
-      console.log('[init] Memories loaded for', store.activeProject);
-    });
-  }
-  // v2.0: weekly auto-export check — deferred 30s to ensure store is fully loaded
-  setTimeout(() => checkWeeklyAutoExport(), 30000);
-  // Phase 3: reset daily token counter if date changed
-  resetDailyTokensIfNeeded();
-  // Phase 3: fetch weather on startup if toggle is ON
-  if (getActiveChatAiSettings().autoWeather) fetchWeather();
-  // Phase 2: weekly auto-export check (replaces old 30min timer)
-  setInterval(() => {
-    checkWeeklyAutoExport();
-  }, 1800000);
-  // Phase 3: refresh weather every 30 minutes
-  setInterval(() => {
-    if (getActiveChatAiSettings().autoWeather) fetchWeather();
-  }, 1800000);
-}
+// Init — delegated to AppCore
+function init() { AppCore.init(); }
 init();
-// One-time: migrate old memory format to Supabase (MemoryModule v3)
-setTimeout(function() {
-  MemoryModule.migrateFromLegacy().catch(function(){});
-  // [v3] Migrate proj.memories legacy data to MemoryModule, then clear
-  migrateLegacyMemories();
-}, 5000);
-setInterval(saveStore, 2000);
-setInterval(checkTodoReminders, 60000); // EDA: todo reminders every 60s
-setInterval(pollSystemEvents, 30000);      // backend proactive events every 30s
-setInterval(function(){ var p=getActiveProject(); if(p)pollCloudData(p.id); }, 60000); // cloud litter/diary every 60s
-setInterval(pullProactiveTokenLogs, 120000); // proactive token logs every 2min
-setInterval(syncDesireStateToBackend, 60000); // sync desire state to backend every 60s
 
-// ── Weekly memory file write ──
-// [v3] MemoryModule compatibility — sync all projects' caches to Supabase on Sundays
-async function checkWeeklyMemoryWrite() {
-  var now = new Date();
-  var dayOfWeek = now.getDay();
-  var today = fmtDate().iso;
-  var ms = store.memorySystem;
-  if (!ms._lastWeeklyWrite) ms._lastWeeklyWrite = '';
-  if (dayOfWeek === 0 && ms._lastWeeklyWrite !== today) {
-    for (var i = 0; i < store.projects.length; i++) {
-      MemoryModule.sync(store.projects[i].id);
-    }
-    ms._lastWeeklyWrite = today;
-    await flushEvictedMessages();
-    deriveRelationalInsights();
-    console.log('[weekly-write] v3 memory sync triggered for all projects');
-  }
-}
-
-async function flushEvictedMessages() {
-  const ms = store.memorySystem;
-  if (!ms._evictedMessages || ms._evictedMessages.length === 0) return;
-  const proj = getActiveProject();
-  if (!proj) { ms._evictedMessages = []; return; }
-  const chat = getActiveChatObj();
-  if (!chat) { ms._evictedMessages = []; return; }
-
-  const existing = await readMemoryFile(store.activeProject, chat.id) || {};
-  const userStarred = existing.userStarredMemories || [];
-  for (const ev of ms._evictedMessages) {
-    userStarred.push({
-      id: 'ev_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      timestamp: ev.timestamp || new Date().toISOString(),
-      sourceChatId: ev.sourceChatId || store.activeChat,
-      sourceWindowId: ev.sourceChatId || store.activeChat,
-      sourceProjectId: ev.sourceProjectId || store.activeProject,
-      rawDialogue: [{ role: ev.role || 'system', text: ev.content || '', time: ev.timestamp || '', msgId: '' }],
-      summary: (ev.content || '').slice(0, 15),
-      starredMsgIds: [],
-      userNote: ''
-    });
-  }
-  writeMemoryFile(store.activeProject, chat.id, { ...existing, userStarredMemories: userStarred.slice(-200) }, 'eviction');
-  ms._evictedMessages = [];
-}
-
-// ── Daily token reset ──
-function resetDailyTokensIfNeeded() {
-  const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
-  if (store.tokenDailyReset !== today) {
-    // Archive yesterday's logs before resetting
-    store.tokenDailyReset = today;
-    // Reset daily counters but keep call history
-    for (const [wid, log] of Object.entries(store.tokenLogs || {})) {
-      log.dailySummary = { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, by_action_type: {} };
-    }
-    saveStore();
-  }
-}
-
-// ── Pull proactive token logs from Supabase and merge into local tokenLogs ──
-function pullProactiveTokenLogs(){
-  var proj=getActiveProject(); if(!proj)return;
-  if(!store._lastTokenLogPull) store._lastTokenLogPull = new Date(Date.now()-3600000).toISOString();
-  fetch(AppCore.BACKEND_URL+'/api/token-logs?projectId='+encodeURIComponent(proj.id)+'&since='+encodeURIComponent(store._lastTokenLogPull))
-    .then(function(r){return r.json();})
-    .then(function(data){
-      if(!data.logs||!data.logs.length)return;
-      for(var i=0;i<data.logs.length;i++){
-        var l=data.logs[i];
-        // Skip if already logged (check by messageId)
-        var alreadyLogged=false;
-        var activeLog=store.tokenLogs&&store.tokenLogs[l.windowId];
-        if(activeLog&&activeLog.calls){
-          alreadyLogged=activeLog.calls.some(function(c){return c._tokenLogId===l.messageId;});
-        }
-        if(!alreadyLogged){
-          // Add a synthetic call entry
-          if(!store.tokenLogs)store.tokenLogs={};
-          if(!store.tokenLogs[l.windowId]){
-            store.tokenLogs[l.windowId]={calls:[],dailySummary:{total_input:0,total_output:0,total_cache_read:0,total:0,by_action_type:{}}};
-          }
-          var total=(l.inputTokens||0)+(l.outputTokens||0);
-          var entry={
-            timestamp:l.timestamp,
-            model:l.model||'unknown',
-            action_type:l.actionType||'proactive',
-            input_tokens:l.inputTokens||0,
-            output_tokens:l.outputTokens||0,
-            cache_read_tokens:0,
-            cache_write_tokens:0,
-            total_tokens:total,
-            _tokenLogId:l.messageId
-          };
-          store.tokenLogs[l.windowId].calls.unshift(entry);
-          var ds=store.tokenLogs[l.windowId].dailySummary;
-          ds.total_input+=(l.inputTokens||0);
-          ds.total_output+=(l.outputTokens||0);
-          ds.total+=total;
-          if(!ds.by_action_type)ds.by_action_type={};
-          ds.by_action_type[l.actionType||'proactive']=(ds.by_action_type[l.actionType||'proactive']||0)+total;
-        }
-      }
-      store._lastTokenLogPull=new Date().toISOString();
-      saveStore();
-    }).catch(function(){});
-}
-
-// ── Token logging per API call ──
-function logTokenCall(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model) {
-  if (!windowId) return;
-  if (!store.tokenLogs) store.tokenLogs = {};
-  if (!store.tokenLogs[windowId]) {
-    store.tokenLogs[windowId] = { calls: [], dailySummary: { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, by_action_type: {} } };
-  }
-  const log = store.tokenLogs[windowId];
-  const total = (inputTokens || 0) + (outputTokens || 0);
-  const now = new Date();
-  const entry = {
-    timestamp: `${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`,
-    model: model || store.aiSettings.model || 'unknown',
-    action_type: actionType,
-    input_tokens: inputTokens || 0,
-    output_tokens: outputTokens || 0,
-    cache_read_tokens: cacheRead || 0,
-    cache_write_tokens: cacheWrite || 0,
-    total_tokens: total
-  };
-  log.calls.unshift(entry);
-  if (log.calls.length > 200) log.calls.length = 200; // cap
-
-  // Update daily summary
-  const ds = log.dailySummary;
-  ds.total_input += (inputTokens || 0);
-  ds.total_output += (outputTokens || 0);
-  ds.total_cache_read += (cacheRead || 0);
-  ds.total += total;
-  if (!ds.by_action_type) ds.by_action_type = {};
-  ds.by_action_type[actionType] = (ds.by_action_type[actionType] || 0) + total;
-}
+// Lightweight wrappers → migrated to app-core.js
+function checkWeeklyMemoryWrite() { AppCore.checkWeeklyMemoryWrite(); }
+function resetDailyTokensIfNeeded() { AppCore.resetDailyTokensIfNeeded(); }
+function pullProactiveTokenLogs() { AppCore.pullProactiveTokenLogs(); }
+function logTokenCall(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model) { AppCore.logTokenCall(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model); }
 
 // Request push permission on first user interaction (to avoid auto-block)
 let _pushPermissionRequested = false;

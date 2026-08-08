@@ -1,4 +1,4 @@
-const CACHE_NAME = 'warmbuddy-v8';
+const CACHE_NAME = 'warmbuddy-v' + Date.now();
 const STATIC_ASSETS = [
   '/',
   '/manifest.json',

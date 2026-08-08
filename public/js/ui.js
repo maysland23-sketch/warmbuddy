@@ -227,6 +227,8 @@ var UIModule = (function() {
         case 'closeMemoryPanel': closeMemoryPanel(); break;
         // Modal
         case 'closeModal': closeModal(); break;
+        case 'modalClick': break; // No-op: prevent click inside container from bubbling to overlay
+        case 'panelClick': break;
         // Theme
         case 'toggleDarkMode': toggleDarkMode(); break;
         // Chat
@@ -251,38 +253,88 @@ var UIModule = (function() {
           if (tabMod) tabMod.switchTodoTab(args, target);
           break;
         // Settings
-        case 'toggleEmailEnabled': if (typeof toggleEmailEnabled === 'function') toggleEmailEnabled(); break;
         case 'showProjectApiModal': var s = AppCore.getModule('settings'); if (s) s.showProjectApiModal(); break;
         case 'showModelModal': var s2 = AppCore.getModule('settings'); if (s2) s2.showModelModal(); break;
         case 'showPreferenceModal': var s3 = AppCore.getModule('chat'); if (s3) s3.showPreferenceModal(); break;
         case 'showAiNameModal': var s4 = AppCore.getModule('chat'); if (s4) s4.showAiNameModal(); break;
-        case 'showEmailConfigModal': if (typeof showEmailConfigModal === 'function') showEmailConfigModal(); break;
         case 'toggleAiSetting':
           var k = args;
           var set = AppCore.getModule('settings');
           if (set) set.toggleAiSetting(k);
           break;
-        // Bookshelf
-        case 'showBookshelfAddMenu': if (typeof showBookshelfAddMenu === 'function') showBookshelfAddMenu(); break;
-        case 'openBookDetail': if (typeof openBookDetail === 'function') openBookDetail(args); break;
         // Memory panel
         case 'switchMemoryTab': if (typeof switchMemoryTab === 'function') switchMemoryTab(args); break;
         case 'openMemoryPanelTokens': openMemoryPanel('tokens'); break;
         // Diary
-        case 'addDiaryEntry': if (typeof addDiaryEntry === 'function') addDiaryEntry(); break;
-        case 'openCalendar': if (typeof openCalendar === 'function') openCalendar(); break;
-        case 'closeCalendar': if (typeof closeCalendar === 'function') closeCalendar(); break;
+        case 'addDiaryEntry':
+          var diaryMod = AppCore.getModule('diary');
+          if (diaryMod && diaryMod.addEntry) diaryMod.addEntry();
+          break;
+        case 'addDiaryReply':
+          var diaryMod2 = AppCore.getModule('diary');
+          if (diaryMod2 && diaryMod2.addReply) diaryMod2.addReply(args);
+          break;
+        case 'editDiaryEntry':
+          var diaryMod3 = AppCore.getModule('diary');
+          if (diaryMod3 && diaryMod3.editEntry) diaryMod3.editEntry(args);
+          break;
+        case 'toggleReplyAuthor':
+          var diaryMod4 = AppCore.getModule('diary');
+          if (diaryMod4 && diaryMod4.toggleReplyAuthor) diaryMod4.toggleReplyAuthor();
+          break;
+        case 'selectMoodInModal':
+          var diaryMod5 = AppCore.getModule('diary');
+          if (diaryMod5 && diaryMod5.selectMood) diaryMod5.selectMood(args);
+          break;
+        case 'navigateToDiaryReplySource':
+          var diaryMod6 = AppCore.getModule('diary');
+          if (diaryMod6 && diaryMod6.navigateToDiaryReplySource) diaryMod6.navigateToDiaryReplySource(args);
+          break;
+        case 'openCalendar':
+          var diaryMod7 = AppCore.getModule('diary');
+          if (diaryMod7 && diaryMod7.openCalendar) diaryMod7.openCalendar();
+          break;
+        case 'closeCalendar':
+          var diaryMod8 = AppCore.getModule('diary');
+          if (diaryMod8 && diaryMod8.closeCalendar) diaryMod8.closeCalendar();
+          break;
+        case 'navCalendar':
+          var diaryMod9 = AppCore.getModule('diary');
+          if (diaryMod9 && diaryMod9.navCalendar) diaryMod9.navCalendar(args);
+          break;
+        case 'goToDiaryDate':
+          var diaryMod10 = AppCore.getModule('diary');
+          if (diaryMod10 && diaryMod10.goToDiaryDate) diaryMod10.goToDiaryDate(args);
+          break;
         // Artifacts
-        case 'closeArtifactViewer': if (typeof closeArtifactViewer === 'function') closeArtifactViewer(); break;
-        case 'downloadArtifact': if (typeof downloadArtifact === 'function') downloadArtifact(); break;
-        // Data
-        case 'exportAllData': if (typeof exportAllData === 'function') exportAllData(); break;
-        case 'importAllData': if (typeof importAllData === 'function') importAllData(); break;
-        case 'clearAllData': if (typeof clearAllData === 'function') clearAllData(); break;
+        case 'closeArtifactViewer': var artM = AppCore.getModule('artifacts'); if (artM && artM.closeViewer) artM.closeViewer(); break;
+        case 'downloadArtifact': var artM2 = AppCore.getModule('artifacts'); if (artM2 && artM2.download) artM2.download(); break;
+        case 'openArtifactNewTab': var artM3 = AppCore.getModule('artifacts'); if (artM3 && artM3.openNewTab) artM3.openNewTab(); break;
+        case 'deleteArtifact': var artM4 = AppCore.getModule('artifacts'); if (artM4 && artM4.deleteArtifact) artM4.deleteArtifact(args); break;
+        // Data / Backup
+        case 'exportAllData': var buM = AppCore.getModule('backup'); if (buM && buM.exportData) buM.exportData(); break;
+        case 'importAllData': var buM2 = AppCore.getModule('backup'); if (buM2 && buM2.importData) buM2.importData(); break;
+        case 'clearAllData': var buM3 = AppCore.getModule('backup'); if (buM3 && buM3.clearAll) buM3.clearAll(); break;
+        // Email
+        case 'showEmailConfigModal': var emM = AppCore.getModule('email'); if (emM && emM.showConfig) emM.showConfig(); break;
+        case 'toggleEmailEnabled': var emM2 = AppCore.getModule('email'); if (emM2 && emM2.toggleEnabled) emM2.toggleEnabled(); break;
         // Litter box
-        case 'shakeLitterBox': if (typeof shakeLitterBox === 'function') shakeLitterBox(); break;
-        // Book details
-        case 'addHighlight': if (typeof addHighlight === 'function') addHighlight(args); break;
+        case 'shakeLitterBox':
+          var lbMod = AppCore.getModule('litterbox');
+          if (lbMod && lbMod.shake) lbMod.shake();
+          break;
+        case 'dismissLitterThought':
+          var lbMod2 = AppCore.getModule('litterbox');
+          if (lbMod2 && lbMod2.dismiss) lbMod2.dismiss(args);
+          break;
+        // Bookshelf
+        case 'openBookDetail': var bsM = AppCore.getModule('bookshelf'); if (bsM && bsM.openBook) bsM.openBook(args); break;
+        case 'deleteBook': var bsM2 = AppCore.getModule('bookshelf'); if (bsM2 && bsM2.deleteBook) { var parts = args.split('|'); bsM2.deleteBook(parts[0], parts[1]); } break;
+        case 'closeBookDetail': var bsM3 = AppCore.getModule('bookshelf'); if (bsM3 && bsM3.closeDetail) bsM3.closeDetail(); break;
+        case 'addHighlight': var bsM4 = AppCore.getModule('bookshelf'); if (bsM4 && bsM4.addHighlight) bsM4.addHighlight(args); break;
+        case 'askAIAboutNote': var bsM5 = AppCore.getModule('bookshelf'); if (bsM5 && bsM5.askAI) { var p2 = args.split('|'); bsM5.askAI(p2[0], p2[1]); } break;
+        case 'navToChatSource': var bsM6 = AppCore.getModule('bookshelf'); if (bsM6 && bsM6.navToChatSource) { var p3 = args.split('|'); bsM6.navToChatSource(p3[0], p3[1]); } break;
+        case 'showBookshelfAddMenu': var bsM7 = AppCore.getModule('bookshelf'); if (bsM7 && bsM7.showAddMenu) bsM7.showAddMenu(); break;
         // Fallback: try calling as global function
         default:
           var fn = window[action];
