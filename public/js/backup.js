@@ -233,7 +233,7 @@ var BackupModule = (function() {
     });
 
     MemoryModule.save(proj.id);
-    deriveRelationalInsights();
+    MemoryModule.generateCoreOverview();
 
     renderMemoryPanelBody();
     var label = exportType === 'weekly_auto' ? '每周自动导出' : '手动导出';

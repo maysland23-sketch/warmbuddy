@@ -948,7 +948,7 @@ var AppCore = (function() {
         for (var i = 0; i < store.projects.length; i++) { MemoryModule.sync(store.projects[i].id); }
         ms._lastWeeklyWrite = today;
         AppCore._flushEvictedMessages();
-        MemoryModule.deriveRelationalInsights();
+        MemoryModule.generateCoreOverview();
         console.log('[weekly-write] v3 memory sync triggered for all projects');
       }
     },

@@ -598,7 +598,7 @@ var ChatModule = (function() {
     if (!text) return text;
     text = text.replace(/<!--\s*REFLECT\s*\{[\s\S]*?\}\}/gi, '');
     text = text.replace(/<!--\s*REFLECT[\s\S]*$/gi, '');
-    text = text.replace(/<!--\s*(?:REFLECT|DIARY|MEMORY)[\s\S]*?-->/gi, '');
+    text = text.replace(/<!--\s*(?:REFLECT|DIARY|MEMORY|STAR|LTM)[\s\S]*?-->/gi, '');
     text = text.replace(/\[\[\w+:[\s\S]*?\]\]/g, '');
     text = text.replace(/^(MESSAGE|LITTER|DIARY|EMAIL|TODO):\s*/gmi, '');
     return AppCore.escapeHtml(text);
@@ -620,6 +620,7 @@ var ChatModule = (function() {
     var el = AppCore.$('chatMessages'), chat = getActiveChatObj();
     var savedScrollTop = preserveScroll && el ? el.scrollTop : 0;
     var proj = getActiveProject();
+    var todayIso = AppCore.fmtDate().iso;
     if (!chat || chat.messages.length === 0) {
       el.innerHTML = '<div style="text-align:center;padding:40px 20px;"><span style="font-family:var(--font-en);font-size:12px;color:var(--text-lighter);">— start a conversation —</span></div>';
       return;
@@ -696,9 +697,9 @@ var ChatModule = (function() {
                 ' ontouchstart="event.stopPropagation();"' +
                 ' ontouchend="event.stopPropagation();"' +
                 ' title="' + starTitle + '">' + starIcon + '</span>' +
-          '<span class="bubble-time">' + m.time + '</span>'
+          '<span class="bubble-time">' + ((m.date && m.date !== todayIso) ? m.date.slice(5) + ' ' + m.time : m.time) + '</span>'
           :
-          '<span class="bubble-time">' + m.time + '</span>' +
+          '<span class="bubble-time">' + ((m.date && m.date !== todayIso) ? m.date.slice(5) + ' ' + m.time : m.time) + '</span>' +
           (m._proactive ? '<span class="bubble-source-label">' + (m._todoWake ? '自我唤醒' : (m._desireType ? getDriveLabel(m._desireType) : '')) + '</span>' : '') +
           '<span class="outer-star-icon ' + starOnceCls + ' ' + starSelectedCls + '"' +
                 ' onclick="event.stopPropagation();' + starAction + '"' +
@@ -929,8 +930,8 @@ var ChatModule = (function() {
 
     msgs.forEach(function(m) { m._starredOnce = true; m._starred = true; });
 
+    // Create USM placeholder immediately — LLM summary filled in next round
     var usmId = 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-    var fastSummary = (rawDialogue[0] ? rawDialogue[0].text : '').slice(0, 15) || '(未命名记忆)';
     var usm = {
       id: usmId,
       timestamp: new Date().toISOString(),
@@ -938,68 +939,21 @@ var ChatModule = (function() {
       sourceWindowId: store.activeChat,
       sourceProjectId: store.activeProject,
       rawDialogue: rawDialogue,
-      summary: fastSummary,
+      summary: '⏳ 待生成...',
       starredMsgIds: selectedMsgIds,
-      userNote: ''
+      userNote: '',
+      status: 'pending',
+      taskLog: { starredAt: new Date().toISOString(), sentAt: null, repliedAt: null, writtenAt: null },
+      retryCount: 0
     };
-
     MemoryModule.addUSM(store.activeProject, usm);
     checkDeriveInsightsTrigger('usm');
     AppCore.saveStore();
-    UIModule.toast('✦ 已保存星标记忆');
 
-    generateStarredMemorySummary(rawDialogue).then(function(llmSummary) {
-      if (llmSummary && llmSummary.length >= 3 && llmSummary !== fastSummary && MemoryModule.update) {
-        MemoryModule.update(store.activeProject, usmId, { summary: llmSummary });
-        MemoryModule.save(store.activeProject);
-      }
-    }).catch(function(e) {
-      console.log('[starred-summary] Background LLM failed:', e.message);
+    // Fire standalone LLM call with identity context (Core overview + recent rounds + recent USMs/AEMs)
+    MemoryModule.generateUSM(usmId, rawDialogue).catch(function(e) {
+      console.log('[USM] Background generation failed:', e.message);
     });
-  }
-
-  async function generateStarredMemorySummary(rawDialogue, retries) {
-    var store = AppCore.getStore();
-    retries = retries || 2;
-    var cfg = getActiveApiConfig();
-    if (!cfg.apiKey) {
-      var firstText = rawDialogue[0] ? rawDialogue[0].text : '';
-      return (firstText || '').slice(0, 15) || '(未连接API)';
-    }
-    var dialogueText = rawDialogue
-      .map(function(m) { return (m.role === 'user' ? '用户' : 'AI') + '：' + ((m.text || '').slice(0, 150)); })
-      .join('\n');
-    for (var attempt = 0; attempt <= retries; attempt++) {
-      try {
-        var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
-            messages: [
-              { role: 'system', content: '以第一人称（"我"的视角），用一句话（15字以内）概括这段对话中最重要的时刻。直接返回概括，不加引号、不加标点结尾。' },
-              { role: 'user', content: dialogueText }
-            ]
-          })
-        });
-        if (!response.ok) {
-          if (attempt < retries) continue;
-          break;
-        }
-        var data = await response.json();
-        var result = (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 15) : '';
-        if (result && result.length >= 3) return result;
-        if (attempt < retries) continue;
-      } catch (e) {
-        console.log('[starred-summary] Attempt ' + (attempt + 1) + ' error:', e.message);
-        if (attempt < retries) continue;
-      }
-      break;
-    }
-    var fallback = rawDialogue[0] ? rawDialogue[0].text : '';
-    fallback = (fallback || '').slice(0, 15) || '(摘要失败)';
-    console.log('[starred-summary] Fallback:', fallback);
-    return fallback;
   }
 
   // ═══════════════════════════════════════════
@@ -1115,8 +1069,16 @@ var ChatModule = (function() {
     var userIntensity = reflection.user_affect_intensity || 0;
     if (aiIntensity >= 7 || userIntensity >= 7) {
       var memMarker = extractMemoryMarker(aiResponse);
+      console.log('[AEM-debug] intensity high (ai=' + aiIntensity + ', user=' + userIntensity + '), MEMORY marker found:', !!memMarker, memMarker ? memMarker.summary?.slice(0,40) : 'NONE');
       if (memMarker && memMarker.summary) {
-        if (typeof createAEMFromMarkers === 'function') createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker);
+        if (typeof createAEMFromMarkers === 'function') {
+          createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker);
+          console.log('[AEM-debug] AEM created via createAEMFromMarkers, total AEMs:', (MemoryModule.getCML(AppCore.getStore().activeProject)?.aiEmotionalMemories||[]).length);
+        } else {
+          console.log('[AEM-debug] createAEMFromMarkers not available');
+        }
+      } else {
+        console.log('[AEM-debug] No MEMORY marker in response (intensity was high but LLM did not include marker)');
       }
     }
     if ((ms._quietPresenceCount || 0) >= 10) {
@@ -1641,27 +1603,24 @@ var ChatModule = (function() {
 
   async function regenerateUSM(entryId) {
     var store = AppCore.getStore();
-    var cfg = getActiveApiConfig();
-    if (!cfg.apiKey) { UIModule.toast('请先配置当前Project的API'); return; }
-
+    var chat = getActiveChatObj();
+    if (!chat) return;
     var cml = getCoreMemoryLayers();
     var usm = cml.userStarredMemories.find(function(m) { return m.id === entryId; });
     if (!usm) { UIModule.toast('记忆条目未找到'); return; }
     if (!usm.rawDialogue || !usm.rawDialogue.length) { UIModule.toast('缺少原始对话'); return; }
 
-    UIModule.toast('🔄 正在重新生成摘要...');
-    var newSummary = await generateStarredMemorySummary(usm.rawDialogue);
-    if (newSummary && newSummary !== '星标记忆' && newSummary !== '(摘要失败)' && newSummary !== '(未连接API)') {
-      usm.summary = newSummary;
-      usm._repairedAt = new Date().toISOString();
-      usm._repairedByModel = cfg.model;
-      flushMemoryFile(store.activeProject, store.activeChat, 'manual_repair_usm');
-      AppCore.saveStore();
-      renderMemoryPanelBody();
-      UIModule.toast('✅ 摘要已修复: ' + newSummary);
-    } else {
-      UIModule.toast('摘要生成失败，请检查模型连接后重试');
-    }
+    // Re-generate via queue-based approach
+    UIModule.toast('🔄 已重新排队生成摘要（下轮对话）');
+    if (!chat._pendingStarTasks) chat._pendingStarTasks = [];
+    chat._pendingStarTasks.push({ rawDialogue: usm.rawDialogue, usmId: entryId });
+    usm.status = 'pending';
+    usm.summary = '⏳ 待重新生成...';
+    usm.taskLog = usm.taskLog || { starredAt: new Date().toISOString(), sentAt: null, repliedAt: null, writtenAt: null };
+    usm.retryCount = 0;
+    AppCore.saveStore();
+    renderMemoryPanelBody();
+    UIModule.toast('✅ 已排队，下轮对话生成新摘要');
   }
 
   // ═══════════════════════════════════════════
@@ -1708,30 +1667,11 @@ var ChatModule = (function() {
   }
 
   function starBubble(idx) {
-    var store = AppCore.getStore();
     var chat = getActiveChatObj(); if (!chat || !chat.messages[idx]) return;
-    var proj = getActiveProject(); if (!proj) return;
     var msg = chat.messages[idx];
-    var memId = 'm' + AppCore.gid('');
-    if (chat.sharedMemoryIds.indexOf(memId) < 0) chat.sharedMemoryIds.push(memId);
-
-    var usmId = 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-    MemoryModule.addUSM(store.activeProject, {
-      id: usmId,
-      timestamp: new Date().toISOString(),
-      sourceChatId: store.activeChat, sourceWindowId: store.activeChat, sourceProjectId: store.activeProject,
-      rawDialogue: [{ role: msg.role === 'user' ? 'user' : 'assistant', text: msg.text || '', time: msg.time || '', msgId: msg.id || '' }],
-      summary: (msg.text || '').slice(0, 15),
-      starredMsgIds: [msg.id || ''],
-      userNote: ''
-    });
-
-    msg._starredOnce = true;
-    msg._starred = true;
-
-    checkDeriveInsightsTrigger('usm');
-    AppCore.saveStore();
-    UIModule.toast('★ 已标记为重要记忆');
+    if (msg._starredOnce) { UIModule.toast('已星标过此消息'); return; }
+    // Delegate to the unified USM creation flow
+    createUserStarredMemory([msg.id]);
   }
 
   function splitSentences(text) {
@@ -2163,7 +2103,7 @@ var ChatModule = (function() {
         });
         if (!exists) {
           store.todos.unshift({
-            id: 't' + AppCore.gid(), text: et.title, done: false,
+            id: 't' + AppCore.gid(''), text: et.title, done: false,
             time: et.deadline, type: 'short', creator: 'ai',
             chatId: chat.id || ''
           });
@@ -2173,6 +2113,7 @@ var ChatModule = (function() {
       if (hasNewTodo) {
         chat.messages.push({ role: 'system', contentType: 'todo_notification', text: '有了新的to-do', time: AppCore.nowTime() });
         AppCore.saveStore();
+        SyncModule.syncTodosToBackend();
       }
       displayResponse = displayResponse.replace(/\[\[TODO:[^\]]+\]\]/g, '').trim();
     }
@@ -2263,7 +2204,7 @@ var ChatModule = (function() {
         }
       }
     } else {
-      chat.messages.push({ role: 'ai', text: cleanText, time: bubbleTime, id: AppCore.generateMsgId() });
+      chat.messages.push({ role: 'ai', text: cleanText, time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() });
       renderChatMessages();
     }
 
@@ -2295,7 +2236,6 @@ var ChatModule = (function() {
     renderChatMessages();
     renderProjectList();
 
-    (AppCore.getModule('memory')||{}).maybeAdd(userText, fullResponse);
     (AppCore.getModule('litterbox')||{}).trigger(userText, fullResponse);
     (AppCore.getModule('diary')||{}).maybeComment(fullResponse);
     (AppCore.getModule('memory')||{}).applyForgettingCurve();
@@ -2698,7 +2638,8 @@ var ChatModule = (function() {
       console.log('[cold-start] New window initialized with', inheritedMsgs.length, 'inherited messages');
     }
     var timeStr = AppCore.nowTime();
-    var userMsg = { role: 'user', text: text, time: timeStr, id: AppCore.generateMsgId() };
+    var todayStr = AppCore.fmtDate().iso;
+    var userMsg = { role: 'user', text: text, time: timeStr, date: todayStr, id: AppCore.generateMsgId() };
     if (pendingReply) {
       userMsg.replyTo = pendingReply.msgId;
       pendingReply = null;
@@ -2939,7 +2880,6 @@ var ChatModule = (function() {
     confirmBatchStar: confirmBatchStar,
     executeBatchStar: executeBatchStar,
     createUserStarredMemory: createUserStarredMemory,
-    generateStarredMemorySummary: generateStarredMemorySummary,
 
     // Memory repair
     regenerateAEM: regenerateAEM,

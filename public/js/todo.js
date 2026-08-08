@@ -34,7 +34,10 @@ var TodoModule = (function() {
       if (!todo.time) continue;
       var lastReminder = ds.todoReminders[todo.id];
       if (lastReminder === today) continue;
-      var timeParts = (todo.time || '').split(':');
+      var timeStr = (todo.time || '');
+      // Support both HH:MM and ISO formats (2026-08-09T00:43)
+      if (timeStr.indexOf('T') >= 0) timeStr = timeStr.split('T')[1].slice(0, 5);
+      var timeParts = timeStr.split(':');
       var tH = parseInt(timeParts[0]), tM = parseInt(timeParts[1]);
       if (isNaN(tH) || isNaN(tM)) continue;
       var todoMinutes = tH * 60 + tM;

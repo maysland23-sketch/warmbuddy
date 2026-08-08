@@ -1204,7 +1204,7 @@ function evictOldestCoreMemories() { MemoryModule.evictOldestCoreMemories(); }
 // Trigger check: called after AEM, USM, or diary/litterbox additions
 function checkDeriveInsightsTrigger(source) { MemoryModule.checkDeriveInsightsTrigger(source); }
 
-async function deriveRelationalInsights() { MemoryModule.deriveRelationalInsights(); }
+async function deriveRelationalInsights() { MemoryModule.generateCoreOverview(); }
 
 // ── Cold Start: Default Relational Patterns ──
 function ensureColdStartPatterns() { MemoryModule.ensureColdStartPatterns(); }
@@ -1496,8 +1496,9 @@ function renderMemoryPanelBody(){
     </div>`;
   } else if (currentMemoryTab === 'core') {
     const cml = getCoreMemoryLayers();
-    const aems = cml.aiEmotionalMemories || [];
-    const chat = getActiveChatObj();
+    var aems = (cml.aiEmotionalMemories || []).concat();
+    aems.sort(function(a, b) { return (b.timestamp || '').localeCompare(a.timestamp || ''); });
+    var chat = getActiveChatObj();
     b.innerHTML = '<div style="padding:4px;">' +
       (aems.length === 0 ? '<div class="empty-state">no core memories yet.<br><span style="font-size:10px;color:var(--text-lighter);">high-intensity emotional moments will appear here</span></div>' : '') +
       // ── v2.0: AI Emotional Memories ──
@@ -1518,6 +1519,13 @@ function renderMemoryPanelBody(){
         const rawPreview = aem.rawDialogue && aem.rawDialogue.length > 0
           ? aem.rawDialogue.map(d => '<span style="font-size:10px;color:var(--text-lighter);">' + (d.role==='user'?'用户':'AI') + ': ' + (d.text||'').slice(0,60) + '</span>').join('<br>')
           : '';
+        const ctxPreview = aem.context && aem.context.length > 0
+          ? '<div style="margin-top:4px;padding:4px 8px;background:var(--bg);border-radius:6px;line-height:1.4;">'+aem.context.map(d => '<span style="font-size:10px;color:var(--text-lighter);">' + (d.role==='user'?'用户':'AI') + ': ' + (d.content||'').slice(0,60) + '</span>').join('<br>')+'</div>'
+          : '';
+        // Decay + sync info
+        var decayPct = (aem.decayFactor !== undefined) ? Math.round((aem.decayFactor || 0) * 100) : 100;
+        var decayInfo = '<span style="font-size:10px;color:var(--text-lighter);">decay: ' + decayPct + '%</span>';
+        var syncInfo = aem._syncedAt ? '<span style="font-size:10px;color:var(--text-lighter);">sync: ' + toLocalDisplayTime(aem._syncedAt) + '</span>' : '<span style="font-size:10px;color:var(--text-lighter);">sync: pending</span>';
         return `<div class="memory-list-item" style="flex-direction:column;align-items:stretch;gap:6px;">
           <div style="display:flex;gap:6px;flex-wrap:wrap;">
             <span class="affect-badge" style="background:linear-gradient(135deg,#C4877B,#D4A09A);color:#fff;">AI ${aiL} (${aiI})</span>
@@ -1525,8 +1533,9 @@ function renderMemoryPanelBody(){
           </div>
           <div class="memory-item-content" style="font-size:13px;">${summaryText}</div>
           ${rawPreview ? `<div style="margin-top:4px;padding:4px 8px;background:var(--bg);border-radius:6px;line-height:1.4;">${rawPreview}</div>` : ''}
-          ${aem.aiSelfEval && aem.aiSelfEval.internalNote ? `<div style="font-size:10px;color:var(--text-lighter);font-style:italic;margin-top:2px;">🔒 ${(aem.aiSelfEval.internalNote||'').slice(0,80)}</div>` : ''}
-          <div class="memory-item-meta">${ts} · ${aem.triggerSource||'?'}</div>
+          ${ctxPreview}
+          ${aem.aiSelfEval && aem.aiSelfEval.internalNote ? `<div style="font-size:10px;color:var(--text-lighter);font-style:italic;margin-top:2px;">${(aem.aiSelfEval.internalNote||'').slice(0,80)}</div>` : ''}
+          <div class="memory-item-meta">${ts} · ${aem.triggerSource||'?'} · ${decayInfo} · ${syncInfo}</div>
         </div>`;
       }).join('') +
       (aems.length > (coreTabPage+1)*CORE_PAGE_SIZE ? '<div style="text-align:center;padding:10px;"><button onclick="coreTabPage++;renderMemoryPanelBody();" style="padding:6px 20px;border-radius:12px;border:1px solid var(--border-light);background:var(--bg);font-size:11px;color:var(--text-light);cursor:pointer;">加载更多 (显示'+((coreTabPage+1)*CORE_PAGE_SIZE)+'/'+aems.length+')</button></div>' : '') +
@@ -1553,23 +1562,35 @@ function renderMemoryPanelBody(){
         usmHtml += '</div>';
         return usmHtml;
       })() +
-      // ── v2.0: Derived patterns summary ──
+      // ── Core Overview ──
       (() => {
-        const drp = getDerivedPatterns();
-        if (!drp || !drp.patterns || drp.patterns.length === 0) return '';
+        var proj2 = getActiveProject(); if (!proj2) return '';
+        var co = MemoryModule._cache && MemoryModule._cache[proj2.id] ? MemoryModule._cache[proj2.id].coreOverview : null;
+        if (!co || !co.text) {
+          // Try legacy: derivedPatterns
+          var drp = getDerivedPatterns();
+          if (drp && drp.patterns && drp.patterns.length > 0) {
+            var legText = drp.patterns.map(function(p) { return '【' + p.patternName + '】(×' + (p.frequency||1) + ') ' + (p.description||''); }).join('\n');
+            return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">' +
+              '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">CORE OVERVIEW (legacy patterns)</div>' +
+              '<div style="font-size:12px;color:var(--text);line-height:1.7;white-space:pre-wrap;">' + legText.slice(0, 500) + '</div></div>';
+          }
+          return '<div class="empty-state" style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">no core overview yet.<br><span style="font-size:10px;color:var(--text-lighter);">generated when enough emotional memories accumulate</span></div>';
+        }
+        var updatedTime = co.updatedAt ? AppCore.computeTimeAgo(co.updatedAt) : '';
+        var histHtml = '';
+        if (co.history && co.history.length > 0) {
+          histHtml = '<details style="margin-top:6px;"><summary style="font-size:10px;color:var(--text-lighter);cursor:pointer;">查看历史版本 (' + co.history.length + ')</summary>' +
+            co.history.map(function(h) {
+              var hTime = h.updatedAt ? h.updatedAt.slice(0, 16).replace('T', ' ') : '';
+              return '<div style="font-size:10px;color:var(--text-lighter);padding:4px 0;border-bottom:1px solid var(--border-light);"><div style="font-size:12px;color:var(--text);line-height:1.6;white-space:pre-wrap;max-height:120px;overflow-y:auto;">' + (h.text||'').slice(0, 300) + '</div><div>' + hTime + ' · ' + (h.updatedBy||'') + '</div></div>';
+            }).join('') + '</details>';
+        }
         return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">' +
-          '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">DERIVED PATTERNS (' + drp.patterns.length + ')</div>' +
-          drp.patterns.map(p => `<div style="font-size:11px;color:var(--text-light);padding:4px 0;border-bottom:1px solid var(--border-light);"><b>${p.patternName}</b> (×${p.frequency||1}): ${(p.description||'').slice(0,50)}</div>`).join('') +
-          '</div>';
-      })() +
-      // Pattern change log (from memory file) — pre-fetched async into _cachedPatternLog
-      (() => {
-        if (!chat) return '';
-        var file = store._cachedPatternLog;
-        if (!file || !file.pattern_change_log || file.pattern_change_log.length === 0) return '';
-        return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">' +
-          '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">PATTERN CHANGE LOG</div>' +
-          file.pattern_change_log.slice(-5).map(pl => `<div style="font-size:10px;color:var(--text-light);padding:3px 0;border-bottom:1px solid var(--border-light);"><span style="font-size:8px;color:var(--text-lighter);">${pl.period}</span><br>${pl.change_note}</div>`).join('') +
+          '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;">CORE OVERVIEW</div>' +
+          '<div style="font-size:12px;color:var(--text);line-height:1.7;white-space:pre-wrap;">' + (co.text||'') + '</div>' +
+          '<div style="font-size:10px;color:var(--text-lighter);margin-top:6px;">' + updatedTime + ' · ' + (co.updatedBy||'warmbuddy') + '</div>' +
+          histHtml +
           '</div>';
       })() +
       '</div>';
@@ -1585,44 +1606,105 @@ function renderMemoryPanelBody(){
       <div id="importPreview" style="margin-top:12px;"></div>
     </div>`;
   } else {
-    // [v3] memories tab — unified view from MemoryModule
+    // [v3] memories tab — long-term memories (proj.memories) + USMs (starred)
     var proj=getActiveProject(); if(!proj){b.innerHTML='<div class="empty-state">no active project.</div>';return;}
-    var cmlData=MemoryModule.getCML(proj.id);
     var allMems=[];
+    // Long-term memories from proj.memories (default not starred)
+    for(var mi=0;mi<(proj.memories||[]).length;mi++){
+      var m=proj.memories[mi];
+      allMems.push({id:m.id,content:m.content||m.summary||'',date:m.date||(m.timestamp||'').slice(0,10),type:m.type||'memory',starred:!!m.starred,affectLabel:null,decayFactor:m.decayFactor||1,_layer:'memory',semanticKey:m.semanticKey||''});
+    }
+    // USMs from MemoryModule (starred)
+    var cmlData=MemoryModule.getCML(proj.id);
     if(cmlData){
-      for(var ai=0;ai<(cmlData.aiEmotionalMemories||[]).length;ai++){
-        var a=cmlData.aiEmotionalMemories[ai];
-        allMems.push({id:a.id,content:a.summary||'',date:(a.timestamp||'').slice(0,10),type:'core',starred:!!a.starred,affectLabel:a.aiSelfEval?a.aiSelfEval.label:null,affectIntensity:a.aiSelfEval?a.aiSelfEval.intensity:null,decayFactor:a.decayFactor||1,_layer:'aem'});
-      }
       for(var ui=0;ui<(cmlData.userStarredMemories||[]).length;ui++){
         var u=cmlData.userStarredMemories[ui];
-        allMems.push({id:u.id,content:u.summary||'',date:(u.timestamp||'').slice(0,10),type:'user_starred',starred:true,affectLabel:null,affectIntensity:null,decayFactor:u.decayFactor||1,_layer:'usm'});
+        allMems.push({id:u.id,content:u.summary||'',date:(u.timestamp||'').slice(0,10),type:'user_starred',starred:true,affectLabel:null,decayFactor:u.decayFactor||1,_layer:'usm',status:u.status||'generated',rawDialogue:u.rawDialogue||null,timestamp:u.timestamp||'',retryCount:u.retryCount||0});
       }
     }
     allMems.sort(function(a,b){if(a.starred&&!b.starred)return -1;if(!a.starred&&b.starred)return 1;return b.date.localeCompare(a.date);});
     var chat=getActiveChatObj(); var sids=chat?chat.sharedMemoryIds:[];
-    b.innerHTML='<div style="padding:4px;">'+(allMems.length===0?'<div class="empty-state">no memories in this project yet.</div>':'')+
+    b.innerHTML='<div style="padding:4px;">'+(allMems.length===0?'<div class="empty-state">no memories yet.<br><span style="font-size:10px;color:var(--text-lighter);">long-term memories (every 20 messages) and starred memories appear here</span></div>':'')+
       allMems.map(function(m){
         var isStarred=m.starred||m._layer==='usm';
-        return '<div class="memory-list-item"><span class="memory-star '+(isStarred?'starred':'')+'" onclick="event.stopPropagation();toggleMemoryStar(\''+proj.id+'\',\''+m.id+'\')">★</span><div style="flex:1;"><div class="memory-item-content">'+m.content+(m.affectLabel?' <span class="affect-badge" style="font-size:9px;padding:1px 6px;display:inline-block;">'+m.affectLabel+'</span>':'')+((m.decayFactor||0)<1?' <span style="font-size:9px;color:var(--text-lighter);">decay:'+Math.round((m.decayFactor||0)*100)+'%</span>':'')+'</div><div class="memory-item-meta">'+(m._layer==='usm'?'user_starred':m.type)+' · '+m.date+'</div></div><div class="memory-checkbox '+(sids.includes(m.id)?'checked':'')+'" onclick="event.stopPropagation();toggleMemoryShare(\''+proj.id+'\',\''+m.id+'\')">'+(sids.includes(m.id)?'✓':'')+'</div></div>';
+        var isPending=m.status==='pending';
+        var isFailed=m.status==='failed';
+        var summary=m.content||'';
+        var isLong=summary.length>30;
+        var summaryDisplay=isPending?'生成中...':(isFailed?'生成失败':(isLong?summary.slice(0,30)+'...':summary));
+        // Format timestamp to local time
+        var localTime='';
+        if(m.timestamp){
+          try { var d=new Date(m.timestamp); localTime=d.toLocaleString(); } catch(e){ localTime=m.timestamp.slice(0,19).replace('T',' '); }
+        }
+        // Raw dialogue — same style as core tab USM/AEM
+        var rawHtml='';
+        if(m.rawDialogue&&m.rawDialogue.length>0){
+          rawHtml='<div style="margin-top:4px;padding:4px 8px;background:var(--bg);border-radius:6px;line-height:1.4;">'+m.rawDialogue.map(function(d){ return '<span style="font-size:10px;color:var(--text-lighter);">'+(d.role==='user'?'用户':'AI')+': '+(d.text||'').slice(0,60)+'</span>'; }).join('<br>')+'</div>';
+        }
+        // Retry button for failed
+        var retryHtml=isFailed?'<span style="color:var(--accent);cursor:pointer;font-size:10px;margin-left:8px;" onclick="event.stopPropagation();AppCore.getModule(\'memory\').generateUSM(\''+m.id+'\',JSON.parse(\''+JSON.stringify(m.rawDialogue||[]).replace(/'/g,'\\\'')+'\'))">重试</span>':'';
+        return '<div class="memory-list-item" style="flex-direction:column;align-items:stretch;gap:4px;">'+
+          '<div style="display:flex;align-items:flex-start;gap:8px;">'+
+            '<span class="memory-star '+(isStarred?'starred':'')+'" style="flex-shrink:0;cursor:pointer;" onclick="event.stopPropagation();toggleMemoryStar(\''+proj.id+'\',\''+m.id+'\',\''+m._layer+'\')">★</span>'+
+            '<div style="flex:1;min-width:0;">'+
+              '<div class="memory-item-content" style="cursor:'+(isLong&&!isPending?'pointer':'default')+';'+(isPending||isFailed?'color:var(--text-lighter);':'')+'" onclick="'+(isLong&&!isPending?'var t=this;var full=t.dataset.summary||\'\';if(t.textContent.indexOf(\'...\')>0){if(full){t.textContent=full}else{t.dataset.summary=t.textContent;t.textContent=full}':'')+'">'+summaryDisplay+'</div>'+
+              '<div class="memory-item-meta" style="font-size:10px;color:var(--text-lighter);">'+localTime+(m.semanticKey?' · '+m.semanticKey:'')+retryHtml+'</div>'+
+              rawHtml+
+            '</div>'+
+            '<div class="memory-checkbox '+(sids.includes(m.id)?'checked':'')+'" style="flex-shrink:0;cursor:pointer;" onclick="event.stopPropagation();toggleMemoryShare(\''+proj.id+'\',\''+m.id+'\')">'+(sids.includes(m.id)?'✓':'')+'</div>'+
+          '</div>'+
+        '</div>';
       }).join('')+'</div>';
   }
 }
 
-function toggleMemoryStar(pid,mid){
+function toggleMemoryStar(pid,mid,layer){
   var proj=store.projects.find(function(p){return p.id===pid;}); if(!proj)return;
-  // [v3] Toggle in MemoryModule
-  var cml=MemoryModule.getCML(pid);
-  var found=null;
-  if(cml){
-    for(var i=0;i<(cml.aiEmotionalMemories||[]).length;i++){if(cml.aiEmotionalMemories[i].id===mid){found=cml.aiEmotionalMemories[i];break;}}
-    if(!found){for(var i=0;i<(cml.userStarredMemories||[]).length;i++){if(cml.userStarredMemories[i].id===mid){found=cml.userStarredMemories[i];break;}}}
+
+  // Long-term memory (proj.memories) → upgrade to USM (one-way)
+  if (layer === 'memory') {
+    var foundMem = null;
+    for (var i = 0; i < (proj.memories || []).length; i++) {
+      if (proj.memories[i].id === mid) { foundMem = proj.memories[i]; break; }
+    }
+    if (!foundMem) return;
+    if (foundMem.starred) return; // Already starred, skip
+    // Upgrade to USM
+    var usm = {
+      id: 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
+      timestamp: new Date().toISOString(),
+      sourceChatId: foundMem.sourceChatId || store.activeChat,
+      sourceWindowId: foundMem.sourceChatId || store.activeChat,
+      sourceProjectId: pid,
+      rawDialogue: [],
+      summary: foundMem.content || '',
+      starredMsgIds: [],
+      userNote: ''
+    };
+    MemoryModule.addUSM(pid, usm);
+    // Remove from proj.memories
+    proj.memories.splice(i, 1);
+    checkDeriveInsightsTrigger('usm');
+    AppCore.saveStore();
+    renderMemoryPanelBody();
+    UIModule.toast('★ 升级为星标记忆');
+    return;
   }
-  if(!found)return;
-  var newStarred=!found.starred;
-  MemoryModule.update(pid, mid, {starred: newStarred});
-  if(newStarred){var chat=getActiveChatObjForProject(pid);if(chat&&!chat.sharedMemoryIds.includes(mid))chat.sharedMemoryIds.push(mid);}
-  renderMemoryPanelBody();UIModule.toast(newStarred?'★ 已标记':'已取消星标');
+
+  // USM or AEM: toggle starred state
+  var cml = MemoryModule.getCML(pid);
+  var found = null;
+  if (cml) {
+    for (var i = 0; i < (cml.aiEmotionalMemories || []).length; i++) { if (cml.aiEmotionalMemories[i].id === mid) { found = cml.aiEmotionalMemories[i]; break; } }
+    if (!found) { for (var i = 0; i < (cml.userStarredMemories || []).length; i++) { if (cml.userStarredMemories[i].id === mid) { found = cml.userStarredMemories[i]; break; } } }
+  }
+  if (!found) return;
+  var newStarred = !found.starred;
+  MemoryModule.update(pid, mid, { starred: newStarred });
+  if (newStarred) { var chat = getActiveChatObjForProject(pid); if (chat && !chat.sharedMemoryIds.includes(mid)) chat.sharedMemoryIds.push(mid); }
+  renderMemoryPanelBody();
+  UIModule.toast(newStarred ? '★ 已标记' : '已取消星标');
 }
 function toggleMemoryShare(pid,mid){
   const chat=getActiveChatObjForProject(pid); if(!chat)return;
@@ -2347,8 +2429,6 @@ async function executeBatchStar() { ChatModule.executeBatchStar(); }
 
 async function createUserStarredMemory(selectedMsgIds) { return ChatModule.createUserStarredMemory(selectedMsgIds); }
 
-async function generateStarredMemorySummary(rawDialogue, retries) { return ChatModule.generateStarredMemorySummary(rawDialogue, retries); }
-
 
 // ==================== MEMORY REPAIR FUNCTIONS (v2.2) ====================
 async function regenerateAEM(entryId) { ChatModule.regenerateAEM(entryId); }
@@ -2434,10 +2514,6 @@ function deleteDraftBubble() {
 
 async function sendMessage(){
   ChatModule.sendMessage();
-}
-
-function maybeAddMemory(ut,at){
-  return ChatModule.maybeAddMemory(ut, at);
 }
 
 // AI notices diary updates and leaves comments

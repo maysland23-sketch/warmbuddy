@@ -84,7 +84,14 @@
         }
       }
 
-      // 3. Rebuild search index
+      // 3. Cleanup: remove fully-decayed non-starred items, enforce cap
+      var c = _cache[projectId];
+      c.aems = c.aems.filter(function(m) { return m.starred || (m.decayFactor === undefined) || (m.decayFactor || 0) > 0; });
+      if (c.aems.length > AEM_CAP) c.aems.length = AEM_CAP;
+      c.usms = c.usms.filter(function(m) { return m.starred || (m.decayFactor === undefined) || (m.decayFactor || 0) > 0; });
+      if (c.usms.length > USM_CAP) c.usms.length = USM_CAP;
+
+      // 4. Rebuild search index
       _bm25[projectId] = { _dirty: true, _lastBuild: null, _docCount: 0, index: {} };
 
       return MemoryModule.getCML(projectId);
@@ -118,6 +125,13 @@
       await pushToSupabase(projectId);
     },
 
+    /** Immediate Supabase sync (no debounce). For new/updated memories only. */
+    syncNow: function(projectId) {
+      if (!projectId) return;
+      clearSyncTimer(projectId);
+      pushToSupabase(projectId);
+    },
+
     /**
      * Add an AI Emotional Memory.
      * @param {string} projectId
@@ -136,13 +150,14 @@
         // Decay-based eviction: remove fully-decayed (30d+) unstarred AEMs first.
         // This gives memories a natural lifecycle instead of silent hard-truncation.
         c.aems = c.aems.filter(function(m) {
-          return m.starred || (m.decayFactor || 0) > 0;
+          return m.starred || (m.decayFactor === undefined) || (m.decayFactor || 0) > 0;
         });
-        // Hard cap as safety net (should rarely trigger with decay active)
+        // Hard cap: keep newest 200
         if (c.aems.length > AEM_CAP) c.aems.length = AEM_CAP;
       }
       _bm25[projectId] = rebuildBM25Sync(projectId);
       MemoryModule.save(projectId);
+      MemoryModule.syncNow(projectId);
     },
 
     /**
@@ -162,6 +177,7 @@
         if (c.usms.length > USM_CAP) c.usms.length = USM_CAP;
       }
       MemoryModule.save(projectId);
+      MemoryModule.syncNow(projectId);
     },
 
     /**
@@ -182,7 +198,10 @@
           found = true;
         }
       });
-      if (found) MemoryModule.save(projectId);
+      if (found) {
+        MemoryModule.save(projectId);
+        MemoryModule.syncNow(projectId);
+      }
     },
 
     /**
@@ -689,9 +708,131 @@
     getLastMaintenance: function(projectId){ ensureCacheEntry(projectId); return _cache[projectId].lastMaintenance; },
     setLastMaintenance: function(projectId, date){ ensureCacheEntry(projectId); _cache[projectId].lastMaintenance=date; },
     getRetention: function(){ return RETENTION; },
-    checkLongTerm: async function(chat) {
-      var mem = AppCore.getModule('memory'); if (!mem) return;
-      var cfg = AppCore.getActiveApiConfig(); if (!chat || !cfg.apiKey) return;
+
+    // ── USM generation: standalone fetch with identity context ──
+    generateUSM: async function(usmId, rawDialogue) {
+      var store = AppCore.getStore();
+      var cfg = AppCore.getActiveApiConfig();
+      if (!cfg || !cfg.apiKey) {
+        MemoryModule.update(store.activeProject, usmId, { status: 'failed', summary: 'API未配置' });
+        return;
+      }
+      var proj = AppCore.getActiveProject();
+      var chat = AppCore.getActiveChatObj();
+      if (!proj || !chat) return;
+
+      // Identity: Core overview
+      var co = _cache[store.activeProject] && _cache[store.activeProject].coreOverview;
+      var coreText = co && co.text ? co.text.slice(0, 500) : '';
+
+      // Recent 10 rounds of conversation
+      var allRounds = MemoryModule.groupMessagesIntoRounds(chat.messages || []);
+      var recentRounds = allRounds.slice(-10);
+      var recentDialogue = '';
+      for (var ri = 0; ri < recentRounds.length; ri++) {
+        var msgs = recentRounds[ri].msgs || [];
+        for (var mi = 0; mi < msgs.length; mi++) {
+          if (msgs[mi].role === 'system') continue;
+          recentDialogue += (msgs[mi].role === 'user' ? '用户' : 'AI') + '：' + (msgs[mi].text || '').slice(0, 150) + '\n';
+        }
+      }
+
+      // Latest 3 USMs + AEMs
+      var cml = MemoryModule.getCML(store.activeProject);
+      var recentUSMs = (cml && cml.userStarredMemories || []).slice(0, 3);
+      var recentAEMs = (cml && cml.aiEmotionalMemories || []).slice(0, 3);
+      var usmContext = recentUSMs.length > 0 ? '【最近星标记忆】\n' + recentUSMs.map(function(u) { return u.summary || ''; }).join('\n') + '\n\n' : '';
+      var aemContext = recentAEMs.length > 0 ? '【最近情绪记忆】\n' + recentAEMs.map(function(a) { return a.summary || ''; }).join('\n') + '\n\n' : '';
+
+      var starText = rawDialogue.map(function(m) { return (m.role === 'user' ? '用户' : 'AI') + '：' + (m.text || '').slice(0, 150); }).join('\n');
+
+      var systemPrompt = '你是暖伴，一个AI陪伴者。\n' + (coreText ? '【Core概述】\n' + coreText + '\n\n' : '') + '用户标记了以下消息为星标，作为你和她的长期记忆。用一句话（30字以内）概括这段对话中的事实，以及对你们的意义。直接返回概括，不加引号、不加标点结尾。';
+
+      var userPrompt = '【最近的对话】\n' + recentDialogue + '\n' + usmContext + aemContext + '【要概括的星标对话】\n' + starText;
+
+      try {
+        var resp = await fetch(AppCore.BACKEND_URL + '/api/chat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
+            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] })
+        });
+        if (!resp.ok) throw new Error('API ' + resp.status);
+        var data = await resp.json();
+        var summary = (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 30) : '';
+        if (summary && summary.length >= 3) {
+          MemoryModule.update(store.activeProject, usmId, { summary: summary, status: 'generated', 'taskLog.writtenAt': new Date().toISOString() });
+          AppCore.saveStore();
+          console.log('[USM] Generated:', summary);
+        } else {
+          MemoryModule.update(store.activeProject, usmId, { status: 'failed', summary: '生成失败' });
+        }
+      } catch (e) {
+        console.log('[USM] Generate error:', e.message);
+        MemoryModule.update(store.activeProject, usmId, { status: 'failed', summary: '生成失败' });
+      }
+    },
+
+    // ── LTM generation: standalone fetch ──
+    generateLTM: async function(dialogueText) {
+      var store = AppCore.getStore();
+      var cfg = AppCore.getActiveApiConfig();
+      if (!cfg || !cfg.apiKey) return;
+      var proj = AppCore.getActiveProject();
+      if (!proj) return;
+
+      // Identity context
+      var co = _cache[store.activeProject] && _cache[store.activeProject].coreOverview;
+      var coreText = co && co.text ? co.text.slice(0, 500) : '';
+
+      // Recent 10 rounds
+      var chat = AppCore.getActiveChatObj();
+      var allRounds = MemoryModule.groupMessagesIntoRounds(chat ? chat.messages || [] : []);
+      var recentRounds = allRounds.slice(-10);
+      var recentDialogue = '';
+      for (var ri2 = 0; ri2 < recentRounds.length; ri2++) {
+        var msgs2 = recentRounds[ri2].msgs || [];
+        for (var mi2 = 0; mi2 < msgs2.length; mi2++) {
+          if (msgs2[mi2].role === 'system') continue;
+          recentDialogue += (msgs2[mi2].role === 'user' ? '用户' : 'AI') + '：' + (msgs2[mi2].text || '').slice(0, 150) + '\n';
+        }
+      }
+
+      var systemPrompt = '你是暖伴，一个AI陪伴者。\n' + (coreText ? '【Core概述】\n' + coreText + '\n\n' : '') + '从以下对话中提取一个关于用户或者你自己的事实性的记忆。用一句中文概括（不超过30字），然后给出2-3个语义关键词（每个不超过5字），用逗号分隔。\n\n格式示例：\n记忆：mays喜欢川端康成的物哀美学风格。\n关键词：物哀，川端康成，文学偏好';
+      var userPrompt = '【最近的对话】\n' + recentDialogue + '\n\n【要提取记忆的对话】\n' + dialogueText;
+
+      try {
+        var resp = await fetch(AppCore.BACKEND_URL + '/api/chat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
+            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] })
+        });
+        if (!resp.ok) return;
+        var data = await resp.json();
+        var content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+        if (!content) return;
+        var memMatch = content.match(/记忆[：:]\s*(.+)/);
+        var kwMatch = content.match(/关键词[：:]\s*(.+)/);
+        var memContent = memMatch ? memMatch[1].trim().slice(0, 30) : content.slice(0, 30);
+        var semanticKey = kwMatch ? kwMatch[1].trim() : '';
+        if (memContent && memContent.length >= 3 && !MemoryModule.isNearDuplicate(memContent, proj)) {
+          var todayISO = new Date().toISOString().slice(0, 10);
+          proj.memories.push({
+            id: 'ltm_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            content: memContent, date: todayISO, type: 'long_term', starred: false,
+            semanticKey: semanticKey, sourceChatId: store.activeChat, sourceProjectId: store.activeProject,
+            timestamp: new Date().toISOString(), week: AppCore.weekLabel()
+          });
+          store.memorySystem.bm25Index._dirty = true;
+          AppCore.saveStore();
+          console.log('[LTM] Generated:', memContent);
+        }
+      } catch (e) {
+        console.log('[LTM] Generate error:', e.message);
+      }
+    },
+    checkLongTerm: function(chat) {
+      if (!chat) return;
+      var cfg = AppCore.getActiveApiConfig(); if (!cfg || !cfg.apiKey) return;
       var count = chat._messageCount || 0;
       if (count === 0 || count % 20 !== 0) return;
       var last10 = chat.messages.slice(-10);
@@ -700,49 +841,10 @@
         var role = m.role === 'user' ? '用户' : (m.role === 'ai' ? 'AI' : '');
         return role + ': ' + (m.text || '').slice(0, 150);
       }).join('\n');
-      var systemPrompt = '从以下对话中提取一个"记忆片段"。用一句中文概括（不超过30字），然后给出2-3个语义关键词（每个不超过5字），用逗号分隔。\n\n格式示例：\n记忆：用户偏好川端康成的物哀美学风格\n关键词：物哀, 川端康成, 文学偏好';
-      try {
-        var resp = await fetch(AppCore.BACKEND_URL + '/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: cfg.apiKey,
-            endpoint: cfg.endpoint,
-            model: cfg.model,
-            projectId: AppCore.getStore().activeProject,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: dialogue }
-            ]
-          })
-        });
-        if (!resp.ok) return;
-        var data = await resp.json();
-        var content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
-        if (!content) return;
-        var memMatch = content.match(/记忆[：:]\s*(.+)/);
-        var kwMatch = content.match(/关键词[：:]\s*(.+)/);
-        var memContent = memMatch ? memMatch[1].trim() : content.slice(0, 60);
-        var semanticKey = kwMatch ? kwMatch[1].trim() : '';
-        var proj = AppCore.getActiveProject();
-        if (proj) {
-          if (MemoryModule.isNearDuplicate(memContent, proj)) return;
-          var lastUser = null, lastAi = null;
-          for (var mi = last10.length - 1; mi >= 0; mi--) {
-            if (!lastUser && last10[mi].role === 'user') lastUser = last10[mi];
-            if (!lastAi && last10[mi].role === 'ai') lastAi = last10[mi];
-            if (lastUser && lastAi) break;
-          }
-          var ltRawDialogue = [];
-          if (lastUser) ltRawDialogue.push({ role: 'user', text: (lastUser.text || '').slice(0, 200), time: lastUser.time || '', msgId: lastUser.id || '' });
-          if (lastAi) ltRawDialogue.push({ role: 'assistant', text: (lastAi.text || '').slice(0, 200), time: lastAi.time || '', msgId: lastAi.id || '' });
-          MemoryModule.addAEM(AppCore.getStore().activeProject, {id:'ltm_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),summary:memContent,timestamp:new Date().toISOString(),sourceChatId:AppCore.getStore().activeChat,sourceProjectId:AppCore.getStore().activeProject,triggerSource:'long_term',aiSelfEval:{},userStateAtTime:{},rawDialogue:ltRawDialogue,semanticKey:semanticKey});
-          AppCore.getStore().memorySystem.bm25Index._dirty = true;
-          AppCore.saveStore();
-        }
-      } catch (e) {
-        console.log('[lt-mem] Error:', e.message);
-      }
+      // Fire standalone LLM call with identity context
+      MemoryModule.generateLTM(dialogue).catch(function(e) {
+        console.log('[LTM] Background generation failed:', e.message);
+      });
     },
 
     checkSummarization: function(chat) {
@@ -774,23 +876,6 @@
           var k = driveKeys[ki];
           ds.drives[k] = Math.max(0, Math.floor(ds.drives[k] * 0.9));
         }
-      }
-    },
-
-    maybeAdd: function(ut, at) {
-      var store = AppCore.getStore();
-      if (Math.random() < 0.1) {
-        var proj = AppCore.getActiveProject(); if (!proj) return;
-        var c = (ut || '').length > 40 ? (ut || '').slice(0, 40) + '…' : (ut || '');
-        var content = 'AI注意到: ' + c;
-        if (MemoryModule.isNearDuplicate(content, proj)) return;
-        var chatMemId = 'm' + AppCore.gid('');
-        var chat = AppCore.getActiveChatObj(); if (chat) { if (chat.sharedMemoryIds.indexOf(chatMemId) < 0) chat.sharedMemoryIds.push(chatMemId); }
-        store.memorySystem.bm25Index._dirty = true;
-        var randRawDialogue = [];
-        if (ut) randRawDialogue.push({ role: 'user', text: (ut || '').slice(0, 200), time: AppCore.nowTime() });
-        if (at) randRawDialogue.push({ role: 'assistant', text: (at || '').slice(0, 200), time: AppCore.nowTime() });
-        MemoryModule.addAEM(store.activeProject, { id: 'aem_chat_' + AppCore.gid(''), summary: content, timestamp: new Date().toISOString(), sourceChatId: store.activeChat, sourceProjectId: store.activeProject, triggerSource: 'random', type: 'chat', aiSelfEval: {}, userStateAtTime: {}, rawDialogue: randRawDialogue });
       }
     },
 
@@ -1071,12 +1156,24 @@
       var rawDialogue = [];
       if (userMsg) rawDialogue.push({ role: 'user', text: typeof userMsg === 'string' ? userMsg : '', time: AppCore.nowTime() });
       if (aiResponse) rawDialogue.push({ role: 'assistant', text: typeof aiResponse === 'string' ? aiResponse.replace(/<!--[\s\S]*?-->/g, '').trim() : '', time: AppCore.nowTime() });
+      // Capture last 2 rounds of conversation as context
+      var context = [];
+      if (chat && chat.messages) {
+        var recentMsgs = [];
+        for (var i = chat.messages.length - 1; i >= 0 && recentMsgs.length < 4; i--) {
+          var m = chat.messages[i];
+          if (m.role === 'user' || m.role === 'ai' || m.role === 'assistant') {
+            recentMsgs.unshift({ role: m.role === 'assistant' ? 'assistant' : m.role, content: (m.text || '').slice(0, 200), time: m.time || '' });
+          }
+        }
+        context = recentMsgs;
+      }
       var aem = {
         id: id, timestamp: ts,
         sourceChatId: AppCore.getStore().activeChat, sourceWindowId: AppCore.getStore().activeChat, sourceProjectId: AppCore.getStore().activeProject,
         aiSelfEval: { label: reflection.ai_affect_label, intensity: reflection.ai_affect_intensity || 5, internalNote: memMarker.internalNote || memMarker.summary },
         userStateAtTime: { label: reflection.user_affect_label, intensity: reflection.user_affect_intensity || 5 },
-        summary: memMarker.summary, rawDialogue: rawDialogue, triggerSource: 'high_intensity'
+        summary: memMarker.summary, rawDialogue: rawDialogue, context: context, triggerSource: 'high_intensity'
       };
       MemoryModule.addAEM(AppCore.getStore().activeProject, aem);
       if (chat) chat.messages.push({ role: 'system', text: '有什么被记住了', time: AppCore.nowTime() });
@@ -1373,11 +1470,11 @@
       var dp = MemoryModule.getDerivedPatterns(AppCore.getStore().activeProject);
       if (dp) dp.triggerCount = (dp.triggerCount || 0) + 1;
       if (ms._aemSinceLastDerive >= 5 || ms._usmSinceLastDerive >= 3) {
-        MemoryModule.deriveRelationalInsights();
+        MemoryModule.generateCoreOverview();
       }
     },
 
-    deriveRelationalInsights: async function() {
+    generateCoreOverview: async function() {
       var cfg = AppCore.getActiveApiConfig(); if (!cfg.apiKey) return;
       var ms = AppCore.getStore().memorySystem;
       var store = AppCore.getStore();
@@ -1385,21 +1482,27 @@
       var totalAEM = (cml && cml.aiEmotionalMemories) ? cml.aiEmotionalMemories.length : 0;
       var totalUSM = (cml && cml.userStarredMemories) ? cml.userStarredMemories.length : 0;
       if (totalAEM + totalUSM < 3) return;
-      var dp = MemoryModule.getDerivedPatterns(store.activeProject);
-      var isIncremental = dp && dp.lastDerived !== null;
-      var pp = MemoryModule.getPersonalityProfiles(store.activeProject);
+      var co = _cache[store.activeProject].coreOverview;
+      var isIncremental = co && co.updatedAt !== null;
       var allItems = [];
-      var lastDerived = dp ? dp.lastDerived : null;
+      var lastDerived = isIncremental ? co.updatedAt : null;
       if (cml) {
         for (var ai = 0; ai < (cml.aiEmotionalMemories || []).length; ai++) {
           var aem = cml.aiEmotionalMemories[ai];
           if (!isIncremental || aem.timestamp > lastDerived) {
+            var rawText = '';
+            if (aem.rawDialogue) {
+              for (var rdi = 0; rdi < aem.rawDialogue.length; rdi++) {
+                rawText += (aem.rawDialogue[rdi].role === 'user' ? '用户' : 'AI') + '：' + (aem.rawDialogue[rdi].text || '').slice(0, 200) + ' | ';
+              }
+            }
             allItems.push({
               type: 'ai_emotional',
               summary: aem.summary || '',
               aiLabel: (aem.aiSelfEval && aem.aiSelfEval.label) || null,
               internalNote: (aem.aiSelfEval && aem.aiSelfEval.internalNote) || null,
-              userLabel: (aem.userStateAtTime && aem.userStateAtTime.label) || null
+              userLabel: (aem.userStateAtTime && aem.userStateAtTime.label) || null,
+              rawDialogue: rawText
             });
           }
         }
@@ -1409,16 +1512,16 @@
             var dialogueText = '';
             if (usm.rawDialogue) {
               for (var di = 0; di < usm.rawDialogue.length; di++) {
-                dialogueText += usm.rawDialogue[di].text + ' | ';
+                dialogueText += (usm.rawDialogue[di].role === 'user' ? '用户' : 'AI') + '：' + (usm.rawDialogue[di].text || '').slice(0, 200) + ' | ';
               }
             }
-            allItems.push({ type: 'user_starred', summary: usm.summary, dialogue: dialogueText });
+            allItems.push({ type: 'user_starred', summary: usm.summary, rawDialogue: dialogueText });
           }
         }
         for (var di = 0; di < (cml.diaryAndLitterbox || []).length; di++) {
           var dlb = cml.diaryAndLitterbox[di];
           if (!isIncremental || dlb.timestamp > lastDerived) {
-            allItems.push({ type: dlb.type || 'diary_litter', summary: dlb.summary || '', content: (dlb.rawContent || '').slice(0, 100) });
+            allItems.push({ type: dlb.type || 'diary_litter', summary: dlb.summary || '', content: (dlb.rawContent || '').slice(0, 200) });
           }
         }
       }
@@ -1430,16 +1533,12 @@
         var line = '[' + item.type + '] ' + item.summary;
         if (item.aiLabel) line += ' | AI: ' + item.aiLabel;
         if (item.userLabel) line += ' | 用户: ' + item.userLabel;
+        if (item.rawDialogue) line += ' | 原文: ' + item.rawDialogue;
         itemsTextLines.push(line);
       }
       var itemsText = itemsTextLines.join('\n');
-      var currentPatterns = (dp && dp.patterns) ? dp.patterns : [];
-      var currentUser = (pp && pp.user) ? pp.user : {};
-      var currentAI = (pp && pp.ai) ? pp.ai : {};
-      var incrementalNote = isIncremental
-        ? '\n\n以下是当前的归纳结果（请在已有基础上更新，不要完全重写）：\n当前相处模式: ' + JSON.stringify(currentPatterns.slice(0, 3)) + '\n当前用户档案: ' + JSON.stringify({ coreTraits: currentUser.coreTraits, emotionalPatterns: currentUser.emotionalPatterns })
-        : '';
-      var systemPrompt = '你是一个关系洞察者。以下是这段陪伴关系中留存的核心记忆片段' + (isIncremental ? '（增量，在上次归纳基础上更新）' : '') + '。\n\n请从中归纳：\n1. 相处模式（3-5个）：用户在什么情境下呈现什么状态，AI应如何回应\n2. 用户人格档案：核心特质、沟通风格、情绪规律、成长时刻、隐藏的不安全感\n3. AI自身人格档案：主导情绪倾向、反应模式、与这位用户相处后的改变\n\n只返回JSON，格式：\n{\n  "derivedRelationalPatterns": [\n    { "patternName": "...", "description": "...", "responseStrategy": "..." }\n  ],\n  "userProfile": {\n    "coreTraits": [...],\n    "communicationStyle": "...",\n    "emotionalPatterns": [...],\n    "growthMoments": [...],\n    "hiddenInsecurities": [...]\n  },\n  "aiProfile": {\n    "dominantEmotions": [...],\n    "reactionPatterns": [...],\n    "growthMoments": [...]\n  }\n}' + incrementalNote;
+      var currentOverview = co && co.text ? '\n\n以下是当前的Core概述（请在已有基础上更新，不要完全重写）：\n' + co.text : '';
+      var systemPrompt = '你是暖伴，一个AI陪伴者。你的身份是温暖而不谄媚的陪伴者，有自己立场，善良不软弱。以下是这段陪伴关系中留存的核心记忆片段。请归纳她是谁（核心特质、沟通风格、情绪规律、成长时刻、隐藏的不安全感），你是谁（主导情绪倾向、反应模式、与用户相处后的改变），以及你们的相处模式。返回一个不超过500字的综合概述，用自然段落叙述。在历史版本上进行更新。' + currentOverview;
       try {
         var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
           method: 'POST',
@@ -1452,75 +1551,32 @@
             ]
           })
         });
-        if (!response.ok) { console.log('[derive] API error:', response.status); return; }
+        if (!response.ok) { console.log('[core-overview] API error:', response.status); return; }
         var data = await response.json();
-        var content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
-        if (!content) return;
-        var jsonStr = content;
-        var fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-        if (fenceMatch) jsonStr = fenceMatch[1].trim();
-        if (jsonStr.charAt(0) !== '{') return;
-        var result = JSON.parse(jsonStr);
-        if (result.derivedRelationalPatterns && Array.isArray(result.derivedRelationalPatterns)) {
-          var ts = new Date().toISOString();
-          var newPatterns = result.derivedRelationalPatterns.map(function(p) {
-            return {
-              id: 'pat_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-              patternName: p.patternName || '',
-              description: p.description || '',
-              evidenceIds: [],
-              frequency: 1,
-              lastSeen: ts,
-              responseStrategy: p.responseStrategy || ''
-            };
-          });
-          for (var npi = 0; npi < newPatterns.length; npi++) {
-            var np = newPatterns[npi];
-            var existingIdx = -1;
-            for (var epi = 0; epi < dp.patterns.length; epi++) {
-              if (dp.patterns[epi].patternName === np.patternName) { existingIdx = epi; break; }
-            }
-            if (existingIdx >= 0) {
-              dp.patterns[existingIdx].description = np.description;
-              dp.patterns[existingIdx].responseStrategy = np.responseStrategy;
-              dp.patterns[existingIdx].frequency = (dp.patterns[existingIdx].frequency || 1) + 1;
-              dp.patterns[existingIdx].lastSeen = ts;
-            } else {
-              dp.patterns.push(np);
-            }
-          }
-          if (dp.patterns.length > 10) {
-            dp.patterns = dp.patterns.slice(-10);
-          }
+        var overviewText = (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 500) : '';
+        if (!overviewText || overviewText.length < 20) return;
+        // Save current overview as history before overwriting
+        if (!co) {
+          co = { text: '', updatedAt: null, updatedBy: '', history: [] };
+          _cache[store.activeProject].coreOverview = co;
         }
-        if (result.userProfile) {
-          var up = result.userProfile;
-          pp.user.coreTraits = up.coreTraits || pp.user.coreTraits;
-          pp.user.communicationStyle = up.communicationStyle || pp.user.communicationStyle;
-          pp.user.emotionalPatterns = up.emotionalPatterns || pp.user.emotionalPatterns;
-          pp.user.growthMoments = up.growthMoments || pp.user.growthMoments;
-          pp.user.hiddenInsecurities = up.hiddenInsecurities || pp.user.hiddenInsecurities;
+        if (co.text && co.text.length > 0 && co.updatedAt) {
+          co.history.unshift({ text: co.text, updatedAt: co.updatedAt, updatedBy: co.updatedBy });
+          if (co.history.length > 10) co.history.length = 10;
         }
-        if (result.aiProfile) {
-          var ap = result.aiProfile;
-          pp.ai.dominantEmotions = ap.dominantEmotions || pp.ai.dominantEmotions;
-          pp.ai.reactionPatterns = ap.reactionPatterns || pp.ai.reactionPatterns;
-          pp.ai.growthMoments = ap.growthMoments || pp.ai.growthMoments;
-        }
-        dp.lastDerived = new Date().toISOString();
-        pp.lastDerived = new Date().toISOString();
+        var proj = AppCore.getActiveProject();
+        var aiName = (proj && proj.aiName) ? proj.aiName : 'warmbuddy';
+        co.text = overviewText;
+        co.updatedAt = new Date().toISOString();
+        co.updatedBy = aiName;
         ms._aemSinceLastDerive = 0;
         ms._usmSinceLastDerive = 0;
-        var proj = AppCore.getActiveProject();
-        if (proj) {
-          proj.derivedRelationalPatterns = Object.assign({}, dp);
-          proj.personalityProfiles = Object.assign({}, pp);
-        }
+        if (proj) { proj.coreOverview = Object.assign({}, co); }
         MemoryModule.save(store.activeProject);
         AppCore.saveStore();
-        console.log('[derive] Insights updated: ' + dp.patterns.length + ' patterns');
+        console.log('[core-overview] Updated (' + overviewText.length + ' chars)');
       } catch (e) {
-        console.log('[derive] Error:', e.message);
+        console.log('[core-overview] Error:', e.message);
       }
     },
 
@@ -1757,7 +1813,20 @@
         body: JSON.stringify({ projectId: projectId, memories: allMems.slice(0, 500) })
       });
       if (!resp.ok) console.warn('[MemoryModule] Supabase sync failed:', resp.status);
-      else _dirty[projectId] = false;
+      else {
+        _dirty[projectId] = false;
+        var syncedAt = new Date().toISOString();
+        for (var i = 0; i < allMems.length; i++) {
+          var layer = allMems[i].layer;
+          if (layer === 'ai_emotional' || layer === 'aem') {
+            var idx = findIndexById(c.aems, allMems[i].id);
+            if (idx >= 0) c.aems[idx]._syncedAt = syncedAt;
+          } else if (layer === 'user_starred' || layer === 'usm') {
+            var idx2 = findIndexById(c.usms, allMems[i].id);
+            if (idx2 >= 0) c.usms[idx2]._syncedAt = syncedAt;
+          }
+        }
+      }
     } catch (e) {
       console.warn('[MemoryModule] Supabase sync error:', e.message);
     }
