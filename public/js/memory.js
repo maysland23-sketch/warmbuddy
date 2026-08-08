@@ -666,7 +666,7 @@
 
     // ── Runtime State (formerly store.memorySystem) ──
     getRelationalPortrait: function(projectId){ ensureCacheEntry(projectId); return _cache[projectId].relationalPortrait; },
-    updateRelationalPortrait: function(projectId, data){ ensureCacheEntry(projectId); Object.assign(_cache[projectId].relationalPortrait, data); },
+    setRelationalPortrait: function(projectId, data){ ensureCacheEntry(projectId); Object.assign(_cache[projectId].relationalPortrait, data); },
     getReflections: function(projectId){ ensureCacheEntry(projectId); return _cache[projectId].reflections; },
     addReflection: function(projectId, entry){ ensureCacheEntry(projectId); var r=_cache[projectId].reflections; r.unshift(entry); if(r.length>REFLECTION_MAX)r.length=REFLECTION_MAX; },
     getAffectGraph: function(projectId){ ensureCacheEntry(projectId); return _cache[projectId].affectGraph; },

@@ -4,3 +4,4 @@ firebase-key.json
 google-services.json
 *.apk
 
+.claude/worktrees/

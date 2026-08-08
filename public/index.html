@@ -2384,41 +2384,23 @@ function parseAIBubbles(rawText) { return ChatModule.parseAIBubbles(rawText); }
 
 async function displayAIBubbles(bubbles, chat, startTime) { ChatModule.displayAIBubbles(bubbles, chat, startTime); }
 
-async function triggerAIResponse(chat, userText, diaryIntent) {
-  return ChatModule.triggerAIResponse(chat, userText, diaryIntent);
-}
+async function triggerAIResponse(chat, userText, diaryIntent) { var m = AppCore.getModule('chat'); if (m && m.triggerAIResponse) return m.triggerAIResponse(chat, userText, diaryIntent); }
 
 // ── Multi-bubble draft management ──
-function stageDraftBubble() {
-  ChatModule.stageDraftBubble();
-}
+function stageDraftBubble() { var m = AppCore.getModule('chat'); if (m && m.stageDraftBubble) m.stageDraftBubble(); }
 
-function renderDraftBubbles() {
-  ChatModule.renderDraftBubbles();
-}
+function renderDraftBubbles() { var m = AppCore.getModule('chat'); if (m && m.renderDraftBubbles) m.renderDraftBubbles(); }
 
-function updateSendButtonState() {
-  ChatModule.updateSendButtonState();
-}
+function updateSendButtonState() { var m = AppCore.getModule('chat'); if (m && m.updateSendButtonState) m.updateSendButtonState(); }
 
 // ── More menu toggle ──
-function toggleMoreMenu(){
-  ChatModule.toggleMoreMenu();
-}
-function closeMoreMenuOnClick(e){
-  ChatModule.closeMoreMenuOnClick(e);
-}
-function closeMoreMenu(){
-  ChatModule.closeMoreMenu();
-}
+function toggleMoreMenu(){ var m = AppCore.getModule('chat'); if (m && m.toggleMoreMenu) m.toggleMoreMenu(); }
+function closeMoreMenuOnClick(e){ var m = AppCore.getModule('chat'); if (m && m.closeMoreMenuOnClick) m.closeMoreMenuOnClick(e); }
+function closeMoreMenu(){ var m = AppCore.getModule('chat'); if (m && m.closeMoreMenu) m.closeMoreMenu(); }
 
 // ── Status settings (replaces old poke settings) ──
-function openPokeSettings(){
-  ChatModule.openPokeSettings();
-}
-function savePokeSettings(){
-  ChatModule.savePokeSettings();
-}
+function openPokeSettings(){ var m = AppCore.getModule('chat'); if (m && m.openPokeSettings) m.openPokeSettings(); }
+function savePokeSettings(){ var m = AppCore.getModule('chat'); if (m && m.savePokeSettings) m.savePokeSettings(); }
 
 // ── Double-click AI avatar → poke (displays AI status) ──
 function handleAIAvatarDblClick(){
