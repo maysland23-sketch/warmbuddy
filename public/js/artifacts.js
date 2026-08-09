@@ -113,48 +113,87 @@ var ArtifactsModule = (function() {
   }
 
   // ═══════════════════════════════════════════
-  //  Public: extract artifacts from AI response
+  //  Private: build artifact card HTML (safe, pre-built)
+  // ═══════════════════════════════════════════
+
+  function buildCardHtml(artifact) {
+    if (artifact.type === 'html') {
+      var displayName = AppCore.escapeHtml(artifact.name || 'HTML Card');
+      var sizeText = artifact.size > 1024 ? (artifact.size / 1024).toFixed(1) + ' KB' : artifact.size + ' B';
+      // Minimal document-outline SVG icon (white, 20×20 viewport)
+      var iconSvg = '<svg width="22" height="22" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M5.5 1.5H13L17.5 6V18.5H5.5V1.5Z" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<path d="M13 1.5V6H17.5" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<line x1="8" y1="10.5" x2="15" y2="10.5" stroke="white" stroke-width="1.2" stroke-linecap="round"/>' +
+        '<line x1="8" y1="13.5" x2="15" y2="13.5" stroke="white" stroke-width="1.2" stroke-linecap="round"/>' +
+        '<line x1="8" y1="16.5" x2="12" y2="16.5" stroke="white" stroke-width="1.2" stroke-linecap="round"/>' +
+        '</svg>';
+      return '<div class="artifact-card-inline" data-action="openArtifactById" data-args="' + artifact.id + '">' +
+        '<div class="artifact-card-icon">' + iconSvg + '</div>' +
+        '<div class="artifact-card-info">' +
+          '<div class="artifact-card-title" title="' + displayName + '">' + displayName + '</div>' +
+          '<div class="artifact-card-meta">HTML · ' + sizeText + '</div>' +
+        '</div>' +
+        '</div>';
+    }
+    return '';
+  }
+
+  // ═══════════════════════════════════════════
+  //  Public: extract artifact markers → store artifacts + return placeholder-text
+  //  Called at RENDER time (plan B). Uses ◙ART_n◙ placeholders that survive
+  //  sanitizeDisplayText / escapeHtml, then replaced with card HTML afterwards.
   // ═══════════════════════════════════════════
 
   function extractFromText(text) {
-    var artifacts = [];
+    var cardMap = [];
     var chat = AppCore.getActiveChatObj();
-    if (!chat) return { text: text, artifacts: artifacts };
+    if (!chat) return { text: text, cards: [] };
     if (!chat.artifacts) chat.artifacts = [];
+
     var regex = /<!--ARTIFACT_START:(html|file):(.*?)-->([\s\S]*?)<!--ARTIFACT_END-->/g;
+
+    // First pass: find-or-create artifacts
+    var matches = [];
     var match;
     while ((match = regex.exec(text)) !== null) {
       var type = match[1];
       var name = match[2].trim();
       var content = match[3].trim();
-      var id = 'art_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-      var artifact = {
-        id: id, type: type, name: name,
-        mimeType: type === 'html' ? 'text/html' : 'application/octet-stream',
-        content: content,
-        size: new Blob([content]).size,
-        source: 'ai',
-        sourceMsgId: null,
-        createdAt: new Date().toISOString()
-      };
-      chat.artifacts.push(artifact);
-      artifacts.push(artifact);
-    }
-    var cleanedText = text.replace(regex, function(fullMatch, type, name, content) {
-      var art = artifacts.shift();
-      if (!art) return '';
-      if (type === 'html') {
-        var safeContent = content.replace(/"/g, '&quot;');
-        return '<div class="artifact-card-inline" data-action="openArtifactById" data-args="' + art.id + '" style="margin:8px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:pointer;background:var(--bg);">' +
-          '<iframe srcdoc="' + safeContent + '" sandbox="allow-scripts" style="width:100%;height:150px;border:none;pointer-events:none;" scrolling="no"></iframe>' +
-          '<div style="padding:6px 10px;font-size:11px;color:var(--text-light);display:flex;justify-content:space-between;align-items:center;">' +
-          '<span>📄 ' + AppCore.escapeHtml(name || 'HTML Card') + '</span><span style="color:var(--accent);font-size:10px;">点击放大</span>' +
-          '</div></div>';
+      // Try to find existing artifact by matching content (idempotent)
+      var existing = chat.artifacts.find(function(a) {
+        return a.type === type && a.name === name && a.content.trim() === content;
+      });
+      if (existing) {
+        matches.push(existing);
+      } else {
+        var id = 'art_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+        var artifact = {
+          id: id, type: type, name: name,
+          mimeType: type === 'html' ? 'text/html' : 'application/octet-stream',
+          content: content,
+          size: new Blob([content]).size,
+          source: 'ai',
+          sourceMsgId: null,
+          createdAt: new Date().toISOString()
+        };
+        chat.artifacts.push(artifact);
+        matches.push(artifact);
       }
-      return '';
+    }
+
+    // Second pass: replace markers with placeholders
+    var idx = 0;
+    var cleanedText = text.replace(regex, function() {
+      var art = matches[idx++];
+      if (!art) return '';
+      var placeholder = '◙ART_' + (cardMap.length) + '◙';
+      cardMap.push({ placeholder: placeholder, cardHtml: buildCardHtml(art) });
+      return placeholder;
     });
-    AppCore.saveStore();
-    return { text: cleanedText, artifacts: artifacts };
+
+    if (cardMap.length > 0) AppCore.saveStore();
+    return { text: cleanedText, cards: cardMap };
   }
 
   // ═══════════════════════════════════════════

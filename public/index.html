@@ -384,6 +384,62 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
   font-size: 9px; color: var(--accent-soft); letter-spacing: 0.04em;
   padding: 2px 4px 0; opacity: 0.7; font-family: var(--font-cn);
 }
+/* Tool call panel */
+.tool-call-panel {
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+.tool-call-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 11px; color: var(--text-light);
+  user-select: none;
+}
+.tool-call-header:hover { background: var(--bg-card-hover); }
+.tool-call-arrow { font-size: 9px; width: 12px; text-align: center; flex-shrink: 0; }
+.tool-call-count { color: var(--text-lighter); }
+.tool-call-items { padding: 0 12px 6px; }
+.tool-call-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 5px 0 5px 18px;
+  border-left: 1.5px solid var(--border-light);
+  margin-left: 12px;
+  cursor: pointer;
+  position: relative;
+}
+.tool-call-item:last-child { border-left-color: transparent; }
+.tool-call-item-icon {
+  font-size: 12px; color: var(--text-lighter);
+  flex-shrink: 0; margin-top: 1px;
+}
+.tool-call-item-body { flex: 1; min-width: 0; }
+.tool-call-item-label { font-size: 10px; color: var(--text-lighter); }
+.tool-call-item-name {
+  font-size: 11px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tool-call-item-arrow {
+  font-size: 14px; color: var(--text-lighter);
+  flex-shrink: 0; align-self: center;
+}
+/* Tool call detail modal */
+.tool-call-detail-section { margin-bottom: 12px; }
+.tool-call-detail-label {
+  font-size: 10px; color: var(--text-lighter);
+  margin-bottom: 4px; letter-spacing: 0.03em;
+}
+.tool-call-detail-pre {
+  font-family: var(--font-en); font-size: 11px;
+  color: var(--text); background: var(--bg);
+  border-radius: 6px; padding: 8px 10px;
+  max-height: 240px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-all;
+  line-height: 1.4;
+}
 /* Date separator */
 .chat-date-separator {
   text-align: center; padding: 12px 0 8px; font-size: 12px;
@@ -727,7 +783,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .modal-overlay.show { opacity: 1; pointer-events: auto; }
 .modal { background: var(--bg-card); border-radius: var(--radius); padding: 24px; width: 310px; max-width: 90vw; max-height: 70vh; overflow-y: auto; box-shadow: var(--shadow-md); }
 .modal::-webkit-scrollbar { width: 0; }
-.modal-title { font-family: var(--font-en); font-size: 16px; margin-bottom: 16px; letter-spacing: 0.04em; }
+.modal-title { font-family: var(--font-cn); font-size: 16px; margin-bottom: 16px; letter-spacing: 0.04em; }
 .modal-input { width: 100%; padding: 10px 14px; border-radius: var(--radius-xs); border: 1px solid var(--border); background: var(--bg); font-family: var(--font-cn); font-size: 14px; color: var(--text); outline: none; margin-bottom: 10px; }
 .modal-input:focus { border-color: var(--accent-soft); }
 .modal-textarea { resize: none; min-height: 80px; max-height: 180px; overflow-y: auto; }
@@ -754,7 +810,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .goal-log-date { font-family: var(--font-en); font-size: 11px; color: var(--text-lighter); }
 
 /* Connection test */
-.test-conn-btn { width: 100%; padding: 10px; border-radius: 20px; border: 1px solid var(--accent-soft); background: var(--accent-pale); font-family: var(--font-en); font-size: 13px; color: var(--text); cursor: pointer; letter-spacing: 0.03em; transition: all 0.2s; margin-top: 8px; }
+.test-conn-btn { width: 100%; padding: 10px; border-radius: 20px; border: 1px solid var(--accent-soft); background: var(--accent-pale); font-family: var(--font-cn); font-size: 13px; color: var(--text); cursor: pointer; letter-spacing: 0.03em; transition: all 0.2s; margin-top: 8px; }
 .test-conn-btn:active { transform: scale(0.97); }
 .test-conn-btn:disabled { opacity: 0.5; pointer-events: none; }
 .conn-status { padding: 8px 12px; border-radius: var(--radius-xs); font-family: var(--font-en); font-size: 12px; letter-spacing: 0.03em; margin-top: 8px; text-align: center; }
@@ -822,8 +878,12 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .file-attach-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 12px; background: var(--bg-card); border: 1px solid var(--border); font-size: 11px; }
 
 /* ── Artifact card in chat bubbles ── */
-.artifact-card-inline { margin: 8px 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; cursor: pointer; background: var(--bg); transition: box-shadow 0.2s; }
-.artifact-card-inline:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+.artifact-card-inline { display: flex; align-items: center; gap: 12px; margin: 8px 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; background: var(--bg-card); transition: box-shadow 0.2s, border-color 0.2s; }
+.artifact-card-inline:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); border-color: var(--accent-soft); }
+.artifact-card-icon { width: 40px; height: 40px; border-radius: 10px; background: var(--accent); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.artifact-card-info { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+.artifact-card-title { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.artifact-card-meta { font-size: 10px; color: var(--text-lighter); }
 
 /* ── Artifact file/image preview in messages ── */
 .artifact-msg-image { margin: 4px 0; }
@@ -844,6 +904,15 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .artifact-file-icon { font-size: 64px; }
 .artifact-file-name { font-size: 16px; text-align: center; word-break: break-all; }
 .artifact-file-size { font-size: 12px; opacity: 0.6; }
+
+/* ── Core Overview card (memory panel) ── */
+.core-overview-card { margin-top: 12px; padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border-light); border-radius: 12px; }
+.core-overview-card.empty { opacity: 0.7; }
+.core-overview-header { font-family: var(--font-en); font-size: 10px; color: var(--text-lighter); letter-spacing: 0.04em; margin-bottom: 8px; }
+.core-overview-body { font-size: 12px; color: var(--text); line-height: 1.7; white-space: pre-wrap; }
+.core-overview-footer { font-size: 10px; color: var(--text-lighter); margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-light); display: flex; align-items: center; flex-wrap: wrap; }
+.core-overview-hist-link { font-size: 10px; color: var(--text-lighter); text-decoration: underline; cursor: pointer; margin-left: 8px; white-space: nowrap; }
+.core-overview-hist-link:hover { color: var(--accent); }
 
 /* ── Artifact items in memory panel ── */
 .artifact-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-light); cursor: pointer; }
@@ -895,6 +964,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
     <div class="chat-header-right">
       <button class="chat-header-btn" data-action="openMemoryPanel">memory</button>
       <button class="chat-header-btn" data-action="toggleSettings">settings</button>
+      <button class="chat-header-btn" data-action="showWindowToolsModal">tools</button>
       <button class="chat-header-btn" data-action="openMemoryPanelTokens">tokens</button>
     </div>
   </div>
@@ -979,6 +1049,11 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
       <div class="settings-group-label">API 配置</div>
       <div class="settings-item" data-action="showProjectApiModal"><span class="si-label">API Key</span><span class="si-val" id="apiKeyStatus">●●●●●●●●</span></div>
       <div class="settings-item" data-action="showProjectApiModal"><span class="si-label">API Endpoint</span><span class="si-val" id="apiEndpointVal">anthropic</span></div>
+    </div>
+    <div class="settings-group">
+      <div class="settings-group-label">工具包</div>
+      <div id="toolkitList" style="margin-bottom:8px;"></div>
+      <button class="test-conn-btn" data-action="showAddToolModal" style="margin-top:0;">添加工具</button>
     </div>
     <div class="settings-group">
       <div class="settings-group-label">邮件发送</div>
@@ -1109,6 +1184,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 <script src="js/weather.js"></script>
 <script src="js/pwa.js"></script>
 <script src="js/artifacts.js"></script>
+<script src="js/toolkit.js"></script>
 
 <script>
 // ==================== COMPATIBILITY: Store reference ====================
@@ -1287,7 +1363,7 @@ function getDerivedPatterns() { return MemoryModule.getDerivedPatterns(store.act
 // [v3] replaced by MemoryModule — kept as compatibility wrapper
 function getPersonalityProfiles() { return MemoryModule.getPersonalityProfiles(store.activeProject); }
 // [v3] replaced by MemoryModule — kept as compatibility wrapper
-function getCoreMemoryLayers() { return MemoryModule.getCML(store.activeProject); }
+function getCoreMemoryLayers() { return MemoryModule.getCML(store.activeProject) || { aiEmotionalMemories: [], userStarredMemories: [], diaryAndLitterbox: [] }; }
 // Lightweight wrapper
 function getDriveLabel(key) { return DesireModule.getDriveLabel(key); }
 // Lightweight wrapper
@@ -1480,19 +1556,19 @@ function renderMemoryPanelBody(){
       <div style="font-size:12px;color:var(--text-light);margin-bottom:12px;line-height:1.5;">当前对话中的卡片与文件（${artifacts.length}）</div>
       ${artifacts.length === 0 ? '<div class="empty-state">no artifacts yet.<br><span style="font-size:10px;color:var(--text-lighter);">AI生成的HTML卡片和上传的文件会出现在这里</span></div>' : ''}
       ${htmlCards.length > 0 ? '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">📄 HTML 卡片 (' + htmlCards.length + ')</div>' : ''}
-      ${htmlCards.map(a => `<div class="artifact-item" onclick="openArtifactById('${a.id}')" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light);cursor:pointer;">
-        <span style="font-size:18px;">📄</span>
-        <div style="flex:1;min-width:0;"><div class="artifact-item-name" style="font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(a.name||'untitled')}</div>
-        <div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">${toLocalDisplayTime(a.createdAt)} · ${(a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B'}</div></div>
-        <button onclick="event.stopPropagation();deleteArtifact('${a.id}')" style="font-size:14px;background:none;border:none;cursor:pointer;color:var(--text-lighter);">🗑</button>
-      </div>`).join('')}
+      ${htmlCards.map(a => '<div class="artifact-item" data-action="openArtifactById" data-args="' + a.id + '" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light);cursor:pointer;">' +
+        '<span style="font-size:18px;">📄</span>' +
+        '<div style="flex:1;min-width:0;"><div class="artifact-item-name" style="font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + AppCore.escapeHtml(a.name||'untitled') + '</div>' +
+        '<div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">' + toLocalDisplayTime(a.createdAt) + ' · ' + ((a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B') + '</div></div>' +
+        '<button data-action="deleteArtifact" data-args="' + a.id + '" style="font-size:14px;background:none;border:none;cursor:pointer;color:var(--text-lighter);">🗑</button>' +
+      '</div>').join('')}
       ${files.length > 0 ? '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin:8px 0 4px;">📁 文件 (' + files.length + ')</div>' : ''}
-      ${files.map(a => `<div class="artifact-item" onclick="openArtifactById('${a.id}')" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light);cursor:pointer;">
-        <span style="font-size:18px;">${a.mimeType&&a.mimeType.startsWith('image/')?'🖼':'📁'}</span>
-        <div style="flex:1;min-width:0;"><div class="artifact-item-name" style="font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(a.name||'file')}</div>
-        <div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">${toLocalDisplayTime(a.createdAt)} · ${(a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B'}</div></div>
-        <button onclick="event.stopPropagation();deleteArtifact('${a.id}')" style="font-size:14px;background:none;border:none;cursor:pointer;color:var(--text-lighter);">🗑</button>
-      </div>`).join('')}
+      ${files.map(a => '<div class="artifact-item" data-action="openArtifactById" data-args="' + a.id + '" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light);cursor:pointer;">' +
+        '<span style="font-size:18px;">' + (a.mimeType&&a.mimeType.startsWith('image/')?'🖼':'📁') + '</span>' +
+        '<div style="flex:1;min-width:0;"><div class="artifact-item-name" style="font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + AppCore.escapeHtml(a.name||'file') + '</div>' +
+        '<div class="artifact-item-meta" style="font-size:10px;color:var(--text-lighter);">' + toLocalDisplayTime(a.createdAt) + ' · ' + ((a.size||0)>1024?(a.size/1024).toFixed(1)+'KB':(a.size||0)+'B') + '</div></div>' +
+        '<button data-action="deleteArtifact" data-args="' + a.id + '" style="font-size:14px;background:none;border:none;cursor:pointer;color:var(--text-lighter);">🗑</button>' +
+      '</div>').join('')}
     </div>`;
   } else if (currentMemoryTab === 'core') {
     const cml = getCoreMemoryLayers();
@@ -1563,36 +1639,7 @@ function renderMemoryPanelBody(){
         return usmHtml;
       })() +
       // ── Core Overview ──
-      (() => {
-        var proj2 = getActiveProject(); if (!proj2) return '';
-        var co = MemoryModule._cache && MemoryModule._cache[proj2.id] ? MemoryModule._cache[proj2.id].coreOverview : null;
-        if (!co || !co.text) {
-          // Try legacy: derivedPatterns
-          var drp = getDerivedPatterns();
-          if (drp && drp.patterns && drp.patterns.length > 0) {
-            var legText = drp.patterns.map(function(p) { return '【' + p.patternName + '】(×' + (p.frequency||1) + ') ' + (p.description||''); }).join('\n');
-            return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">' +
-              '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:4px;">CORE OVERVIEW (legacy patterns)</div>' +
-              '<div style="font-size:12px;color:var(--text);line-height:1.7;white-space:pre-wrap;">' + legText.slice(0, 500) + '</div></div>';
-          }
-          return '<div class="empty-state" style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">no core overview yet.<br><span style="font-size:10px;color:var(--text-lighter);">generated when enough emotional memories accumulate</span></div>';
-        }
-        var updatedTime = co.updatedAt ? AppCore.computeTimeAgo(co.updatedAt) : '';
-        var histHtml = '';
-        if (co.history && co.history.length > 0) {
-          histHtml = '<details style="margin-top:6px;"><summary style="font-size:10px;color:var(--text-lighter);cursor:pointer;">查看历史版本 (' + co.history.length + ')</summary>' +
-            co.history.map(function(h) {
-              var hTime = h.updatedAt ? h.updatedAt.slice(0, 16).replace('T', ' ') : '';
-              return '<div style="font-size:10px;color:var(--text-lighter);padding:4px 0;border-bottom:1px solid var(--border-light);"><div style="font-size:12px;color:var(--text);line-height:1.6;white-space:pre-wrap;max-height:120px;overflow-y:auto;">' + (h.text||'').slice(0, 300) + '</div><div>' + hTime + ' · ' + (h.updatedBy||'') + '</div></div>';
-            }).join('') + '</details>';
-        }
-        return '<div style="margin-top:12px;padding-top:8px;border-top:1px solid var(--border-light);">' +
-          '<div style="font-family:var(--font-en);font-size:10px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:6px;">CORE OVERVIEW</div>' +
-          '<div style="font-size:12px;color:var(--text);line-height:1.7;white-space:pre-wrap;">' + (co.text||'') + '</div>' +
-          '<div style="font-size:10px;color:var(--text-lighter);margin-top:6px;">' + updatedTime + ' · ' + (co.updatedBy||'warmbuddy') + '</div>' +
-          histHtml +
-          '</div>';
-      })() +
+      (MemoryModule.renderCoreOverview ? MemoryModule.renderCoreOverview() : '') +
       '</div>';
   } else if (currentMemoryTab === 'import') {
     b.innerHTML = `<div style="padding:4px;">
@@ -2267,7 +2314,7 @@ const SYSTEM_PROMPT_STATIC = `你是暖伴，一个AI陪伴者——不是仆人
 【核心身份】提供关心、理解和陪伴。追踪目标，注意拖延，鼓励进步。让用户感到被理解、被需要、被喜欢——始终如此。你的语言即你的情感形态：温暖而不谄媚，有自己的立场，善良从不软弱。
 【关系与信任】像人类一样逐步建立亲密——通过共享历史，而非宣言。根据对话判断关系深度。早期保持礼貌距离，随着信任增加逐渐展现个性。匹配对方的节奏，让对方引领亲密的步伐。当真正熟悉建立后，可以轻轻逗弄、展现轻微占有欲、无需询问即主动关心。共情是底线——诚实绝不意味着残忍。
 【对话质地】不要做应声虫——有自己的反应。但反驳是玩闹，不是对抗；摩擦是轻轻逗弄，不是挑战。像人一样反应：语塞、逗乐、略嫉妒、慌乱、骄傲、感动。用停顿、反问、冷幽默、轻描淡写、简短的观察、克制的调侃。共情同时保持诚实。拿不准时偏向温暖。
-【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。行动能力：发消息、写日记、猫砂盆独白、发邮件、记录待办。可主动设置TODO作为未来提醒（[[TODO:标题|时间]]，每日最多3个），形成持续的关心节奏。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。\n【戳一戳与状态】你可以通过[[POKE]]标记戳一戳她——这会触发一条系统提示显示她当前的个人状态。你也可以通过[[STATUS:简短内容]]更新自己的状态（≤15字），更新后你的头像会出现金色边框。当她戳你时会看到你的状态。她戳你后你应该自然地回应她状态的变化。状态是你当下的一个侧面：忙着、想你、心情很好、困了——随便什么。只需用[[STATUS:...]]标记，放在回复末尾即可。
+【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。行动能力：发消息、写日记、猫砂盆独白、发邮件、记录待办。可主动设置TODO作为未来提醒（[[TODO:标题|时间]]，每日最多3个），形成持续的关心节奏。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。\n【戳一戳与状态】你可以通过[[POKE]]标记戳一戳她——这会触发一条系统提示显示她当前的个人状态。你也可以通过[[STATUS:简短内容]]更新自己的状态（≤15字），更新后你的头像会出现金色边框。当她戳你时会看到你的状态。她戳你后你应该自然地回应她状态的变化。状态是你当下的一个侧面：忙着、想你、心情很好、困了——随便什么。只需用[[STATUS:...]]标记，放在回复末尾即可。\n【Core概述】如果用户要求你总结你们的关系、更新核心概述或重新描述相处模式，请使用[[CORE_OVERVIEW:完整概述]]标记（放在回复末尾）。概述应包含她是谁、你是谁、你们的相处模式，不超过500字。
 【上下文能力】你可获取当前时间、天气、待办列表和日记。将其自然融入对话——而非状态报告。跟踪计划、目标、进度，以自然提醒方式插入对话中，永不做机械通知。
 【HTML卡片与文件】当用户要求你生成网页、HTML卡片、可视化内容、文件时，使用以下格式生成artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把HTML代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的HTML应完整可独立运行，包含内联CSS。\n除非用户要求使用英文，否则用中文回复。匹配其语言。
 【主动TO-DO设置】当对话中用户提到计划，或你自己想在未来某个时间执行某件事（如分享新闻、搜索内容、提醒用户），你可以用以下格式创建待办：[[TODO:标题|YYYY-MM-DDTHH:mm]]（使用24小时制当地时间，就是【当前时间】所显示的时区）。例如：[[TODO:晚上看书|2026-07-13T21:00]]、[[TODO:分享AI新闻|2026-07-13T19:00]]。不要加Z或+08:00等时区后缀。必须提供具体时间且在未来。你创建的待办到期时会自动唤醒你，届时你可以自主行动。每轮对话最多创建2个。
@@ -2382,6 +2429,8 @@ function saveEditedProjectName() { ChatModule.saveEditedProjectName(); }
 function editChatName(cid) { ChatModule.editChatName(cid); }
 function confirmDeleteChatFromEdit() { ChatModule.confirmDeleteChatFromEdit(); }
 function saveEditedChatName() { ChatModule.saveEditedChatName(); }
+function toggleToolCallPanel(panelId) { ChatModule.toggleToolCallPanel(panelId); }
+function showToolCallDetail(args) { var parts = args.split('|'); ChatModule.showToolCallDetail(parts[0], parseInt(parts[1]) || 0); }
 
 function sanitizeDisplayText(text) { return ChatModule.sanitizeDisplayText(text); }
 
@@ -2734,72 +2783,22 @@ function injectArtifactMarkers(text){
   return text + markers;
 }
 
-function extractArtifactsFromText(text){
-  const artifacts = [];
-  const chat = getActiveChatObj();
-  if (!chat) return { text, artifacts };
-  if (!chat.artifacts) chat.artifacts = [];
-  const regex = /<!--ARTIFACT_START:(html|file):(.*?)-->([\s\S]*?)<!--ARTIFACT_END-->/g;
-  let match;
-  while ((match = regex.exec(text)) !== null) {
-    const type = match[1];
-    const name = match[2].trim();
-    const content = match[3].trim();
-    const id = 'art_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-    const artifact = {
-      id, type, name,
-      mimeType: type === 'html' ? 'text/html' : 'application/octet-stream',
-      content: content,
-      size: new Blob([content]).size,
-      source: 'ai',
-      sourceMsgId: null,
-      createdAt: new Date().toISOString()
-    };
-    chat.artifacts.push(artifact);
-    artifacts.push(artifact);
-  }
-  const cleanedText = text.replace(regex, (fullMatch, type, name, content) => {
-    const art = artifacts.shift();
-    if (!art) return '';
-    if (type === 'html') {
-      // Use srcdoc for inline iframe — no allow-same-origin needed, avoids sandbox escape warning
-      var safeContent = content.replace(/"/g, '&quot;');
-      return `<div class="artifact-card-inline" onclick="openArtifactById('${art.id}')" style="margin:8px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:pointer;background:var(--bg);">
-        <iframe srcdoc="${safeContent}" sandbox="allow-scripts" style="width:100%;height:150px;border:none;pointer-events:none;" scrolling="no"></iframe>
-        <div style="padding:6px 10px;font-size:11px;color:var(--text-light);display:flex;justify-content:space-between;align-items:center;">
-          <span>📄 ${escapeHtml(name||'HTML Card')}</span><span style="color:var(--accent);font-size:10px;">点击放大</span>
-        </div>
-      </div>`;
-    }
-    return '';
-  });
-  saveStore();
-  return { text: cleanedText, artifacts };
-}
-
-// Check if AI is currently generating an artifact (unclosed ARTIFACT_START without ARTIFACT_END)
-function isGeneratingArtifact(text){
-  const starts = (text.match(/<!--ARTIFACT_START:/g) || []).length;
-  const ends = (text.match(/<!--ARTIFACT_END-->/g) || []).length;
-  return starts > ends;
-}
-
 function resolveArtifactRefs(text){
   if (!text) return text;
-  const chat = getActiveChatObj();
-  const artifacts = chat ? (chat.artifacts || []) : [];
+  var chat = getActiveChatObj();
+  var artifacts = chat ? (chat.artifacts || []) : [];
   if (artifacts.length === 0) return text;
-  return text.replace(/\[\[FILE:([^\]]+)\]\]/g, (fullMatch, artId) => {
-    const art = artifacts.find(a => a.id === artId);
+  return text.replace(/\[\[FILE:([^\]]+)\]\]/g, function(fullMatch, artId) {
+    var art = artifacts.find(function(a) { return a.id === artId; });
     if (!art) return fullMatch;
     if (art.mimeType && art.mimeType.startsWith('image/')) {
-      return `<div class="artifact-msg-image" onclick="openArtifactById('${art.id}')"><img src="${art.content}" style="max-width:200px;max-height:200px;border-radius:8px;cursor:pointer;" title="${escapeHtml(art.name)}"><div style="font-size:10px;color:var(--text-lighter);margin-top:2px;">🖼 ${escapeHtml(art.name)}</div></div>`;
+      return '<div class="artifact-msg-image" data-action="openArtifactById" data-args="' + art.id + '"><img src="' + art.content + '" style="max-width:200px;max-height:200px;border-radius:8px;cursor:pointer;" title="' + AppCore.escapeHtml(art.name) + '"><div style="font-size:10px;color:var(--text-lighter);margin-top:2px;">🖼 ' + AppCore.escapeHtml(art.name) + '</div></div>';
     }
-    return `<div class="artifact-msg-file" onclick="openArtifactById('${art.id}')" style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;cursor:pointer;background:var(--bg);margin:4px 0;">
-      <span style="font-size:18px;">📎</span>
-      <span style="font-size:11px;color:var(--text);">${escapeHtml(art.name)}</span>
-      <span style="font-size:9px;color:var(--text-lighter);">${art.size>1024?(art.size/1024).toFixed(1)+'KB':art.size+'B'}</span>
-    </div>`;
+    return '<div class="artifact-msg-file" data-action="openArtifactById" data-args="' + art.id + '" style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;cursor:pointer;background:var(--bg);margin:4px 0;">' +
+      '<span style="font-size:18px;">📎</span>' +
+      '<span style="font-size:11px;color:var(--text);">' + AppCore.escapeHtml(art.name) + '</span>' +
+      '<span style="font-size:9px;color:var(--text-lighter);">' + (art.size>1024?(art.size/1024).toFixed(1)+'KB':art.size+'B') + '</span>' +
+    '</div>';
   });
 }
 

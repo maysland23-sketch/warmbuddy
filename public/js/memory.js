@@ -60,6 +60,7 @@
           _cache[projectId].evictedMessages = cached.evictedMessages || [];
           _cache[projectId].deriveTriggers = cached.deriveTriggers || { aemSince: 0, usmSince: 0, lastWeekly: '' };
           _cache[projectId].lastMaintenance = cached.lastMaintenance || '';
+          _cache[projectId].coreOverview = cached.coreOverview || null;
           _cache[projectId]._loaded = true;
         }
       } catch (e) { /* cache miss, continue to Supabase */ }
@@ -1574,10 +1575,177 @@
         if (proj) { proj.coreOverview = Object.assign({}, co); }
         MemoryModule.save(store.activeProject);
         AppCore.saveStore();
+        // Persist to Supabase
+        fetch(AppCore.BACKEND_URL + '/api/memory/core-overview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: store.password, projectId: store.activeProject, content: overviewText, updatedBy: aiName, metadata: { triggered_by: 'auto' } })
+        }).catch(function() {});
+        // Refresh UI if memory panel is open
+        if (typeof renderMemoryPanelBody === 'function') renderMemoryPanelBody();
         console.log('[core-overview] Updated (' + overviewText.length + ' chars)');
       } catch (e) {
         console.log('[core-overview] Error:', e.message);
       }
+    },
+
+    /**
+     * Save core overview locally (cache + localForage) without LLM roundtrip.
+     * Used when the overview content is already available, e.g. [[CORE_OVERVIEW:...]] in chat.
+     */
+    setCoreOverviewLocal: function(text, updatedBy) {
+      var store = AppCore.getStore();
+      var projectId = store.activeProject;
+      if (!projectId || !text || text.length < 20) return;
+      ensureCacheEntry(projectId);
+      var co = _cache[projectId].coreOverview;
+      if (!co) {
+        co = { text: '', updatedAt: null, updatedBy: '', history: [] };
+        _cache[projectId].coreOverview = co;
+      }
+      // Save current overview as history before overwriting
+      if (co.text && co.text.length > 0 && co.updatedAt) {
+        co.history.unshift({ text: co.text, updatedAt: co.updatedAt, updatedBy: co.updatedBy });
+        if (co.history.length > 10) co.history.length = 10;
+      }
+      co.text = text;
+      co.updatedAt = new Date().toISOString();
+      co.updatedBy = updatedBy || 'warmbuddy';
+      var proj = AppCore.getActiveProject();
+      if (proj) { proj.coreOverview = Object.assign({}, co); }
+      MemoryModule.save(projectId);
+      AppCore.saveStore();
+      if (typeof renderMemoryPanelBody === 'function') renderMemoryPanelBody();
+      console.log('[core-overview] Local save (' + text.length + ' chars)');
+    },
+
+    loadCoreOverview: async function(projectId) {
+      var store = AppCore.getStore();
+      var cached = _cache[projectId] && _cache[projectId].coreOverview;
+      try {
+        var res = await fetch(AppCore.BACKEND_URL + '/api/memory/core-overview/latest?projectId=' + encodeURIComponent(projectId), {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json', 'x-password': store.password },
+          body: JSON.stringify({ password: store.password })
+        });
+        if (res.ok) {
+          var remote = await res.json();
+          if (remote && remote.content) {
+            if (!cached || new Date(remote.updatedAt) > new Date(cached.updatedAt)) {
+              if (!_cache[projectId]) ensureCacheEntry(projectId);
+              _cache[projectId].coreOverview = { text: remote.content, updatedAt: remote.updatedAt, updatedBy: remote.updatedBy, history: [] };
+              MemoryModule.save(projectId);
+            }
+            return _cache[projectId].coreOverview;
+          }
+        }
+      } catch(e) {
+        console.warn('[core-overview] load failed:', e.message);
+      }
+      return cached || null;
+    },
+
+    renderCoreOverview: function() {
+      var proj = AppCore.getActiveProject();
+      if (!proj) return '<div class="empty-state">no active project.</div>';
+
+      var co = _cache[proj.id] && _cache[proj.id].coreOverview;
+
+      // Fallback to legacy derivedPatterns
+      if (!co || !co.text) {
+        var patterns = AppCore.getStore().memorySystem.relationalPortrait.patterns;
+        if (patterns && patterns.length > 0) {
+          var legText = patterns.map(function(p) {
+            return '【' + (p.patternName || '') + '】(×' + (p.frequency || 1) + ') ' + (p.description || '');
+          }).join('\n');
+          return '<div class="core-overview-card">' +
+            '<div class="core-overview-header">CORE OVERVIEW</div>' +
+            '<div class="core-overview-body">' + AppCore.escapeHtml(legText.slice(0, 500)) + '</div>' +
+            '<div class="core-overview-footer" style="font-size:10px;color:var(--text-lighter);">legacy patterns · waiting for full overview</div>' +
+            '</div>';
+        }
+        return '<div class="core-overview-card empty">' +
+          '<div class="core-overview-header">CORE OVERVIEW</div>' +
+          '<div style="font-size:12px;color:var(--text-lighter);line-height:1.6;">no core overview yet.</div>' +
+          '<div style="font-size:10px;color:var(--text-lighter);margin-top:4px;">generated when enough emotional memories accumulate</div>' +
+          '</div>';
+      }
+
+      // Format time as local datetime: YYYY-MM-DD HH:MM
+      var formatTime = function(isoStr) {
+        if (!isoStr) return '';
+        var d = new Date(isoStr);
+        if (isNaN(d.getTime())) return isoStr.slice(0, 16).replace('T', ' ');
+        var year = d.getFullYear();
+        var month = String(d.getMonth() + 1).padStart(2, '0');
+        var day = String(d.getDate()).padStart(2, '0');
+        var hours = String(d.getHours()).padStart(2, '0');
+        var mins = String(d.getMinutes()).padStart(2, '0');
+        return year + '-' + month + '-' + day + ' ' + hours + ':' + mins;
+      };
+
+      var updatedTime = formatTime(co.updatedAt);
+      var aiName = (proj.aiName) ? proj.aiName : 'warmbuddy';
+      var updatedBy = co.updatedBy || aiName;
+
+      // History link (fetched from Supabase, not stored inline)
+      var histLink = '<span class="core-overview-hist-link" data-action="showCoreHistory" style="font-size:10px;color:var(--text-lighter);text-decoration:underline;cursor:pointer;margin-left:8px;">查看历史</span>';
+
+      return '<div class="core-overview-card">' +
+        '<div class="core-overview-header">CORE OVERVIEW</div>' +
+        '<div class="core-overview-body">' + AppCore.escapeHtml(co.text || '') + '</div>' +
+        '<div class="core-overview-footer">' +
+          '<span>最后更新 · ' + updatedTime + ' 由 ' + AppCore.escapeHtml(updatedBy) + ' 更新</span>' +
+          histLink +
+        '</div>' +
+        '</div>';
+    },
+
+    showCoreHistoryModal: async function(projectId) {
+      var store = AppCore.getStore();
+      var history = [];
+      try {
+        var res = await fetch(AppCore.BACKEND_URL + '/api/memory/core-overview/history?projectId=' + encodeURIComponent(projectId), {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json', 'x-password': store.password },
+          body: JSON.stringify({ password: store.password })
+        });
+        if (res.ok) history = await res.json();
+      } catch(e) {
+        console.warn('[core-overview] history fetch failed:', e.message);
+      }
+      if (!history || history.length === 0) {
+        UIModule.toast('暂无历史版本');
+        return;
+      }
+
+      var formatTime = function(isoStr) {
+        if (!isoStr) return '';
+        var d = new Date(isoStr);
+        if (isNaN(d.getTime())) return isoStr.slice(0, 16).replace('T', ' ');
+        var year = d.getFullYear();
+        var month = String(d.getMonth() + 1).padStart(2, '0');
+        var day = String(d.getDate()).padStart(2, '0');
+        var hours = String(d.getHours()).padStart(2, '0');
+        var mins = String(d.getMinutes()).padStart(2, '0');
+        return year + '-' + month + '-' + day + ' ' + hours + ':' + mins;
+      };
+
+      var bodyHtml = '<div style="max-height:60vh;overflow-y:auto;">';
+      for (var i = 0; i < history.length; i++) {
+        var h = history[i];
+        var hTime = formatTime(h.updatedAt);
+        var hBy = h.updatedBy || 'warmbuddy';
+        bodyHtml += '<div style="padding:0 0 12px 0;' + (i < history.length - 1 ? 'margin-bottom:12px;border-bottom:1px solid var(--border-light);' : '') + '">' +
+          '<div style="font-size:10px;color:var(--text-lighter);margin-bottom:6px;">' + hTime + ' · ' + AppCore.escapeHtml(hBy) + '</div>' +
+          '<div style="font-size:12px;color:var(--text);line-height:1.7;white-space:pre-wrap;">' + AppCore.escapeHtml(h.content || h.text || '') + '</div>' +
+          '</div>';
+      }
+      bodyHtml += '</div>';
+
+      UIModule.showModal('Core Overview 历史版本', bodyHtml, [
+        { label: '关闭', cls: 'cancel' }
+      ]);
     },
 
     ensureColdStartPatterns: function() {
@@ -1656,6 +1824,7 @@
         evictedMessages: [],
         deriveTriggers: { aemSince: 0, usmSince: 0, lastWeekly: '' },
         lastMaintenance: '',
+        coreOverview: null,
         _loaded: false,
         _version: 1
       };
@@ -1756,6 +1925,7 @@
         evictedMessages: c.evictedMessages,
         deriveTriggers: c.deriveTriggers,
         lastMaintenance: c.lastMaintenance,
+        coreOverview: c.coreOverview,
         _version: 1
       });
     } catch (e) {

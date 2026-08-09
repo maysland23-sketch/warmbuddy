@@ -86,7 +86,7 @@ var SettingsModule = (function() {
       '<input class="modal-input" id="apiKeyInput" placeholder="Enter API Key" value="' + store.apiKey + '" type="password" autocomplete="off">' +
       '<input class="modal-input" id="apiEndpointInput" placeholder="API Endpoint" value="' + store.apiEndpoint + '">' +
       providerInfo + statusHtml +
-      '<button class="test-conn-btn" id="testConnBtn" onclick="testConnection()">🔗 Test Connection</button>',
+      '<button class="test-conn-btn" id="testConnBtn" onclick="testConnection()">Test Connection</button>',
       [{ label: 'cancel', cls: 'cancel', onclick: UIModule.closeModal },
        { label: 'save', cls: 'confirm', onclick: saveApiConfig }]);
   }
@@ -128,7 +128,7 @@ var SettingsModule = (function() {
       '<span style="font-size:12px;color:var(--text-light);">启用</span>' +
       '<div class="toggle-switch' + (ac.enabled !== false ? ' on' : '') + '" id="pjApiEnabled" onclick="this.classList.toggle(\'on\')"></div>' +
       '</div>' +
-      '<button class="test-conn-btn" onclick="testProjectConnection(\'' + proj.id + '\')" style="margin-top:8px;">🔗 测试连接</button>',
+      '<button class="test-conn-btn" onclick="testProjectConnection(\'' + proj.id + '\')" style="margin-top:8px;">测试连接</button>',
       [{ label: 'cancel', cls: 'cancel', onclick: UIModule.closeModal },
        { label: 'save', cls: 'confirm', onclick: function() { saveProjectApiConfig(proj.id); } }]);
   }
@@ -265,7 +265,7 @@ var SettingsModule = (function() {
         bodyHtml += '<div class="model-select-item' + (m.id === currentModel ? ' active' : '') + '" onclick="setActiveModel(\'' + m.id + '\');UIModule.closeModal();" style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-radius:8px;cursor:pointer;margin-bottom:2px;' + (m.id === currentModel ? 'background:var(--accent-pale);' : '') + '"><span style="font-size:13px;">' + m.label + '</span><span style="font-size:10px;color:var(--text-lighter);">' + m.id + fmtLabel + '</span></div>';
       }
     }
-    bodyHtml += '<button class="test-conn-btn" onclick="fetchModelsFromAPI()" style="margin-top:8px;width:100%;">🔄 刷新模型列表</button>';
+    bodyHtml += '<button class="test-conn-btn" onclick="fetchModelsFromAPI()" style="margin-top:8px;width:100%;">刷新模型列表</button>';
     UIModule.showModal('选择模型', bodyHtml, [{ label: 'close', cls: 'cancel', onclick: UIModule.closeModal }]);
   }
 
@@ -289,6 +289,14 @@ var SettingsModule = (function() {
     if (aks) aks.textContent = ac.apiKey ? '●●●●●●●●' + ac.apiKey.slice(-4) : '●●●●●●●●';
     var aev = AppCore.$('apiEndpointVal');
     if (aev) aev.textContent = ac.model || 'not set';
+    // Toolkit list
+    var tkm = AppCore.getModule('toolkit');
+    if (tkm && tkm.renderToolkitList) tkm.renderToolkitList();
+    // Theme picker
+    var uiMod = AppCore.getModule('ui');
+    if (uiMod && uiMod.renderThemePicker) uiMod.renderThemePicker();
+    // Email settings
+    if (typeof updateEmailSettingsUI === 'function') updateEmailSettingsUI();
   }
 
   function toggleAiSetting(k) {

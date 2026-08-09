@@ -185,10 +185,23 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_project ON memories(project_id, created_at);
 ALTER TABLE memories DISABLE ROW LEVEL SECURITY;
 
+-- Core Overviews
+CREATE TABLE IF NOT EXISTS core_overviews (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by TEXT NOT NULL DEFAULT '暖伴',
+  metadata JSONB DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_core_overviews_project ON core_overviews(project_id, updated_at DESC);
+ALTER TABLE core_overviews DISABLE ROW LEVEL SECURITY;
+
 -- Grant access
 GRANT ALL ON project_configs TO PUBLIC;
 GRANT ALL ON app_state TO PUBLIC;
 GRANT ALL ON project_todos TO PUBLIC;
 GRANT ALL ON chat_messages TO PUBLIC;
 GRANT ALL ON memories TO PUBLIC;
+GRANT ALL ON core_overviews TO PUBLIC;
 GRANT USAGE ON SCHEMA public TO PUBLIC;

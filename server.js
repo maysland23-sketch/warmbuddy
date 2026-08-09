@@ -392,10 +392,16 @@ function buildRequestBody(provider, model, messages, stream) {
     default: {
       return {
         model: model || (provider === 'deepseek' ? 'deepseek-chat' : 'gpt-4o'),
-        messages: messages.map(m => ({
-          role: m.role === 'ai' ? 'assistant' : m.role,
-          content: m.content
-        })),
+        messages: messages.map(function(m) {
+          var msg = {
+            role: m.role === 'ai' ? 'assistant' : m.role,
+            content: m.content
+          };
+          // Preserve tool-calling fields for follow-up LLM calls
+          if (m.tool_calls) msg.tool_calls = m.tool_calls;
+          if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+          return msg;
+        }),
         stream: stream,
         max_tokens: 4096
       };
@@ -1163,11 +1169,424 @@ app.get('/api/presets', (req, res) => {
   res.json({ presets, models: modelList });
 });
 
+// ==================== MCP TOOL PROXY ====================
+
+// In-memory caches for MCP sessions and tool lists
+const mcpSessions = {};    // { url: { sessionId, expiresAt } }
+const mcpToolListCache = {}; // { url: { tools: [...], expiresAt } }
+const MCP_TIMEOUT = 5000;    // 5-second timeout for MCP requests
+const MCP_CACHE_TTL = 300000; // 5-minute tool list cache
+
 /**
- * POST /api/chat/stream
- * Body: { apiKey, endpoint, model, messages }
- * Response: SSE stream
+ * Build a JSON-RPC 2.0 request body, omitting `params` when empty.
+ * ModelScope's MCP proxy rejects `"params":{}` with -32602.
+ * @param {string} method — JSON-RPC method name
+ * @param {object} params — parameters (only included if non-empty)
+ * @returns {string} JSON-encoded request body
  */
+function buildMCPRequestBody(method, params) {
+  // ModelScope MCP gateway requires `params` to ALWAYS be present,
+  // even if empty (`"params":{}`). Omitting it triggers -32602.
+  return { jsonrpc: '2.0', method: method, id: Date.now(), params: params || {} };
+}
+
+/**
+ * Build Authorization headers for MCP requests based on auth config.
+ * @param {object} auth — { type: "none"|"bearer"|"basic", token?: string }
+ * @returns {object} headers object (empty if no auth)
+ */
+function buildMCPAuthHeaders(auth) {
+  if (!auth || auth.type === 'none' || !auth.token) return {};
+  if (auth.type === 'bearer') {
+    return { 'Authorization': 'Bearer ' + auth.token };
+  }
+  if (auth.type === 'basic') {
+    // token can be "user:pass" or already base64-encoded
+    var encoded = auth.token.indexOf(':') >= 0
+      ? Buffer.from(auth.token).toString('base64')
+      : auth.token;
+    return { 'Authorization': 'Basic ' + encoded };
+  }
+  return {};
+}
+
+/**
+ * Ensure an MCP session is initialized for the given URL.
+ * Returns the session ID, or null on failure.
+ */
+async function ensureMCPSession(url, auth) {
+  // Return cached session if still valid
+  const cached = mcpSessions[url];
+  if (cached && cached.expiresAt > Date.now()) return cached.sessionId;
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), MCP_TIMEOUT);
+    const reqHeaders = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+      'MCP-Protocol-Version': '2025-06-18'
+    };
+    // Add auth headers (initialize must NOT carry Mcp-Session-Id)
+    var authHeaders = buildMCPAuthHeaders(auth);
+    Object.assign(reqHeaders, authHeaders);
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: reqHeaders,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'warmbuddy', version: '1.0' } },
+        id: 1
+      }),
+      signal: ctrl.signal
+    });
+    clearTimeout(timer);
+
+    // Extract session ID from response header (case-insensitive)
+    const sessionId = resp.headers.get('Mcp-Session-Id') || resp.headers.get('mcp-session-id');
+    // Drain body
+    await resp.text();
+
+    if (sessionId) {
+      mcpSessions[url] = { sessionId, expiresAt: Date.now() + 3600000 }; // 1-hour session
+      console.log('[mcp] Session initialized:', url, 'sessionId:', sessionId.slice(0, 8) + '...');
+      return sessionId;
+    }
+    // Stateless mode — no session ID needed
+    console.log('[mcp] Stateless mode:', url);
+    return null;
+  } catch (err) {
+    console.warn('[mcp] Session init failed:', url, err.message);
+    return null;
+  }
+}
+
+/**
+ * Send a JSON-RPC request to an MCP server and parse the response.
+ * Handles both application/json and text/event-stream responses.
+ */
+async function mcpRequest(url, sessionId, method, params, auth) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json, text/event-stream',
+    'MCP-Protocol-Version': '2025-06-18'
+  };
+  if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+  // Add auth headers
+  var authHeaders = buildMCPAuthHeaders(auth);
+  Object.assign(headers, authHeaders);
+
+  // Debug: log request headers (mask auth)
+  var debugHeaders = {};
+  for (var hk in headers) {
+    debugHeaders[hk] = hk === 'Authorization' ? (headers[hk] || '').slice(0, 15) + '...[masked]' : headers[hk];
+  }
+  console.log('[mcp-debug] mcpRequest — url:', url, 'method:', method, 'sessionId:', sessionId ? sessionId.slice(0, 8) + '...' : 'none', 'headers:', JSON.stringify(debugHeaders));
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), MCP_TIMEOUT);
+    const reqBody = buildMCPRequestBody(method, params);
+    console.log('[mcp-debug] mcpRequest body:', JSON.stringify(reqBody));
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(reqBody),
+      signal: ctrl.signal
+    });
+    clearTimeout(timer);
+
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => '');
+      throw new Error(`HTTP ${resp.status}: ${errBody.slice(0, 200)}`);
+    }
+
+    const contentType = resp.headers.get('content-type') || '';
+    const body = await resp.text();
+
+    // Debug: log raw response
+    console.log('[mcp-debug] mcpRequest response — content-type:', contentType, 'body length:', body.length);
+    console.log('[mcp-debug] mcpRequest raw body (first 1000 chars):', body.slice(0, 1000));
+
+    // Handle SSE response format
+    if (contentType.includes('text/event-stream') || body.startsWith('event:') || body.startsWith('data:')) {
+      console.log('[mcp-debug] mcpRequest → SSE path detected');
+      var sseResult = parseMCPSSE(body);
+      console.log('[mcp-debug] mcpRequest SSE parsed result:', JSON.stringify(sseResult).slice(0, 500));
+      return sseResult;
+    }
+
+    // Handle JSON response
+    // IMPORTANT: JSON-RPC errors are valid JSON — JSON.parse succeeds but body has {error:...}
+    // Do NOT throw here; that would fall into the catch block and mask the real error.
+    try {
+      const json = JSON.parse(body);
+      if (json.error) {
+        // Legitimate JSON-RPC error — log and return null (caller handles it)
+        console.warn('[mcp] JSON-RPC error:', json.error.code, json.error.message);
+        return null;
+      }
+      console.log('[mcp-debug] mcpRequest JSON result keys:', json.result ? Object.keys(json.result).join(', ') : 'null');
+      return json.result || null;
+    } catch (e) {
+      // JSON.parse itself threw — body is not valid JSON
+      // Maybe it's SSE without content-type header
+      console.log('[mcp-debug] mcpRequest → JSON parse failed (' + e.message + '), trying SSE fallback');
+      var sseResult2 = parseMCPSSE(body);
+      console.log('[mcp-debug] mcpRequest SSE fallback result:', JSON.stringify(sseResult2).slice(0, 500));
+      return sseResult2;
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('MCP request timeout (' + MCP_TIMEOUT + 'ms)');
+    throw err;
+  }
+}
+
+/**
+ * Parse SSE-formatted MCP response.
+ */
+function parseMCPSSE(body) {
+  const lines = body.split(/\r?\n/);
+  let lastData = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('data:')) {
+      try {
+        const json = JSON.parse(trimmed.slice(5).trim());
+        if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
+        if (json.result !== undefined) lastData = json.result;
+      } catch (e) {
+        if (e.message.includes('jsonrpc') || e.message.includes('MCP')) throw e;
+        // Non-JSON data line, skip
+      }
+    }
+  }
+  return lastData;
+}
+
+/**
+ * List tools from a single MCP server.
+ * Caches results for 5 minutes.
+ */
+async function listMCPTools(toolDef) {
+  const url = toolDef.url;
+  const cached = mcpToolListCache[url];
+  if (cached && cached.expiresAt > Date.now()) {
+    console.log('[mcp] Using cached tool list for', url, '(' + cached.tools.length + ' tools)');
+    return cached.tools;
+  }
+
+  const auth = toolDef.auth || { type: 'none' };
+  const sessionId = await ensureMCPSession(url, auth);
+  const result = await mcpRequest(url, sessionId, 'tools/list', {}, auth);
+
+  if (!result || !result.tools) {
+    console.warn('[mcp] tools/list returned no tools for', url);
+    return [];
+  }
+
+  const tools = result.tools.map(t => ({
+    name: t.name || 'unknown',
+    description: t.description || '',
+    inputSchema: t.inputSchema || { type: 'object', properties: {} },
+    _toolUrl: url,
+    _toolDefId: toolDef.id
+  }));
+
+  mcpToolListCache[url] = { tools, expiresAt: Date.now() + MCP_CACHE_TTL };
+  console.log('[mcp] Listed', tools.length, 'tool(s) from', url);
+  return tools;
+}
+
+/**
+ * Get enabled tool definitions for a specific window.
+ * @param {string} projectId
+ * @param {string} windowId
+ * @param {string[]} [clientEnabledIds] — tool IDs sent from frontend (authoritative)
+ */
+async function getEnabledToolDefsForWindow(projectId, windowId, clientEnabledIds, clientToolDefs) {
+  try {
+    // ═══ Priority 1: Client-provided full definitions (most reliable, works offline) ═══
+    if (clientToolDefs && clientToolDefs.length > 0) {
+      console.log('[mcp-debug] Using client-provided tool definitions (' + clientToolDefs.length + ' defs)');
+      // If client also sent enabled IDs, filter to only those
+      if (clientEnabledIds && clientEnabledIds.length > 0) {
+        var filtered = clientToolDefs.filter(function(d) { return clientEnabledIds.indexOf(d.id) >= 0; });
+        console.log('[mcp-debug] Filtered to ' + filtered.length + ' enabled tool(s) by clientEnabledIds');
+        return filtered;
+      }
+      return clientToolDefs;
+    }
+
+    // ═══ Priority 2: Client-provided enabled IDs → look up from Supabase ═══
+    // Read global tool definitions (from Supabase app_state or fallback)
+    let allDefs = [];
+    if (supabase) {
+      const { data: td } = await supabase.from('app_state').select('value').eq('key', 'tool_definitions').single();
+      allDefs = (td && td.value) ? td.value : [];
+    }
+    console.log('[mcp-debug] Supabase app_state tool_definitions count:', allDefs.length);
+    if (allDefs.length === 0) {
+      console.log('[mcp-debug] No tool definitions in Supabase — returning empty (client should send full defs)');
+      return [];
+    }
+
+    // Use client-provided enabled IDs if available (most reliable)
+    if (clientEnabledIds && clientEnabledIds.length > 0) {
+      var byIds = allDefs.filter(function(d) { return clientEnabledIds.indexOf(d.id) >= 0; });
+      console.log('[mcp-debug] Matched ' + byIds.length + ' defs from Supabase by clientEnabledIds');
+      return byIds;
+    }
+
+    // Fallback: read enabled tool IDs from project_configs._windowTools
+    let enabledIds = [];
+    if (projectId && supabase) {
+      const cfg = await loadProjectConfig(projectId);
+      if (cfg && cfg._windowTools && cfg._windowTools[windowId]) {
+        enabledIds = cfg._windowTools[windowId];
+      }
+    }
+    console.log('[mcp-debug] Fallback: _windowTools enabledIds count:', enabledIds.length);
+
+    return allDefs.filter(function(d) { return enabledIds.indexOf(d.id) >= 0; });
+  } catch (err) {
+    console.warn('[mcp] getEnabledToolDefsForWindow error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Convert MCP tool schemas to OpenAI function-calling format.
+ * Result: [{ type: "function", function: { name, description, parameters } }]
+ */
+function convertToOpenAITools(mcpTools) {
+  return mcpTools.map(t => ({
+    type: 'function',
+    function: {
+      name: t.name,
+      description: t.description || '',
+      parameters: t.inputSchema || { type: 'object', properties: {} }
+    }
+  }));
+}
+
+/**
+ * Convert MCP tool schemas to Anthropic tool_use format.
+ * Result: [{ name, description, input_schema }]
+ */
+function convertToAnthropicTools(mcpTools) {
+  return mcpTools.map(t => ({
+    name: t.name,
+    description: t.description || '',
+    input_schema: t.inputSchema || { type: 'object', properties: {} }
+  }));
+}
+
+/**
+ * Execute a single MCP tool call and return the text content.
+ */
+async function executeMCPToolCall(toolDef, toolName, args) {
+  console.log('[mcp] Executing tool:', toolName, 'on', toolDef.url);
+  const auth = toolDef.auth || { type: 'none' };
+  const sessionId = await ensureMCPSession(toolDef.url, auth);
+  const result = await mcpRequest(toolDef.url, sessionId, 'tools/call', {
+    name: toolName,
+    arguments: args || {}
+  }, auth);
+
+  // Extract text content from MCP result
+  if (!result) return '[Tool returned empty result]';
+
+  // MCP tool result format: { content: [{ type: "text", text: "..." }, ...] }
+  if (result.content && Array.isArray(result.content)) {
+    return result.content
+      .filter(c => c.type === 'text')
+      .map(c => c.text)
+      .join('\n') || JSON.stringify(result.content);
+  }
+
+  return typeof result === 'string' ? result : JSON.stringify(result);
+}
+
+/**
+ * Extract tool_calls from an LLM response based on provider format.
+ */
+function extractToolCalls(provider, data) {
+  switch (provider) {
+    case 'anthropic': {
+      // Anthropic: content blocks with type: "tool_use"
+      const content = data.content || [];
+      const toolUses = content.filter(b => b.type === 'tool_use');
+      return toolUses.map(tu => ({
+        id: tu.id || '',
+        name: tu.name || '',
+        args: tu.input || {}
+      }));
+    }
+    case 'openai':
+    case 'deepseek':
+    default: {
+      // OpenAI format: choices[0].message.tool_calls[]
+      const msg = (data.choices && data.choices[0] && data.choices[0].message) || {};
+      const calls = msg.tool_calls || [];
+      return calls.map(tc => ({
+        id: tc.id || '',
+        name: (tc.function && tc.function.name) || '',
+        args: (tc.function && tc.function.arguments)
+          ? (typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments)
+          : {}
+      }));
+    }
+  }
+}
+
+/**
+ * Build a tool result message in the provider's format.
+ */
+function buildToolResultMessages(provider, assistantMsgWithTools, toolResults) {
+  const msgs = [];
+  // The original assistant message (with tool_calls)
+  msgs.push(assistantMsgWithTools);
+
+  // Tool result messages
+  for (const tr of toolResults) {
+    if (provider === 'anthropic') {
+      msgs.push({
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: tr.id,
+          content: tr.content || tr.error || ''
+        }]
+      });
+    } else {
+      msgs.push({
+        role: 'tool',
+        tool_call_id: tr.id,
+        content: tr.content || ('Error: ' + (tr.error || 'unknown'))
+      });
+    }
+  }
+  return msgs;
+}
+
+/**
+ * Inject tools into the request body based on provider.
+ */
+function injectToolsIntoBody(requestBody, llmTools, provider) {
+  var toolNames = llmTools.map(function(t) { return t.name; });
+  console.log('[mcp-debug] injectToolsIntoBody — provider:', provider, 'tool names:', toolNames.join(', '));
+  if (provider === 'anthropic') {
+    requestBody.tools = convertToAnthropicTools(llmTools);
+  } else {
+    requestBody.tools = convertToOpenAITools(llmTools);
+    requestBody.tool_choice = 'auto';
+  }
+}
+
+// ==================== CHAT ENDPOINTS ====================
 app.post('/api/chat/stream', async (req, res) => {
   try {
     // Null-safety: req.body may be undefined if body-parser skipped
@@ -1184,6 +1603,147 @@ app.post('/api/chat/stream', async (req, res) => {
     if (projectId && !(await isProjectApiEnabled(projectId))) {
       return res.status(403).json({ error: '该项目的 AI 功能已被禁用，请先开启后再尝试。' });
     }
+
+    // ═══ Tool-call gate: if tools are enabled, route to non-streaming handler ═══
+    // Streaming cannot handle tool_calls (they arrive as deltas). When tools are
+    // active, we internally delegate to the non-streaming path, then return the
+    // result as a single SSE event so the frontend's existing stream parser works.
+    const windowId = body.windowId;
+    const enabledToolIds = body.enabledToolIds || [];
+    const enabledToolDefs = body.enabledToolDefs || null;
+    console.log('[mcp-debug] /api/chat/stream received — windowId:', windowId, 'enabledToolIds:', enabledToolIds, 'clientDefs count:', enabledToolDefs ? enabledToolDefs.length : 0);
+    if (windowId && projectId) {
+      const enabledDefs = await getEnabledToolDefsForWindow(projectId, windowId, enabledToolIds, enabledToolDefs);
+      if (enabledDefs.length > 0) {
+        console.log('[chat/stream] Tools enabled (' + enabledDefs.length + ' defs), delegating to non-streaming handler');
+        // Build a fake request object and call the non-streaming handler logic inline.
+        // We import the Express res methods manually rather than calling the app route.
+        try {
+          const resolved = resolveModel(model, endpoint);
+          const provider = resolved.provider;
+          const format = resolved.format;
+          const fetchUrl = resolved.endpoint;
+          const reqHeaders = getAuthHeaders(provider, resolved.endpoint, apiKey);
+
+          // Load and list MCP tools
+          let llmTools = [];
+          let toolDefLookup = {};
+          for (const def of enabledDefs) {
+            try {
+              console.log('[mcp-debug] /stream listing tools from:', def.url, 'name:', def.name);
+              const tools = await listMCPTools(def);
+              console.log('[mcp-debug] /stream listed ' + tools.length + ' tool(s) from ' + def.name + ':', tools.map(function(t){return t.name;}));
+              for (const t of tools) { llmTools.push(t); toolDefLookup[t.name] = def; }
+            } catch (e) { console.warn('[mcp] List tools failed for', def.url, ':', e.message); }
+          }
+          console.log('[mcp-debug] /stream Total llmTools after listing: ' + llmTools.length + ' tool(s)');
+
+          // First LLM call
+          const requestBody = buildRequestBody(format, model, messages, false);
+          if (llmTools.length > 0) {
+            console.log('[mcp-debug] /stream Injecting ' + llmTools.length + ' tools into LLM request (provider=' + provider + ')');
+            injectToolsIntoBody(requestBody, llmTools, provider);
+            console.log('[mcp-debug] /stream Request body tools count:', (requestBody.tools || []).length);
+          } else {
+            console.log('[mcp-debug] /stream No tools to inject (llmTools is empty)');
+          }
+
+          const response = await safeFetch(fetchUrl, { method: 'POST', headers: reqHeaders, body: JSON.stringify(requestBody) });
+          if (!response.ok) {
+            const errText = await response.text();
+            let errMsg = errText;
+            try { const ej = JSON.parse(errText); errMsg = ej.error?.message || ej.error?.code || errText; } catch {}
+            res.write(`data: ${JSON.stringify({ error: `API error (${response.status}): ${errMsg}` })}\n\n`);
+            res.end();
+            return;
+          }
+
+          const data = await response.json();
+          if (data.error) {
+            res.write(`data: ${JSON.stringify({ error: data.error.message || JSON.stringify(data.error) })}\n\n`);
+            res.end();
+            return;
+          }
+
+          const toolCalls = llmTools.length > 0 ? extractToolCalls(provider, data) : [];
+          console.log('[mcp-debug] /stream LLM response — tool_calls count:', toolCalls.length, toolCalls.length > 0 ? 'names: ' + toolCalls.map(function(tc){return tc.name;}).join(', ') : '(no tool calls)');
+
+          if (toolCalls.length > 0) {
+            console.log('[chat/stream] LLM requested', toolCalls.length, 'tool call(s)');
+
+            let assistantMsg;
+            if (provider === 'anthropic') {
+              assistantMsg = { role: 'assistant', content: data.content || [] };
+            } else {
+              assistantMsg = { role: 'assistant', content: data.choices[0].message.content || null, tool_calls: data.choices[0].message.tool_calls };
+            }
+
+            const toolResults = [];
+            for (const tc of toolCalls) {
+              const def = toolDefLookup[tc.name];
+              if (!def) { toolResults.push({ id: tc.id, error: 'Tool not found: ' + tc.name }); continue; }
+              try {
+                const resultText = await executeMCPToolCall(def, tc.name, tc.args);
+                toolResults.push({ id: tc.id, content: resultText });
+              } catch (e) { toolResults.push({ id: tc.id, error: e.message }); }
+            }
+
+            const followUpMessages = messages.concat(buildToolResultMessages(provider, assistantMsg, toolResults));
+            const requestBody2 = buildRequestBody(format, model, followUpMessages, false);
+
+            const response2 = await safeFetch(fetchUrl, { method: 'POST', headers: reqHeaders, body: JSON.stringify(requestBody2) });
+            if (!response2.ok) {
+              const errText2 = await response2.text();
+              res.write(`data: ${JSON.stringify({ error: 'Follow-up API error: ' + errText2.slice(0, 200) })}\n\n`);
+              res.end();
+              return;
+            }
+
+            const data2 = await response2.json();
+            const result2 = extractResponseContent(format, data2);
+            if (result2.error) {
+              res.write(`data: ${JSON.stringify({ error: result2.error })}\n\n`);
+              res.end();
+              return;
+            }
+
+            // Return final result as single SSE chunk + [DONE]
+            res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+            res.flushHeaders();
+            const finalText = result2.content || '';
+            const toolCallsMeta = toolCalls.map(function(tc, idx) {
+              var tr = toolResults[idx];
+              return { name: tc.name, args: tc.args, result: tr ? (tr.content || tr.error || '').slice(0, 2000) : '' };
+            });
+            res.write(`data: ${JSON.stringify({ text: finalText, _toolCalls: toolCallsMeta })}\n\n`);
+            res.write(`data: [DONE]\n\n`);
+            res.end();
+            return;
+          }
+
+          // No tool calls — return LLM text as single SSE event
+          const result = extractResponseContent(format, data);
+          if (result.error) {
+            res.write(`data: ${JSON.stringify({ error: result.error })}\n\n`);
+            res.end();
+            return;
+          }
+          res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+          res.flushHeaders();
+          const text = result.content || '';
+          res.write(`data: ${JSON.stringify({ text: text })}\n\n`);
+          res.write(`data: [DONE]\n\n`);
+          res.end();
+          return;
+        } catch (e) {
+          console.error('[chat/stream] Tool fallback error:', e.message);
+          res.write(`data: ${JSON.stringify({ error: 'Tool call failed: ' + e.message })}\n\n`);
+          res.end();
+          return;
+        }
+      }
+    }
+    // ── End tool-call gate ──
 
     // Resolve model → provider + format + endpoint
     const resolved = resolveModel(model, endpoint);
@@ -1388,14 +1948,15 @@ app.post('/api/chat/stream', async (req, res) => {
 });
 
 /**
- * POST /api/chat (non-streaming fallback)
- * Body: { apiKey, endpoint, model, messages }
+ * POST /api/chat (non-streaming)
+ * Body: { apiKey, endpoint, model, messages, projectId?, windowId? }
+ * Supports MCP tool calling when window has enabled tools.
  */
 app.post('/api/chat', async (req, res) => {
   try {
-    // Null-safety: req.body may be undefined if body-parser skipped
     const body = req.body || {};
-    const { apiKey, endpoint, model, messages } = body;
+    const { apiKey, endpoint, model, messages, projectId, windowId, enabledToolIds, enabledToolDefs } = body;
+    console.log('[mcp-debug] /api/chat received — windowId:', windowId, 'enabledToolIds:', enabledToolIds, 'clientDefs count:', enabledToolDefs ? enabledToolDefs.length : 0);
 
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: 'Missing messages' });
@@ -1405,20 +1966,54 @@ app.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: 'Missing API key — please configure your API key in Settings' });
     }
 
-    // Check project-level API enabled status
-    const projectId = body.projectId;
     if (projectId && !(await isProjectApiEnabled(projectId))) {
       return res.status(403).json({ error: '该项目的 AI 功能已被禁用，请先开启后再尝试。' });
     }
 
-    // Resolve model → provider + format + endpoint
     const resolved = resolveModel(model, endpoint);
+    const provider = resolved.provider;
     const format = resolved.format;
     const fetchUrl = resolved.endpoint;
 
-    const headers = getAuthHeaders(resolved.provider, resolved.endpoint, apiKey);
-    const requestBody = buildRequestBody(format, model, messages, false);
+    // ═══ Load MCP tools if window has enabled tools ═══
+    let llmTools = [];
+    let toolDefLookup = {}; // { toolName: toolDef }
+    if (windowId) {
+      const enabledDefs = await getEnabledToolDefsForWindow(projectId, windowId, enabledToolIds || [], enabledToolDefs || null);
+      console.log('[mcp-debug] /chat getEnabledToolDefsForWindow returned ' + enabledDefs.length + ' enabled def(s)');
+      if (enabledDefs.length > 0) {
+        for (const def of enabledDefs) {
+          try {
+            console.log('[mcp-debug] /chat listing tools from:', def.url, 'name:', def.name);
+            const tools = await listMCPTools(def);
+            console.log('[mcp-debug] /chat listed ' + tools.length + ' tool(s) from ' + def.name + ':', tools.map(function(t){return t.name;}));
+            for (const t of tools) {
+              llmTools.push(t);
+              toolDefLookup[t.name] = def;
+            }
+          } catch (e) {
+            console.warn('[mcp] Failed to list tools for', def.url, ':', e.message);
+          }
+        }
+        console.log('[mcp-debug] /chat Total llmTools after listing: ' + llmTools.length + ' tool(s)');
+      } else {
+        console.log('[mcp-debug] /chat No enabled tool defs found — tools will NOT be injected');
+      }
+    } else {
+      console.log('[mcp-debug] /chat No windowId provided — skipping tool loading');
+    }
 
+    // ═══ Build and send LLM request ═══
+    const requestBody = buildRequestBody(format, model, messages, false);
+    if (llmTools.length > 0) {
+      console.log('[mcp-debug] /chat Injecting ' + llmTools.length + ' tools into LLM request (provider=' + provider + ')');
+      injectToolsIntoBody(requestBody, llmTools, provider);
+      console.log('[mcp-debug] /chat Request body tools count:', (requestBody.tools || []).length);
+    } else {
+      console.log('[mcp-debug] /chat No tools to inject (llmTools is empty)');
+    }
+
+    const headers = getAuthHeaders(provider, resolved.endpoint, apiKey);
     const response = await safeFetch(fetchUrl, {
       method: 'POST',
       headers,
@@ -1438,14 +2033,94 @@ app.post('/api/chat', async (req, res) => {
       return res.status(502).json({ error: data.error.message || JSON.stringify(data.error) });
     }
 
-    const result = extractResponseContent(format, data);
-    if (result.error) {
-      return res.status(502).json({ error: result.error });
+    // ═══ Check for tool_calls ═══
+    const toolCalls = llmTools.length > 0 ? extractToolCalls(provider, data) : [];
+    console.log('[mcp-debug] /chat LLM response — tool_calls count:', toolCalls.length, toolCalls.length > 0 ? 'names: ' + toolCalls.map(function(tc){return tc.name;}).join(', ') : '(no tool calls)');
+    let assistantMsg, usage;
+
+    if (toolCalls.length > 0) {
+      console.log('[mcp] LLM requested', toolCalls.length, 'tool call(s):', toolCalls.map(tc => tc.name).join(', '));
+
+      // Build the assistant message that contains the tool_calls
+      if (provider === 'anthropic') {
+        assistantMsg = { role: 'assistant', content: data.content || [] };
+      } else {
+        assistantMsg = { role: 'assistant', content: data.choices[0].message.content || null, tool_calls: data.choices[0].message.tool_calls };
+      }
+      usage = extractResponseContent(format, data).usage;
+
+      // Execute each tool call
+      const toolResults = [];
+      for (const tc of toolCalls) {
+        const def = toolDefLookup[tc.name];
+        if (!def) {
+          toolResults.push({ id: tc.id, error: 'Tool not found in enabled definitions: ' + tc.name });
+          console.warn('[mcp] Tool not found:', tc.name);
+          continue;
+        }
+        try {
+          const resultText = await executeMCPToolCall(def, tc.name, tc.args);
+          toolResults.push({ id: tc.id, content: resultText });
+          console.log('[mcp] Tool result for', tc.name, ':', resultText.slice(0, 100));
+        } catch (e) {
+          toolResults.push({ id: tc.id, error: e.message });
+          console.error('[mcp] Tool execution error:', tc.name, e.message);
+        }
+      }
+
+      // Build follow-up messages array
+      const followUpMessages = messages.concat(buildToolResultMessages(provider, assistantMsg, toolResults));
+
+      // Second LLM call with tool results
+      const requestBody2 = buildRequestBody(format, model, followUpMessages, false);
+      // Don't include tools in the follow-up to avoid infinite loops
+      // (the LLM should produce a final text response)
+
+      console.log('[mcp] Second LLM call with', toolResults.length, 'tool result(s)');
+
+      const response2 = await safeFetch(fetchUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestBody2)
+      });
+
+      if (!response2.ok) {
+        const errText2 = await response2.text();
+        let errMsg2 = errText2;
+        try { const ej2 = JSON.parse(errText2); errMsg2 = ej2.error?.message || ej2.error?.code || errText2; } catch {}
+        return res.status(502).json({ error: `API error on follow-up (${response2.status}): ${errMsg2}` });
+      }
+
+      const data2 = await response2.json();
+      if (data2.error) {
+        return res.status(502).json({ error: data2.error.message || JSON.stringify(data2.error) });
+      }
+
+      const result2 = extractResponseContent(format, data2);
+      if (result2.error) {
+        return res.status(502).json({ error: result2.error });
+      }
+
+      // Return final response with tool call metadata
+      res.json({
+        reply: { role: 'assistant', content: result2.content },
+        usage: result2.usage,
+        _toolCalls: toolCalls.map(function(tc, idx) {
+          var tr = toolResults[idx];
+          return { name: tc.name, args: tc.args, result: tr ? (tr.content || tr.error || '').slice(0, 2000) : '' };
+        })
+      });
+    } else {
+      // No tool calls — return response directly
+      const result = extractResponseContent(format, data);
+      if (result.error) {
+        return res.status(502).json({ error: result.error });
+      }
+      res.json({
+        reply: { role: 'assistant', content: result.content },
+        usage: result.usage
+      });
     }
-    res.json({
-      reply: { role: 'assistant', content: result.content },
-      usage: result.usage
-    });
   } catch (err) {
     console.error('Chat error:', err);
     res.status(500).json({ error: 'Backend request failed: ' + err.message });
@@ -1785,6 +2460,8 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       ...(config.timezoneOffset !== undefined ? { timezoneOffset: config.timezoneOffset } : {}),
       // Window settings for backend shadow messages (weather, search, etc.)
       ...(config._windowSettings !== undefined ? { _windowSettings: config._windowSettings } : {}),
+      // Per-window MCP tool enable states
+      ...(config._windowTools !== undefined ? { _windowTools: config._windowTools } : {}),
       ...(config.weatherText !== undefined ? { weatherText: config.weatherText } : {}),
       ...(config._userStatus !== undefined ? { _userStatus: config._userStatus } : {}),
       ...(config._aiStatus !== undefined ? { _aiStatus: config._aiStatus } : {})
@@ -3580,9 +4257,211 @@ app.post('/api/memories/sync', async (req, res) => {
   }
 });
 
+// ==================== CORE OVERVIEW ENDPOINTS ====================
+
+/**
+ * POST /api/memory/core-overview
+ * Save a new core overview version. Body: { password, projectId, content, updatedBy, metadata? }
+ */
+app.post('/api/memory/core-overview', async (req, res) => {
+  try {
+    const { password, projectId, content, updatedBy, metadata } = (req.body || {});
+    if (!password || password !== PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    if (!projectId || !content) return res.status(400).json({ error: 'Missing projectId or content' });
+    if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+    const { data, error } = await supabase.from('core_overviews').insert({
+      project_id: projectId,
+      content: content,
+      updated_by: updatedBy || '暖伴',
+      metadata: metadata || {}
+    }).select('id, updated_at').single();
+
+    if (error) throw error;
+    console.log('[core-overview] Saved for project', projectId, 'id:', data.id);
+    res.json({ id: data.id, updatedAt: data.updated_at });
+  } catch (err) {
+    console.error('[core-overview] POST error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/memory/core-overview/latest?projectId=xxx
+ * Password in body: { password }
+ */
+app.get('/api/memory/core-overview/latest', async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    const password = (req.body && req.body.password) || req.headers['x-password'] || '';
+    if (!password || password !== PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
+    if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+    const { data, error } = await supabase.from('core_overviews')
+      .select('content, updated_at, updated_by')
+      .eq('project_id', projectId)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    if (!data) return res.json(null);
+
+    res.json({ content: data.content, updatedAt: data.updated_at, updatedBy: data.updated_by });
+  } catch (err) {
+    console.error('[core-overview] GET /latest error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/memory/core-overview/history?projectId=xxx
+ * Password in body: { password }
+ */
+app.get('/api/memory/core-overview/history', async (req, res) => {
+  try {
+    const { projectId } = req.query;
+    const password = (req.body && req.body.password) || req.headers['x-password'] || '';
+    if (!password || password !== PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
+    if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
+
+    const { data, error } = await supabase.from('core_overviews')
+      .select('content, updated_at, updated_by')
+      .eq('project_id', projectId)
+      .order('updated_at', { ascending: false })
+      .limit(20);
+
+    if (error) throw error;
+    res.json((data || []).map(function(d) {
+      return { content: d.content, updatedAt: d.updated_at, updatedBy: d.updated_by };
+    }));
+  } catch (err) {
+    console.error('[core-overview] GET /history error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== TOOLKIT ENDPOINTS ====================
+
+/**
+ * GET /api/toolkit/definitions
+ * Read tool definitions from app_state.
+ */
+app.get('/api/toolkit/definitions', async (req, res) => {
+  try {
+    if (supabase) {
+      const { data, error } = await supabase.from('app_state').select('value').eq('key', 'tool_definitions').single();
+      if (error || !data) return res.json({ definitions: [] });
+      return res.json({ definitions: data.value || [] });
+    }
+    res.json({ definitions: [] });
+  } catch (err) {
+    console.error('[toolkit] GET /definitions error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/toolkit/definitions
+ * Save tool definitions to app_state.
+ * Body: { definitions: [...] }
+ */
+app.post('/api/toolkit/definitions', async (req, res) => {
+  try {
+    const { definitions } = (req.body || {});
+    if (!Array.isArray(definitions)) return res.status(400).json({ error: 'definitions must be an array' });
+    console.log('[toolkit] POST /definitions — saving ' + definitions.length + ' tool(s) to Supabase');
+    if (supabase) {
+      const { error } = await supabase.from('app_state').upsert({
+        key: 'tool_definitions',
+        value: definitions,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'key' });
+      if (error) {
+        console.error('[toolkit] POST /definitions Supabase upsert error:', error.message, error.code, error.details);
+        return res.status(500).json({ error: error.message });
+      }
+      console.log('[toolkit] POST /definitions — Supabase upsert OK');
+    } else {
+      console.log('[toolkit] POST /definitions — Supabase not configured, skipping persist');
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[toolkit] POST /definitions error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/tools/enabled
+ * Return enabled tool definitions for a given window.
+ * Query: ?projectId=xxx&windowId=xxx
+ * Reads tool_definitions from app_state and enabled_tools from project_configs.
+ */
+app.get('/api/tools/enabled', async (req, res) => {
+  try {
+    const { projectId, windowId } = req.query;
+    if (!windowId) return res.status(400).json({ error: 'Missing windowId' });
+
+    // Read global tool definitions
+    let allDefs = [];
+    if (supabase) {
+      const { data: td } = await supabase.from('app_state').select('value').eq('key', 'tool_definitions').single();
+      allDefs = (td && td.value) ? td.value : [];
+    }
+
+    // Read enabled tool IDs from project_configs
+    let enabledIds = [];
+    if (projectId && supabase) {
+      const cfg = await loadProjectConfig(projectId);
+      if (cfg && cfg._windowTools && cfg._windowTools[windowId]) {
+        enabledIds = cfg._windowTools[windowId];
+      }
+    }
+
+    // Filter definitions to only enabled ones
+    var enabledDefs = allDefs.filter(function(d) { return enabledIds.indexOf(d.id) >= 0; });
+    res.json({ tools: enabledDefs });
+  } catch (err) {
+    console.error('[toolkit] GET /tools/enabled error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/toolkit/window-tools
+ * Sync per-window enabled tool IDs to project_configs._windowTools.
+ * Body: { projectId, windowTools: { chatId: [toolId, ...], ... } }
+ */
+app.post('/api/toolkit/window-tools', async (req, res) => {
+  try {
+    const { projectId, windowTools } = (req.body || {});
+    if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
+    if (!windowTools || typeof windowTools !== 'object') return res.status(400).json({ error: 'Missing windowTools' });
+
+    if (supabase) {
+      const existing = await loadProjectConfig(projectId) || {};
+      existing._windowTools = windowTools;
+      await supabase.from('project_configs').upsert({
+        project_id: projectId,
+        config: existing,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'project_id' });
+      // Update in-memory cache
+      if (_configsCache) { _configsCache[projectId] = existing; _configsCacheTime = Date.now(); }
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[toolkit] POST /window-tools error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==================== 404 HANDLER FOR API ROUTES ====================
 // Return JSON for unmatched API paths instead of default HTML/text response
-// NOTE: Must be AFTER all /api/* route definitions
+// NOTE: Must be after ALL /api/* route definitions
 app.use('/api', (req, res) => {
   res.status(404).json({
     error: `Route not found: ${req.method} ${req.path}`,
@@ -3619,5 +4498,6 @@ if (!process.env.VERCEL) {
     console.log(`   Test connection: POST /api/test-connection`);
     console.log(`   Models: POST /api/models`);
     console.log(`   Chat (non-stream): POST /api/chat`);
+    console.log(`   Toolkit: GET/POST /api/toolkit/definitions`);
   });
 }

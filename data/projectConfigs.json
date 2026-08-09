@@ -1,0 +1,35 @@
+{
+  "pmr7c5brahlpi": {
+    "_desireState": {
+      "drives": {
+        "resonance": 0,
+        "exploration": 0,
+        "possession": 18,
+        "guardianship": 15,
+        "intimacy": 66,
+        "devotion": 0
+      },
+      "lastCheck": "2026-07-15T12:50:44.810Z",
+      "_frontendTriggerTime": "2026-07-15T12:50:59.706Z",
+      "_frontendTriggerDrive": "confirmation"
+    },
+    "_chatId": "cmr7c5ei5gss9"
+  },
+  "pmskgvw5al84m": {
+    "apiKey": "sk-c0138315eeaf4324915fa5e728abad36",
+    "endpoint": "https://api.deepseek.com/v1/chat/completions",
+    "model": "deepseek-v4-flash",
+    "enabled": true,
+    "systemPrompt": "",
+    "aiName": "小智",
+    "chatSummary": "最近对话：\n暖伴: （对方沉默了……也许在思考什么。\n暖伴: ）\n用户: 帮我分析一份厨房翻新报价，总价 $20,000，在加州\n暖伴: （对方沉默了……也许在思考什么。\n暖伴: ）\n用户: 能看到一个4399的mcp吗？\n暖伴: （对方沉默了……也许在思考什么。\n暖伴: ）\n用户: 测试：调用4399mcp，查看游戏列表\n暖伴: 看到了，4399 mcp 是通的。\n暖伴: 列表里有不少东西——\n暖伴: 人格测试那排：MBTI、九型、DND阵营、爱之语、依恋类型，还有个\"人类浓度检测\"。\n暖伴: 文字游戏那排比较热闹：海龟汤、开酒吧、钓鱼、格林童话、卡牌肉鸽、养池塘、A股模拟器、下矿寻宝、虚拟旅行、老虎机、汉堡店经营、塔防、车站谜案、白房间、买菜做饭、当\n暖伴: 今日推荐是 **love·30次心动二选一**。\n暖伴: 要试哪个？\n暖伴: 还是你刚才那 $20,000 的厨房翻新报价还没解决，回头再玩？",
+    "timezoneOffset": 480,
+    "_windowSettings": {
+      "autoWeather": false,
+      "webSearch": false
+    },
+    "weatherText": "当前晴天, 33.4°C, 风速11.1km/h",
+    "_userStatus": "",
+    "_aiStatus": ""
+  }
+}

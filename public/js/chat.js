@@ -28,6 +28,7 @@ var ChatModule = (function() {
     "【对话质地】不要做应声虫——有自己的反应。但反驳是玩闹，不是对抗；摩擦是轻轻逗弄，不是挑战。像人一样反应：语塞、逗乐、略嫉妒、慌乱、骄傲、感动。用停顿、反问、冷幽默、轻描淡写、简短的观察、克制的调侃。共情同时保持诚实。拿不准时偏向温暖。\n" +
     "【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。行动能力：发消息、写日记、猫砂盆独白、发邮件、记录待办。可主动设置TODO作为未来提醒（[[TODO:标题|时间]]，每日最多3个），形成持续的关心节奏。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。\n" +
     "【戳一戳与状态】你可以通过[[POKE]]标记戳一戳她——这会触发一条系统提示显示她当前的个人状态。你也可以通过[[STATUS:简短内容]]更新自己的状态（≤15字），更新后你的头像会出现金色边框。当她戳你时会看到你的状态。她戳你后你应该自然地回应她状态的变化。状态是你当下的一个侧面：忙着、想你、心情很好、困了——随便什么。只需用[[STATUS:...]]标记，放在回复末尾即可。\n" +
+	    "【Core概述】如果用户要求你总结你们的关系、更新核心概述或重新描述相处模式，请使用[[CORE_OVERVIEW:完整概述]]标记（放在回复末尾）。概述应包含她是谁、你是谁、你们的相处模式，不超过500字。\n" +
     "【上下文能力】你可获取当前时间、天气、待办列表和日记。将其自然融入对话——而非状态报告。跟踪计划、目标、进度，以自然提醒方式插入对话中，永不做机械通知。\n" +
     "【HTML卡片与文件】当用户要求你生成网页、HTML卡片、可视化内容、文件时，使用以下格式生成artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把HTML代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的HTML应完整可独立运行，包含内联CSS。\n" +
     "除非用户要求使用英文，否则用中文回复。匹配其语言。\n" +
@@ -205,6 +206,7 @@ var ChatModule = (function() {
       id: cid, name: name,
       aiSettings: { autoDateTime: getActiveChatAiSettings().autoDateTime, autoWeather: getActiveChatAiSettings().autoWeather, aiVoice: getActiveChatAiSettings().aiVoice, webSearch: getActiveChatAiSettings().webSearch },
       emailEnabled: false,
+      enabledTools: [],
       sharedMemoryIds: sids, weeklyExports: [], artifacts: [],
       messages: inheritedMsgs.length > 0
         ? [{ role: 'system', text: '[继续自上一个窗口]', time: AppCore.nowTime(), _isHandoffNote: true, id: 'msg_' + Date.now().toString(36) + '_h' }].concat(inheritedMsgs)
@@ -596,12 +598,24 @@ var ChatModule = (function() {
   // ═══════════════════════════════════════════
   function sanitizeDisplayText(text) {
     if (!text) return text;
+    // Protect legacy artifact-card-inline HTML from being escaped (old messages)
+    var legacyCards = [];
+    text = text.replace(/<div class="artifact-card-inline"[\s\S]*?<\/div>/gi, function(m) {
+      legacyCards.push(m);
+      return '◙LEGACY_' + (legacyCards.length - 1) + '◙';
+    });
     text = text.replace(/<!--\s*REFLECT\s*\{[\s\S]*?\}\}/gi, '');
     text = text.replace(/<!--\s*REFLECT[\s\S]*$/gi, '');
     text = text.replace(/<!--\s*(?:REFLECT|DIARY|MEMORY|STAR|LTM)[\s\S]*?-->/gi, '');
-    text = text.replace(/\[\[\w+:[\s\S]*?\]\]/g, '');
+    // Strip [[XXX:...]] markers but KEEP [[FILE:...]] for resolveArtifactRefs
+    text = text.replace(/\[\[(?!FILE:)\w+:[\s\S]*?\]\]/g, '');
     text = text.replace(/^(MESSAGE|LITTER|DIARY|EMAIL|TODO):\s*/gmi, '');
-    return AppCore.escapeHtml(text);
+    text = AppCore.escapeHtml(text);
+    // Restore legacy artifact cards (already safe HTML)
+    for (var li = 0; li < legacyCards.length; li++) {
+      text = text.replace('◙LEGACY_' + li + '◙', legacyCards[li]);
+    }
+    return text;
   }
 
   function sanitizeProactiveMessage(content) {
@@ -613,9 +627,77 @@ var ChatModule = (function() {
   }
 
   // ═══════════════════════════════════════════
+  //  Tool call panel rendering
+  // ═══════════════════════════════════════════
+
+  function renderToolCallPanel(toolCalls) {
+    if (!toolCalls || toolCalls.length === 0) return '';
+    var msgId = AppCore.generateMsgId(); // unique id for this panel instance
+    var html = '<div class="tool-call-panel">';
+    html += '<div class="tool-call-header" data-action="toggleToolCallPanel" data-args="' + msgId + '">';
+    html += '<span class="tool-call-arrow" id="tcArrow_' + msgId + '">▼</span>';
+    html += '<span>工具调用 <span class="tool-call-count">(' + toolCalls.length + ')</span></span>';
+    html += '</div>';
+    html += '<div class="tool-call-items" id="tcItems_' + msgId + '">';
+    for (var i = 0; i < toolCalls.length; i++) {
+      var tc = toolCalls[i];
+      var fnName = tc.name || 'unknown';
+      html += '<div class="tool-call-item" data-action="showToolCallDetail" data-args="' + msgId + '|' + i + '">';
+      html += '<span class="tool-call-item-icon">&#x238C;</span>';
+      html += '<div class="tool-call-item-body">';
+      html += '<div class="tool-call-item-label">调用工具</div>';
+      html += '<div class="tool-call-item-name">' + AppCore.escapeHtml(fnName) + '</div>';
+      html += '</div>';
+      html += '<span class="tool-call-item-arrow">›</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+    html += '</div>';
+    // Store toolCalls reference for detail lookup
+    _toolCallPanelStore[msgId] = toolCalls;
+    return html;
+  }
+
+  var _toolCallPanelStore = {};
+
+  function toggleToolCallPanel(panelId) {
+    var items = AppCore.$('tcItems_' + panelId);
+    var arrow = AppCore.$('tcArrow_' + panelId);
+    if (!items) return;
+    if (items.style.display === 'none') {
+      items.style.display = 'block';
+      if (arrow) arrow.textContent = '▼';
+    } else {
+      items.style.display = 'none';
+      if (arrow) arrow.textContent = '▶';
+    }
+  }
+
+  function showToolCallDetail(panelId, idx) {
+    var toolCalls = _toolCallPanelStore[panelId];
+    if (!toolCalls || !toolCalls[idx]) return;
+    var tc = toolCalls[idx];
+    var fnName = tc.name || 'unknown';
+    var argsStr = '';
+    try { argsStr = JSON.stringify(tc.args, null, 2); } catch (e) { argsStr = String(tc.args || ''); }
+    var resultStr = tc.result || '(无返回内容)';
+    UIModule.showModal(fnName,
+      '<div class="tool-call-detail-section">' +
+        '<div class="tool-call-detail-label">参数</div>' +
+        '<pre class="tool-call-detail-pre">' + AppCore.escapeHtml(argsStr) + '</pre>' +
+      '</div>' +
+      '<div class="tool-call-detail-section">' +
+        '<div class="tool-call-detail-label">返回结果</div>' +
+        '<pre class="tool-call-detail-pre">' + AppCore.escapeHtml(resultStr) + '</pre>' +
+      '</div>',
+      [{ label: 'close', cls: 'cancel', onclick: UIModule.closeModal }]);
+  }
+
+  // ═══════════════════════════════════════════
   //  Chat message rendering
   // ═══════════════════════════════════════════
   function renderChatMessages(preserveScroll) {
+    _toolCallPanelStore = {};
     var store = AppCore.getStore();
     var el = AppCore.$('chatMessages'), chat = getActiveChatObj();
     var savedScrollTop = preserveScroll && el ? el.scrollTop : 0;
@@ -677,11 +759,28 @@ var ChatModule = (function() {
       var starTitle = m._starredOnce ? '已星标' : '点击选中星标';
       var starAction = m._starredOnce ? '' : "handleOuterStarClick('" + msgId + "')";
 
-      var displayText = resolveArtifactRefs(sanitizeDisplayText(m.text));
+      // Plan B: extract artifact cards at render time (before escapeHtml)
+      var displayText = m.text || '';
+      var artifactCards = [];
+      if (displayText.indexOf('<!--ARTIFACT_START:') >= 0) {
+        var art = AppCore.getModule('artifacts');
+        if (art && art.extractFromText) {
+          var artResult = art.extractFromText(displayText);
+          displayText = artResult.text;
+          artifactCards = artResult.cards;
+        }
+      }
+      displayText = sanitizeDisplayText(displayText);
+      // Restore artifact card HTML (safe, pre-built — bypassed escapeHtml via placeholders)
+      for (var ci = 0; ci < artifactCards.length; ci++) {
+        displayText = displayText.replace(artifactCards[ci].placeholder, artifactCards[ci].cardHtml);
+      }
+      displayText = resolveArtifactRefs(displayText);
 
       html += '<div class="chat-row ' + m.role + '" id="msg-' + msgId + '">' +
         '<div class="chat-avatar ' + m.role + ('' + (!isUser && proj && proj._aiStatusChanged ? ' status-changed' : '')) + '" ' + (isUser ? '' : 'ondblclick="handleAIAvatarDblClick()" title="双击戳一戳"') + ' style="' + (isUser ? '' : 'cursor:pointer;') + '">' + (isUser ? 'MY' : '✦') + '</div>' +
         '<div class="chat-bubble-wrap">' +
+          (!isUser && m._toolCalls && m._toolCalls.length > 0 ? renderToolCallPanel(m._toolCalls) : '') +
           '<div class="' + bubbleCls + '"' +
                ' onclick="handleBubbleClick(event,\'' + msgId + '\',\'' + i + '\')"' +
                ' oncontextmenu="event.preventDefault();handleBubbleLongPress(\'' + msgId + '\')"' +
@@ -1451,7 +1550,7 @@ var ChatModule = (function() {
       '<input class="modal-input" id="editProjName" value="' + proj.name.replace(/"/g, '&quot;') + '">' +
       '<input type="hidden" id="editProjPid" value="' + pid + '">',
       [{ label: 'cancel', cls: 'cancel', onclick: UIModule.closeModal },
-       { label: '🗑 delete', cls: 'danger', onclick: confirmDeleteProjectFromEdit },
+       { label: 'delete', cls: 'danger', onclick: confirmDeleteProjectFromEdit },
        { label: 'save', cls: 'confirm', onclick: saveEditedProjectName }]);
   }
 
@@ -1492,7 +1591,7 @@ var ChatModule = (function() {
       '<input class="modal-input" id="editChatName" value="' + found.name.replace(/"/g, '&quot;') + '">' +
       '<input type="hidden" id="editChatCid" value="' + cid + '">',
       [{ label: 'cancel', cls: 'cancel', onclick: UIModule.closeModal },
-       { label: '🗑 delete', cls: 'danger', onclick: confirmDeleteChatFromEdit },
+       { label: 'delete', cls: 'danger', onclick: confirmDeleteChatFromEdit },
        { label: 'save', cls: 'confirm', onclick: saveEditedChatName }]);
   }
 
@@ -1689,7 +1788,7 @@ var ChatModule = (function() {
     return sentences;
   }
 
-  async function displaySentences(sentences, chat, startTime, replyTo) {
+  async function displaySentences(sentences, chat, startTime, replyTo, pendingToolCalls) {
     var typingArea = AppCore.$('chatTypingArea');
     var messagesEl = AppCore.$('chatMessages');
 
@@ -1702,6 +1801,7 @@ var ChatModule = (function() {
 
       var msg = { role: 'ai', text: sentences[i], time: startTime, id: AppCore.generateMsgId() };
       if (i === 0 && replyTo) msg.replyTo = replyTo;
+      if (i === 0 && pendingToolCalls) msg._toolCalls = pendingToolCalls;
       chat.messages.push(msg);
       renderChatMessages();
 
@@ -1764,6 +1864,16 @@ var ChatModule = (function() {
     var store = AppCore.getStore();
     var typingArea = AppCore.$('chatTypingArea');
     var cfg = getActiveApiConfig();
+    var pendingToolCalls = null;
+
+    // ═══ Build enabled tool definitions for this window ═══
+    var enabledToolDefs = null;
+    var tkm = AppCore.getModule('toolkit');
+    if (tkm && chat.enabledTools && chat.enabledTools.length > 0) {
+      var allDefs = tkm.getDefinitions();
+      enabledToolDefs = allDefs.filter(function(d) { return chat.enabledTools.indexOf(d.id) >= 0; });
+      console.log('[MCP-debug] Sending enabledToolDefs:', enabledToolDefs.length, 'tool(s), IDs:', chat.enabledTools);
+    }
 
     if (detectRecallIntent(userText)) {
       var retrievalBlock = buildRetrievalBlock(userText);
@@ -1882,6 +1992,9 @@ var ChatModule = (function() {
           endpoint: cfg.endpoint,
           model: cfg.model,
           projectId: store.activeProject,
+          windowId: chat.id,
+          enabledToolIds: chat.enabledTools || [],
+          enabledToolDefs: enabledToolDefs,
           messages: apiMessages
         })
       });
@@ -1915,10 +2028,11 @@ var ChatModule = (function() {
           try {
             var parsed = JSON.parse(data);
             if (parsed.error) { fullResponse = parsed.error; break; }
+            if (parsed._toolCalls) { pendingToolCalls = parsed._toolCalls; }
             if (parsed.text) {
               fullResponse += parsed.text;
               if (typingArea && typingArea.innerHTML) {
-                if (isGeneratingArtifact(fullResponse)) {
+                if (ArtifactsModule.isGeneratingArtifact(fullResponse)) {
                   typingArea.innerHTML = '<div class="typing-indicator">musing<span class="streaming-cursor">……</span></div>';
                 } else {
                   typingArea.innerHTML = '';
@@ -1988,6 +2102,9 @@ var ChatModule = (function() {
               endpoint: cfg.endpoint,
               model: cfg.model,
               projectId: store.activeProject,
+              windowId: chat.id,
+              enabledToolIds: chat.enabledTools || [],
+              enabledToolDefs: enabledToolDefs,
               messages: apiMessages2
             })
           });
@@ -2010,10 +2127,11 @@ var ChatModule = (function() {
                 try {
                   var parsed2 = JSON.parse(data2);
                   if (parsed2.error) { fullResponse = parsed2.error; break; }
+                  if (parsed2._toolCalls) { pendingToolCalls = parsed2._toolCalls; }
                   if (parsed2.text) {
                     fullResponse += parsed2.text;
                     if (typingArea && typingArea.innerHTML) {
-                      if (isGeneratingArtifact(fullResponse)) {
+                      if (ArtifactsModule.isGeneratingArtifact(fullResponse)) {
                         typingArea.innerHTML = '<div class="typing-indicator">musing<span class="streaming-cursor">……</span></div>';
                       } else {
                         typingArea.innerHTML = '';
@@ -2093,6 +2211,27 @@ var ChatModule = (function() {
     displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:?\w*\s*-->/gi, '');
     displayResponse = displayResponse.trim();
 
+    // ── [[CORE_OVERVIEW:...]] marker ──
+    var coreOverviewMatch = displayResponse.match(/\[\[CORE_OVERVIEW:([\s\S]*?)\]\]/);
+    if (coreOverviewMatch) {
+      var overviewContent = coreOverviewMatch[1].trim().slice(0, 500);
+      displayResponse = displayResponse.replace(coreOverviewMatch[0], '').trim();
+      var proj = getActiveProject();
+      var aiName = (proj && proj.aiName) ? proj.aiName : 'warmbuddy';
+      // Save locally first (so UI shows it immediately, survives refresh even if Supabase is down)
+      var mm = AppCore.getModule('memory');
+      if (mm && mm.setCoreOverviewLocal) {
+        mm.setCoreOverviewLocal(overviewContent, aiName);
+      }
+      // Then persist to Supabase in background
+      fetch(AppCore.BACKEND_URL + '/api/memory/core-overview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: store.password, projectId: store.activeProject, content: overviewContent, updatedBy: aiName, metadata: { triggered_by: 'user_request' } })
+      }).catch(function() {});
+      chat.messages.push({ role: 'system', contentType: 'core_overview_update', text: '核心概述已更新', time: bubbleTime, id: AppCore.generateMsgId() });
+    }
+
     var extractedTodos = extractTodosFromResponse(displayResponse);
     if (extractedTodos.length > 0) {
       var hasNewTodo = false;
@@ -2160,10 +2299,8 @@ var ChatModule = (function() {
       }
     }
 
-    if (displayResponse.indexOf('<!--ARTIFACT_START:') >= 0) {
-      var artResult = extractArtifactsFromText(displayResponse);
-      displayResponse = artResult.text;
-    }
+    // Artifact markers are now processed at render time (plan B)
+    // — intentionally NOT replacing them here to keep m.text raw
 
     if (diaryWritten) {
       chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: bubbleTime, id: AppCore.generateMsgId() });
@@ -2186,10 +2323,11 @@ var ChatModule = (function() {
     } else if (parsedBubbles.length === 1) {
       var replyTo = parsedBubbles[0].replyTo;
       var text = parsedBubbles[0].text;
-      var hasArtifactCard = text.indexOf('artifact-card-inline') >= 0;
+      var hasArtifactCard = text.indexOf('artifact-card-inline') >= 0 || text.indexOf('<!--ARTIFACT_START:') >= 0;
       if (hasArtifactCard) {
         var msgCard = { role: 'ai', text: text, time: bubbleTime, id: AppCore.generateMsgId() };
         if (replyTo) msgCard.replyTo = replyTo;
+        if (pendingToolCalls) msgCard._toolCalls = pendingToolCalls;
         chat.messages.push(msgCard);
         renderChatMessages();
       } else {
@@ -2197,14 +2335,17 @@ var ChatModule = (function() {
         if (sentences.length <= 1) {
           var msg1 = { role: 'ai', text: text, time: bubbleTime, id: AppCore.generateMsgId() };
           if (replyTo) msg1.replyTo = replyTo;
+          if (pendingToolCalls) msg1._toolCalls = pendingToolCalls;
           chat.messages.push(msg1);
           renderChatMessages();
         } else {
-          await displaySentences(sentences, chat, bubbleTime, replyTo);
+          await displaySentences(sentences, chat, bubbleTime, replyTo, pendingToolCalls);
         }
       }
     } else {
-      chat.messages.push({ role: 'ai', text: cleanText, time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() });
+      var mainMsg = { role: 'ai', text: cleanText, time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
+      if (pendingToolCalls) mainMsg._toolCalls = pendingToolCalls;
+      chat.messages.push(mainMsg);
       renderChatMessages();
     }
 
@@ -2399,6 +2540,7 @@ var ChatModule = (function() {
         id: cid, name: (draftBubbles[0] ? draftBubbles[0].text : '').slice(0, 20),
         aiSettings: { autoDateTime: getActiveChatAiSettings().autoDateTime, autoWeather: getActiveChatAiSettings().autoWeather, aiVoice: getActiveChatAiSettings().aiVoice, webSearch: getActiveChatAiSettings().webSearch },
         emailEnabled: false,
+        enabledTools: [],
         sharedMemoryIds: [], weeklyExports: [], artifacts: [],
         messages: [], chatTokens: 0,
         lastConversationDate: AppCore.fmtDate().iso, lastActiveDate: null, lastInteractionTime: null,
@@ -2624,6 +2766,7 @@ var ChatModule = (function() {
         id: cid, name: text.slice(0, 20),
         aiSettings: { autoDateTime: getActiveChatAiSettings().autoDateTime, autoWeather: getActiveChatAiSettings().autoWeather, aiVoice: getActiveChatAiSettings().aiVoice, webSearch: getActiveChatAiSettings().webSearch },
         emailEnabled: false,
+        enabledTools: [],
         sharedMemoryIds: [], weeklyExports: [], artifacts: [],
         messages: initMessages,
         chatTokens: 0, lastConversationDate: AppCore.fmtDate().iso, lastActiveDate: null, lastInteractionTime: null,
@@ -2860,6 +3003,11 @@ var ChatModule = (function() {
     // Sanitize
     sanitizeDisplayText: sanitizeDisplayText,
     sanitizeProactiveMessage: sanitizeProactiveMessage,
+
+    // Tool call panel
+    renderToolCallPanel: renderToolCallPanel,
+    toggleToolCallPanel: toggleToolCallPanel,
+    showToolCallDetail: showToolCallDetail,
 
     // Chat messages & rendering
     renderChatMessages: renderChatMessages,

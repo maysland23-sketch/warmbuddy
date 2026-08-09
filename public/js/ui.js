@@ -262,8 +262,34 @@ var UIModule = (function() {
           var set = AppCore.getModule('settings');
           if (set) set.toggleAiSetting(k);
           break;
+        // Toolkit
+        case 'showAddToolModal':
+          var tk = AppCore.getModule('toolkit');
+          if (tk) tk.showAddToolModal();
+          break;
+        case 'showWindowToolsModal':
+          var tk2 = AppCore.getModule('toolkit');
+          if (tk2) tk2.showWindowToolsModal();
+          break;
+        // Tool call panel
+        case 'toggleToolCallPanel':
+          var chatM = AppCore.getModule('chat');
+          if (chatM && chatM.toggleToolCallPanel) chatM.toggleToolCallPanel(args);
+          break;
+        case 'showToolCallDetail':
+          var chatM2 = AppCore.getModule('chat');
+          if (chatM2 && chatM2.showToolCallDetail) {
+            var parts = args.split('|');
+            chatM2.showToolCallDetail(parts[0], parseInt(parts[1]) || 0);
+          }
+          break;
         // Memory panel
         case 'switchMemoryTab': if (typeof switchMemoryTab === 'function') switchMemoryTab(args); break;
+        case 'showCoreHistory':
+          if (MemoryModule.showCoreHistoryModal) {
+            MemoryModule.showCoreHistoryModal(AppCore.getStore().activeProject);
+          }
+          break;
         case 'openMemoryPanelTokens': openMemoryPanel('tokens'); break;
         // Diary
         case 'addDiaryEntry':
