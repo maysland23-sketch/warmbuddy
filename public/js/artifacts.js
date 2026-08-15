@@ -119,7 +119,8 @@ var ArtifactsModule = (function() {
   function buildCardHtml(artifact) {
     if (artifact.type === 'html') {
       var displayName = AppCore.escapeHtml(artifact.name || 'HTML Card');
-      var sizeText = artifact.size > 1024 ? (artifact.size / 1024).toFixed(1) + ' KB' : artifact.size + ' B';
+      var size = (typeof artifact.size === 'number') ? artifact.size : new Blob([artifact.content || '']).size;
+      var sizeText = size > 1024 ? (size / 1024).toFixed(1) + ' KB' : size + ' B';
       // Minimal document-outline SVG icon (white, 20×20 viewport)
       var iconSvg = '<svg width="22" height="22" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">' +
         '<path d="M5.5 1.5H13L17.5 6V18.5H5.5V1.5Z" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>' +
@@ -156,6 +157,7 @@ var ArtifactsModule = (function() {
     // First pass: find-or-create artifacts
     var matches = [];
     var match;
+    var savedNew = false;
     while ((match = regex.exec(text)) !== null) {
       var type = match[1];
       var name = match[2].trim();
@@ -179,6 +181,7 @@ var ArtifactsModule = (function() {
         };
         chat.artifacts.push(artifact);
         matches.push(artifact);
+        savedNew = true;
       }
     }
 
@@ -192,7 +195,20 @@ var ArtifactsModule = (function() {
       return placeholder;
     });
 
-    if (cardMap.length > 0) AppCore.saveStore();
+    // Third pass: normalize baked legacy cards (old `<div class="artifact-card-inline" onclick=...>` blocks).
+    // The srcdoc attribute holds the raw HTML with all quotes escaped as `&quot;`,
+    // so `srcdoc="[^"]*"` safely consumes it (and its inner `<div>`/`</div>`) without
+    // tripping over the nested divs that broke the old non-greedy regex.
+    var bakedRegex = /<div class="artifact-card-inline"\s+onclick="openArtifactById\('([^']+)'\)"[^>]*>\s*<iframe\b[^>]*srcdoc="[^"]*"[^>]*>\s*<\/iframe>[\s\S]*?<\/div>\s*<\/div>/g;
+    cleanedText = cleanedText.replace(bakedRegex, function(full, artId) {
+      var art = chat.artifacts.find(function(a) { return a.id === artId; });
+      if (!art) { console.warn('[artifacts] 旧卡片引用的 artifact 缺失，已删除卡片:', artId); return ''; }
+      var placeholder = '◙ART_' + (cardMap.length) + '◙';
+      cardMap.push({ placeholder: placeholder, cardHtml: buildCardHtml(art) });
+      return placeholder;
+    });
+
+    if (savedNew) AppCore.saveStore();
     return { text: cleanedText, cards: cardMap };
   }
 

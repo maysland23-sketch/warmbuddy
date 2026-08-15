@@ -598,12 +598,6 @@ var ChatModule = (function() {
   // ═══════════════════════════════════════════
   function sanitizeDisplayText(text) {
     if (!text) return text;
-    // Protect legacy artifact-card-inline HTML from being escaped (old messages)
-    var legacyCards = [];
-    text = text.replace(/<div class="artifact-card-inline"[\s\S]*?<\/div>/gi, function(m) {
-      legacyCards.push(m);
-      return '◙LEGACY_' + (legacyCards.length - 1) + '◙';
-    });
     text = text.replace(/<!--\s*REFLECT\s*\{[\s\S]*?\}\}/gi, '');
     text = text.replace(/<!--\s*REFLECT[\s\S]*$/gi, '');
     text = text.replace(/<!--\s*(?:REFLECT|DIARY|MEMORY|STAR|LTM)[\s\S]*?-->/gi, '');
@@ -611,10 +605,6 @@ var ChatModule = (function() {
     text = text.replace(/\[\[(?!FILE:)\w+:[\s\S]*?\]\]/g, '');
     text = text.replace(/^(MESSAGE|LITTER|DIARY|EMAIL|TODO):\s*/gmi, '');
     text = AppCore.escapeHtml(text);
-    // Restore legacy artifact cards (already safe HTML)
-    for (var li = 0; li < legacyCards.length; li++) {
-      text = text.replace('◙LEGACY_' + li + '◙', legacyCards[li]);
-    }
     return text;
   }
 
@@ -762,20 +752,26 @@ var ChatModule = (function() {
       // Plan B: extract artifact cards at render time (before escapeHtml)
       var displayText = m.text || '';
       var artifactCards = [];
-      if (displayText.indexOf('<!--ARTIFACT_START:') >= 0) {
-        var art = AppCore.getModule('artifacts');
-        if (art && art.extractFromText) {
-          var artResult = art.extractFromText(displayText);
-          displayText = artResult.text;
-          artifactCards = artResult.cards;
+      try {
+        if (displayText.indexOf('<!--ARTIFACT_START:') >= 0 || displayText.indexOf('artifact-card-inline') >= 0) {
+          var art = AppCore.getModule('artifacts');
+          if (art && art.extractFromText) {
+            var artResult = art.extractFromText(displayText);
+            displayText = artResult.text;
+            artifactCards = artResult.cards;
+          }
         }
+        displayText = sanitizeDisplayText(displayText);
+        // Restore artifact card HTML (safe, pre-built — bypassed escapeHtml via placeholders)
+        for (var ci = 0; ci < artifactCards.length; ci++) {
+          displayText = displayText.replace(artifactCards[ci].placeholder, artifactCards[ci].cardHtml);
+        }
+        displayText = resolveArtifactRefs(displayText);
+      } catch (e) {
+        // Per-message fault tolerance: a broken message must never abort the whole list.
+        console.error('[render] 第', i, '条消息渲染失败，已降级为纯文本:', e && e.message, 'role=', m.role);
+        displayText = AppCore.escapeHtml(m.text || '');
       }
-      displayText = sanitizeDisplayText(displayText);
-      // Restore artifact card HTML (safe, pre-built — bypassed escapeHtml via placeholders)
-      for (var ci = 0; ci < artifactCards.length; ci++) {
-        displayText = displayText.replace(artifactCards[ci].placeholder, artifactCards[ci].cardHtml);
-      }
-      displayText = resolveArtifactRefs(displayText);
 
       html += '<div class="chat-row ' + m.role + '" id="msg-' + msgId + '">' +
         '<div class="chat-avatar ' + m.role + ('' + (!isUser && proj && proj._aiStatusChanged ? ' status-changed' : '')) + '" ' + (isUser ? '' : 'ondblclick="handleAIAvatarDblClick()" title="双击戳一戳"') + ' style="' + (isUser ? '' : 'cursor:pointer;') + '">' + (isUser ? 'MY' : '✦') + '</div>' +
@@ -1799,7 +1795,7 @@ var ChatModule = (function() {
       }
       typingArea.innerHTML = '';
 
-      var msg = { role: 'ai', text: sentences[i], time: startTime, id: AppCore.generateMsgId() };
+      var msg = { role: 'ai', text: sentences[i], time: startTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
       if (i === 0 && replyTo) msg.replyTo = replyTo;
       if (i === 0 && pendingToolCalls) msg._toolCalls = pendingToolCalls;
       chat.messages.push(msg);
@@ -1844,7 +1840,7 @@ var ChatModule = (function() {
       }
       typingArea.innerHTML = '';
 
-      var msg = { role: 'ai', text: bubble.text, time: startTime, id: AppCore.generateMsgId() };
+      var msg = { role: 'ai', text: bubble.text, time: startTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
       if (bubble.replyTo) msg.replyTo = bubble.replyTo;
       chat.messages.push(msg);
       renderChatMessages();
@@ -2001,7 +1997,7 @@ var ChatModule = (function() {
 
       if (!response.ok) {
         typingArea.innerHTML = '';
-        chat.messages.push({ role: 'ai', text: '连接API失败，请检查配置。', time: bubbleTime, id: AppCore.generateMsgId() });
+        chat.messages.push({ role: 'ai', text: '连接API失败，请检查配置。', time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() });
         renderChatMessages();
         return;
       }
@@ -2325,7 +2321,7 @@ var ChatModule = (function() {
       var text = parsedBubbles[0].text;
       var hasArtifactCard = text.indexOf('artifact-card-inline') >= 0 || text.indexOf('<!--ARTIFACT_START:') >= 0;
       if (hasArtifactCard) {
-        var msgCard = { role: 'ai', text: text, time: bubbleTime, id: AppCore.generateMsgId() };
+        var msgCard = { role: 'ai', text: text, time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
         if (replyTo) msgCard.replyTo = replyTo;
         if (pendingToolCalls) msgCard._toolCalls = pendingToolCalls;
         chat.messages.push(msgCard);
@@ -2333,7 +2329,7 @@ var ChatModule = (function() {
       } else {
         var sentences = splitSentences(text);
         if (sentences.length <= 1) {
-          var msg1 = { role: 'ai', text: text, time: bubbleTime, id: AppCore.generateMsgId() };
+          var msg1 = { role: 'ai', text: text, time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
           if (replyTo) msg1.replyTo = replyTo;
           if (pendingToolCalls) msg1._toolCalls = pendingToolCalls;
           chat.messages.push(msg1);
@@ -2598,7 +2594,7 @@ var ChatModule = (function() {
       if (cmdResult) {
         AppCore.$('chatTypingArea').innerHTML = '';
         chat.messages.push({ role: 'system', text: cmd.type === 'diary' ? '在日记里写了点什么' : '猫砂盆好像需要铲一铲', time: timeStr, id: AppCore.generateMsgId() });
-        chat.messages.push({ role: 'ai', text: cmdResult, time: timeStr, id: AppCore.generateMsgId() });
+        chat.messages.push({ role: 'ai', text: cmdResult, time: timeStr, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() });
         renderChatMessages();
         renderProjectList();
         return;
@@ -2832,7 +2828,7 @@ var ChatModule = (function() {
         } else if (cmd.type === 'litter') {
           chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: aiTime, id: AppCore.generateMsgId() });
         }
-        chat.messages.push({ role: 'ai', text: cmdResult, time: aiTime, id: AppCore.generateMsgId() });
+        chat.messages.push({ role: 'ai', text: cmdResult, time: aiTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() });
         chat.lastInteractionTime = new Date().toISOString();
         renderChatMessages();
         renderProjectList();
