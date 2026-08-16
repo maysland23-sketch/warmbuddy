@@ -1056,6 +1056,13 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
       <button class="test-conn-btn" data-action="showAddToolModal" style="margin-top:0;">添加工具</button>
     </div>
     <div class="settings-group">
+      <div class="settings-group-label">Labels</div>
+      <div id="labelCatalogList" style="margin-bottom:8px;"></div>
+      <input id="newPrimaryLabelInput" placeholder="primary label" style="width:100%;padding:7px 10px;border-radius:8px;border:1px solid var(--border-light);font-size:11px;outline:none;margin-bottom:6px;box-sizing:border-box;">
+      <input id="newSecondaryLabelInput" placeholder="secondary label (optional)" style="width:100%;padding:7px 10px;border-radius:8px;border:1px solid var(--border-light);font-size:11px;outline:none;box-sizing:border-box;">
+      <button class="test-conn-btn" onclick="addLabel()" style="margin-top:8px;">Add label</button>
+    </div>
+    <div class="settings-group">
       <div class="settings-group-label">邮件发送</div>
       <div class="settings-item" data-action="toggleEmailEnabled"><span class="si-label">启用邮件</span><div class="toggle-switch" id="toggleEmail"></div></div>
       <div class="settings-item" data-action="showEmailConfigModal"><span class="si-label">邮箱配置</span><span class="si-val" id="emailStatusVal">未配置</span></div>
@@ -1226,16 +1233,6 @@ function isWeekBoundary(mem, proj) { return MemoryModule.isWeekBoundary(mem, pro
 // [v3] Archivist fallback removed — AEMs only created via window LLM MEMORY marker
 function createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker) { MemoryModule.createAEMFromMarkers(reflection, userMsg, aiResponse, chat, memMarker); }
 
-function queueQuietPresenceCoreMemory(chat) { MemoryModule.queueQuietPresence(chat); }
-
-
-// ==================== RELATIONAL PORTRAIT (P3) ====================
-function updateRelationalPortrait(userAffectLabel) { MemoryModule.updateRelationalPortrait(userAffectLabel); }
-
-function getDefaultStrategy(label) { return MemoryModule.getDefaultStrategy(label); }
-
-async function queuePortraitRefinement() { MemoryModule.queuePortraitRefinement(); }
-
 // ==================== SHORT-TERM MEMORY COMPRESSION (P4) ====================
 // Opt4: Group messages into conversation rounds
 // A "round" = user message + following AI response(s) until next user message
@@ -1244,16 +1241,9 @@ function groupMessagesIntoRounds(messages) { return MemoryModule.groupMessagesIn
 // Opt4: Queue compression for a batch of rounds (non-blocking)
 async function queueRoundCompression(chat, rounds) { MemoryModule.queueRoundCompression(chat, rounds); }
 
-function checkSummarization(chat) { MemoryModule.checkSummarization(chat); }
-
-async function summarizeMessages(batch, startIdx, endIdx, chat) { MemoryModule.summarizeMessages(batch, startIdx, endIdx, chat); }
-
 // ==================== LONG-TERM MEMORY SEARCH (P5) ====================
 // ── Tokenizer: Chinese bigram + English word ──
 function tokenizeChinese(text) { return MemoryModule.tokenizeChinese(text); }
-
-// ── BM25 Index Builder ──
-function rebuildBM25Index() { MemoryModule.rebuildBM25Index(); }
 
 // ── BM25 Keyword Search ──
 function searchByBM25(query) { return MemoryModule.searchByBM25(query); }
@@ -1273,17 +1263,11 @@ function isNearDuplicate(content, proj) { return MemoryModule.isNearDuplicate(co
 
 function bigramOverlap(a, b) { return MemoryModule.bigramOverlap(a, b); }
 
-// ── LRU Eviction for Core Memories ──
-function evictOldestCoreMemories() { MemoryModule.evictOldestCoreMemories(); }
-
 // ==================== v2.0 INSIGHTS DERIVATION ====================
 // Trigger check: called after AEM, USM, or diary/litterbox additions
 function checkDeriveInsightsTrigger(source) { MemoryModule.checkDeriveInsightsTrigger(source); }
 
 async function deriveRelationalInsights() { MemoryModule.generateCoreOverview(); }
-
-// ── Cold Start: Default Relational Patterns ──
-function ensureColdStartPatterns() { MemoryModule.ensureColdStartPatterns(); }
 
 // ── Long-Term Memory Auto-Generation (every 10 messages) ──
 async function checkLongTermMemory(chat) { MemoryModule.checkLongTerm(chat); }
@@ -1293,10 +1277,6 @@ async function checkLongTermMemory(chat) { MemoryModule.checkLongTerm(chat); }
 var DESIRE_CONFIG = DesireModule.DESIRE_CONFIG;
 // Lightweight wrapper
 function updateDesireDrives(reflection) { DesireModule.updateDesireDrives(reflection); }
-
-// ==================== COMPATIBILITY: Todo reminders ====================
-function checkTodoReminders() { TodoModule.checkTodoReminders(); }
-function triggerTodoReminder(todo) { return TodoModule.triggerTodoReminder(todo); }
 
 let nextTodoId = 20;
 let currentMemoryTab = 'memories';
@@ -1359,10 +1339,6 @@ function getChatDisplayName(chatId) { for (const p of store.projects) { const c 
 // Lightweight wrapper
 function getDesireSystem() { return DesireModule.getDesireSystem(); }
 // [v3] replaced by MemoryModule — kept as compatibility wrapper
-function getDerivedPatterns() { return MemoryModule.getDerivedPatterns(store.activeProject); }
-// [v3] replaced by MemoryModule — kept as compatibility wrapper
-function getPersonalityProfiles() { return MemoryModule.getPersonalityProfiles(store.activeProject); }
-// [v3] replaced by MemoryModule — kept as compatibility wrapper
 function getCoreMemoryLayers() { return MemoryModule.getCML(store.activeProject) || { aiEmotionalMemories: [], userStarredMemories: [], diaryAndLitterbox: [] }; }
 // Lightweight wrapper
 function getDriveLabel(key) { return DesireModule.getDriveLabel(key); }
@@ -1416,8 +1392,6 @@ function onMemorySearch(query) {
 function highlightMemory(memId) {
   // Switch to memories tab and scroll to the item
   switchMemoryTab('memories');
-  // Trigger rebuild of BM25 after memory interaction
-  store.memorySystem.bm25Index._dirty = true;
 }
 async function switchMemoryTab(tab){
   currentMemoryTab=tab;
@@ -1608,6 +1582,7 @@ function renderMemoryPanelBody(){
             <span class="affect-badge" style="background:linear-gradient(135deg,#6B7C93,#8A9BB5);color:#fff;">用户 ${uL} (${uI})</span>
           </div>
           <div class="memory-item-content" style="font-size:13px;">${summaryText}</div>
+          ${memLabelChips(aem)}
           ${rawPreview ? `<div style="margin-top:4px;padding:4px 8px;background:var(--bg);border-radius:6px;line-height:1.4;">${rawPreview}</div>` : ''}
           ${ctxPreview}
           ${aem.aiSelfEval && aem.aiSelfEval.internalNote ? `<div style="font-size:10px;color:var(--text-lighter);font-style:italic;margin-top:2px;">${(aem.aiSelfEval.internalNote||'').slice(0,80)}</div>` : ''}
@@ -1631,8 +1606,9 @@ function renderMemoryPanelBody(){
               '<span class="affect-badge" style="background:linear-gradient(135deg,#F0D060,#F5E080);color:#4A4543;">★ 星标</span>' +
             '</div>' +
             '<div class="memory-item-content" style="font-size:13px;">' + (usm.summary || '(no summary)') + '</div>' +
+            memLabelChips(usm) +
             (usmPreview ? '<div style="margin-top:4px;padding:4px 8px;background:var(--bg);border-radius:6px;line-height:1.4;">' + usmPreview + '</div>' : '') +
-            '<div class="memory-item-meta">' + usmTs + ' · user_starred</div>' +
+            '<div class="memory-item-meta">' + usmTs + ' · user_starred' + (usm.decayFactor!==undefined?' · decay: '+Math.round((usm.decayFactor||0)*100)+'%':'') + (usm.semanticKey?' · '+usm.semanticKey:'') + ' · ' + (usm._syncedAt ? 'sync: '+toLocalDisplayTime(usm._syncedAt) : 'sync: pending') + '</div>' +
           '</div>';
         });
         usmHtml += '</div>';
@@ -1659,44 +1635,52 @@ function renderMemoryPanelBody(){
     // Long-term memories from proj.memories (default not starred)
     for(var mi=0;mi<(proj.memories||[]).length;mi++){
       var m=proj.memories[mi];
-      allMems.push({id:m.id,content:m.content||m.summary||'',date:m.date||(m.timestamp||'').slice(0,10),type:m.type||'memory',starred:!!m.starred,affectLabel:null,decayFactor:m.decayFactor||1,_layer:'memory',semanticKey:m.semanticKey||''});
+      allMems.push({id:m.id,content:m.content||m.summary||'',date:m.date||(m.timestamp||'').slice(0,10),type:m.type||'memory',starred:!!m.starred,affectLabel:null,decayFactor:m.decayFactor||1,_layer:'memory',semanticKey:m.semanticKey||'',timestamp:m.timestamp||'',rawDialogue:m.rawDialogue||null,primaryLabel:m.primaryLabel||'未分类',secondaryLabel:m.secondaryLabel||null,semanticKeywords:m.semanticKeywords||[],_syncedAt:m._syncedAt||null});
     }
     // USMs from MemoryModule (starred)
     var cmlData=MemoryModule.getCML(proj.id);
     if(cmlData){
       for(var ui=0;ui<(cmlData.userStarredMemories||[]).length;ui++){
         var u=cmlData.userStarredMemories[ui];
-        allMems.push({id:u.id,content:u.summary||'',date:(u.timestamp||'').slice(0,10),type:'user_starred',starred:true,affectLabel:null,decayFactor:u.decayFactor||1,_layer:'usm',status:u.status||'generated',rawDialogue:u.rawDialogue||null,timestamp:u.timestamp||'',retryCount:u.retryCount||0});
+        allMems.push({id:u.id,content:u.summary||'',date:(u.timestamp||'').slice(0,10),type:'user_starred',starred:true,affectLabel:null,decayFactor:u.decayFactor||1,_layer:'usm',rawDialogue:u.rawDialogue||null,timestamp:u.timestamp||'',semanticKey:u.semanticKey||'',primaryLabel:u.primaryLabel||'未分类',secondaryLabel:u.secondaryLabel||null,semanticKeywords:u.semanticKeywords||[],_syncedAt:u._syncedAt||null});
       }
     }
     allMems.sort(function(a,b){if(a.starred&&!b.starred)return -1;if(!a.starred&&b.starred)return 1;return b.date.localeCompare(a.date);});
+    var filteredMems=allMems.filter(function(m){
+      if(labelFilterPrimary!=='all' && (m.primaryLabel||'未分类')!==labelFilterPrimary) return false;
+      if(labelFilterSecondary!=='all' && (m.secondaryLabel||null)!==labelFilterSecondary) return false;
+      return true;
+    });
     var chat=getActiveChatObj(); var sids=chat?chat.sharedMemoryIds:[];
-    b.innerHTML='<div style="padding:4px;">'+(allMems.length===0?'<div class="empty-state">no memories yet.<br><span style="font-size:10px;color:var(--text-lighter);">long-term memories (every 20 messages) and starred memories appear here</span></div>':'')+
-      allMems.map(function(m){
+    b.innerHTML='<div style="padding:4px;">'+labelFilterBarHtml()+
+      (allMems.length===0?'<div class="empty-state">no memories yet.<br><span style="font-size:10px;color:var(--text-lighter);">long-term memories (every 20 messages) and starred memories appear here</span></div>':'')+
+      (allMems.length>0&&filteredMems.length===0?'<div class="empty-state">no memories match the label filter.</div>':'')+
+      filteredMems.map(function(m){
         var isStarred=m.starred||m._layer==='usm';
-        var isPending=m.status==='pending';
-        var isFailed=m.status==='failed';
         var summary=m.content||'';
         var isLong=summary.length>30;
-        var summaryDisplay=isPending?'生成中...':(isFailed?'生成失败':(isLong?summary.slice(0,30)+'...':summary));
+        var summaryDisplay=isLong?summary.slice(0,30)+'...':summary;
         // Format timestamp to local time
         var localTime='';
         if(m.timestamp){
           try { var d=new Date(m.timestamp); localTime=d.toLocaleString(); } catch(e){ localTime=m.timestamp.slice(0,19).replace('T',' '); }
         }
+        var decayPct=(m.decayFactor!==undefined)?Math.round((m.decayFactor||0)*100):100;
         // Raw dialogue — same style as core tab USM/AEM
         var rawHtml='';
         if(m.rawDialogue&&m.rawDialogue.length>0){
           rawHtml='<div style="margin-top:4px;padding:4px 8px;background:var(--bg);border-radius:6px;line-height:1.4;">'+m.rawDialogue.map(function(d){ return '<span style="font-size:10px;color:var(--text-lighter);">'+(d.role==='user'?'用户':'AI')+': '+(d.text||'').slice(0,60)+'</span>'; }).join('<br>')+'</div>';
         }
-        // Retry button for failed
-        var retryHtml=isFailed?'<span style="color:var(--accent);cursor:pointer;font-size:10px;margin-left:8px;" onclick="event.stopPropagation();AppCore.getModule(\'memory\').generateUSM(\''+m.id+'\',JSON.parse(\''+JSON.stringify(m.rawDialogue||[]).replace(/'/g,'\\\'')+'\'))">重试</span>':'';
+        // USM star is read-only (permanently starred); only LTM star is clickable to upgrade
+        var starClick = m._layer==='usm' ? '' : ' onclick="event.stopPropagation();toggleMemoryStar(\''+proj.id+'\',\''+m.id+'\',\''+m._layer+'\')"';
+        var starCursor = m._layer==='usm' ? 'cursor:default;' : 'cursor:pointer;';
         return '<div class="memory-list-item" style="flex-direction:column;align-items:stretch;gap:4px;">'+
           '<div style="display:flex;align-items:flex-start;gap:8px;">'+
-            '<span class="memory-star '+(isStarred?'starred':'')+'" style="flex-shrink:0;cursor:pointer;" onclick="event.stopPropagation();toggleMemoryStar(\''+proj.id+'\',\''+m.id+'\',\''+m._layer+'\')">★</span>'+
+            '<span class="memory-star '+(isStarred?'starred':'')+'" style="flex-shrink:0;'+starCursor+'"'+starClick+'>★</span>'+
             '<div style="flex:1;min-width:0;">'+
-              '<div class="memory-item-content" style="cursor:'+(isLong&&!isPending?'pointer':'default')+';'+(isPending||isFailed?'color:var(--text-lighter);':'')+'" onclick="'+(isLong&&!isPending?'var t=this;var full=t.dataset.summary||\'\';if(t.textContent.indexOf(\'...\')>0){if(full){t.textContent=full}else{t.dataset.summary=t.textContent;t.textContent=full}':'')+'">'+summaryDisplay+'</div>'+
-              '<div class="memory-item-meta" style="font-size:10px;color:var(--text-lighter);">'+localTime+(m.semanticKey?' · '+m.semanticKey:'')+retryHtml+'</div>'+
+              '<div class="memory-item-content" style="cursor:'+(isLong?'pointer':'default')+';" onclick="'+(isLong?'var t=this;var full=t.dataset.summary||\'\';if(t.textContent.indexOf(\'...\')>0){if(full){t.textContent=full}else{t.dataset.summary=t.textContent;t.textContent=full}':'')+'">'+summaryDisplay+'</div>'+
+              '<div class="memory-item-meta" style="font-size:10px;color:var(--text-lighter);">'+localTime+(m.semanticKey?' · '+m.semanticKey:'')+' · decay: '+decayPct+'% · '+(m._syncedAt?'sync: '+toLocalDisplayTime(m._syncedAt):'sync: pending')+'</div>'+
+              memLabelChips(m)+
               rawHtml+
             '</div>'+
             '<div class="memory-checkbox '+(sids.includes(m.id)?'checked':'')+'" style="flex-shrink:0;cursor:pointer;" onclick="event.stopPropagation();toggleMemoryShare(\''+proj.id+'\',\''+m.id+'\')">'+(sids.includes(m.id)?'✓':'')+'</div>'+
@@ -1709,54 +1693,190 @@ function renderMemoryPanelBody(){
 function toggleMemoryStar(pid,mid,layer){
   var proj=store.projects.find(function(p){return p.id===pid;}); if(!proj)return;
 
-  // Long-term memory (proj.memories) → upgrade to USM (one-way)
-  if (layer === 'memory') {
-    var foundMem = null;
-    for (var i = 0; i < (proj.memories || []).length; i++) {
-      if (proj.memories[i].id === mid) { foundMem = proj.memories[i]; break; }
-    }
-    if (!foundMem) return;
-    if (foundMem.starred) return; // Already starred, skip
-    // Upgrade to USM
-    var usm = {
-      id: 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
-      timestamp: new Date().toISOString(),
-      sourceChatId: foundMem.sourceChatId || store.activeChat,
-      sourceWindowId: foundMem.sourceChatId || store.activeChat,
-      sourceProjectId: pid,
-      rawDialogue: [],
-      summary: foundMem.content || '',
-      starredMsgIds: [],
-      userNote: ''
-    };
-    MemoryModule.addUSM(pid, usm);
-    // Remove from proj.memories
-    proj.memories.splice(i, 1);
-    checkDeriveInsightsTrigger('usm');
-    AppCore.saveStore();
-    renderMemoryPanelBody();
-    UIModule.toast('★ 升级为星标记忆');
-    return;
-  }
+  // Only long-term memories (proj.memories) can be upgraded to USM (one-way).
+  // USM/AEM stars are not togglable — a USM is permanently starred.
+  if (layer !== 'memory') return;
 
-  // USM or AEM: toggle starred state
-  var cml = MemoryModule.getCML(pid);
-  var found = null;
-  if (cml) {
-    for (var i = 0; i < (cml.aiEmotionalMemories || []).length; i++) { if (cml.aiEmotionalMemories[i].id === mid) { found = cml.aiEmotionalMemories[i]; break; } }
-    if (!found) { for (var i = 0; i < (cml.userStarredMemories || []).length; i++) { if (cml.userStarredMemories[i].id === mid) { found = cml.userStarredMemories[i]; break; } } }
+  var foundMem = null;
+  for (var i = 0; i < (proj.memories || []).length; i++) {
+    if (proj.memories[i].id === mid) { foundMem = proj.memories[i]; break; }
   }
-  if (!found) return;
-  var newStarred = !found.starred;
-  MemoryModule.update(pid, mid, { starred: newStarred });
-  if (newStarred) { var chat = getActiveChatObjForProject(pid); if (chat && !chat.sharedMemoryIds.includes(mid)) chat.sharedMemoryIds.push(mid); }
+  if (!foundMem) return;
+  if (foundMem.starred) return; // Already starred, skip
+
+  // Upgrade to USM — carry semanticKey + rawDialogue + unified label/edge fields
+  var usm = {
+    id: 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
+    timestamp: new Date().toISOString(),
+    sourceChatId: foundMem.sourceChatId || store.activeChat,
+    sourceWindowId: foundMem.sourceChatId || store.activeChat,
+    sourceProjectId: pid,
+    rawDialogue: foundMem.rawDialogue || [],
+    summary: foundMem.content || foundMem.summary || '',
+    semanticKey: foundMem.semanticKey || '',
+    semanticKeywords: foundMem.semanticKeywords || [],
+    primaryLabel: foundMem.primaryLabel || '未分类',
+    secondaryLabel: foundMem.secondaryLabel || null,
+    emotionalLabels: [],
+    relatedMemoryIds: [],
+    starred: true,
+    decayFactor: foundMem.decayFactor !== undefined ? foundMem.decayFactor : 1,
+    starredMsgIds: [],
+    userNote: ''
+  };
+  MemoryModule.addUSM(pid, usm);
+  MemoryModule.buildRelatedEdges(pid, usm);
+  // Remove from proj.memories
+  proj.memories.splice(i, 1);
+  checkDeriveInsightsTrigger('usm');
+  AppCore.saveStore();
   renderMemoryPanelBody();
-  UIModule.toast(newStarred ? '★ 已标记' : '已取消星标');
+  UIModule.toast('★ 升级为星标记忆');
 }
 function toggleMemoryShare(pid,mid){
   const chat=getActiveChatObjForProject(pid); if(!chat)return;
   const i=chat.sharedMemoryIds.indexOf(mid); if(i>=0)chat.sharedMemoryIds.splice(i,1); else chat.sharedMemoryIds.push(mid);
   renderMemoryPanelBody();
+}
+// ==================== LABEL SYSTEM (v3) ====================
+var labelFilterPrimary = 'all';
+var labelFilterSecondary = 'all';
+
+function jsq(s){ return (s==null?'':String(s)).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+
+function memLabelChips(mem){
+  if(!mem) return '';
+  var chips = [];
+  var isAem = !!(mem.aiSelfEval);
+  if(isAem){
+    (mem.emotionalLabels||[]).forEach(function(l){ if(l) chips.push('<span class="affect-badge" style="font-size:9px;padding:1px 7px;background:var(--accent-pale);color:var(--text-light);">'+AppCore.escapeHtml(l)+'</span>'); });
+    (mem.semanticKeywords||[]).forEach(function(k){ if(k) chips.push('<span style="font-size:9px;padding:1px 7px;border-radius:6px;border:1px solid var(--border-light);color:var(--text-lighter);">'+AppCore.escapeHtml(k)+'</span>'); });
+  } else {
+    var p = mem.primaryLabel || '未分类';
+    var s = mem.secondaryLabel || '';
+    var isUncat = !mem.primaryLabel || mem.primaryLabel === '未分类';
+    var labelText = isUncat ? '未分类 +' : (p + (s ? ' / ' + s : ''));
+    chips.push('<span class="affect-badge" style="font-size:9px;padding:1px 7px;background:var(--bg);border:1px '+(isUncat?'dashed':'solid')+' var(--border);color:'+(isUncat?'var(--text-lighter)':'var(--text-light)')+';cursor:pointer;" onclick="event.stopPropagation();openLabelPicker(\''+jsq(mem.id)+'\',\''+jsq(mem.primaryLabel||'未分类')+'\',\''+jsq(mem.secondaryLabel||'')+'\')">'+AppCore.escapeHtml(labelText)+'</span>');
+    (mem.semanticKeywords||[]).forEach(function(k){ if(k) chips.push('<span style="font-size:9px;padding:1px 7px;border-radius:6px;border:1px solid var(--border-light);color:var(--text-lighter);">'+AppCore.escapeHtml(k)+'</span>'); });
+  }
+  return chips.length ? '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">'+chips.join('')+'</div>' : '';
+}
+
+function labelFilterBarHtml(){
+  var catalog = MemoryModule.getLabelCatalog() || {};
+  var primaries = Object.keys(catalog);
+  var primaryOpts = '<option value="all">all labels</option>';
+  primaries.forEach(function(p){ primaryOpts += '<option value="'+jsq(p)+'"'+(labelFilterPrimary===p?' selected':'')+'>'+AppCore.escapeHtml(p)+'</option>'; });
+  var secondaryOpts = '<option value="all">all sub-labels</option>';
+  if(labelFilterPrimary!=='all'){
+    (catalog[labelFilterPrimary]||[]).forEach(function(s){ secondaryOpts += '<option value="'+jsq(s)+'"'+(labelFilterSecondary===s?' selected':'')+'>'+AppCore.escapeHtml(s)+'</option>'; });
+  }
+  return '<div style="display:flex;gap:6px;margin-bottom:8px;">' +
+    '<select style="flex:1;padding:6px 8px;border-radius:8px;border:1px solid var(--border-light);background:var(--bg);font-size:11px;color:var(--text);outline:none;" onchange="labelFilterPrimary=this.value;labelFilterSecondary=\'all\';renderMemoryPanelBody();">'+primaryOpts+'</select>' +
+    '<select style="flex:1;padding:6px 8px;border-radius:8px;border:1px solid var(--border-light);background:var(--bg);font-size:11px;color:var(--text);outline:none;" onchange="labelFilterSecondary=this.value;renderMemoryPanelBody();">'+secondaryOpts+'</select>' +
+  '</div>';
+}
+
+function renderLabelCatalog(){
+  var el = $('labelCatalogList'); if(!el) return;
+  var catalog = MemoryModule.getLabelCatalog();
+  if(!catalog || Object.keys(catalog).length===0){
+    el.innerHTML = '<div style="font-size:11px;color:var(--text-lighter);">no labels yet.</div>';
+    return;
+  }
+  var html = '';
+  Object.keys(catalog).forEach(function(primary){
+    html += '<div style="margin-bottom:8px;">';
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">' +
+      '<span style="font-size:12px;color:var(--text);">'+AppCore.escapeHtml(primary)+'</span>' +
+      '<button class="panel-close" style="font-size:9px;padding:1px 6px;" onclick="deleteLabel(\''+jsq(primary)+'\')">✕</button>' +
+      '</div>';
+    var seconds = catalog[primary] || [];
+    if(seconds.length){
+      html += '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">';
+      seconds.forEach(function(s){
+        html += '<span style="font-size:10px;padding:2px 7px;border-radius:6px;background:var(--accent-pale);color:var(--text-light);">'+AppCore.escapeHtml(s)+' <span style="cursor:pointer;opacity:0.7;" onclick="deleteLabel(\''+jsq(primary)+'\',\''+jsq(s)+'\')">✕</span></span>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+  });
+  el.innerHTML = html;
+}
+
+async function addLabel(){
+  var primary = ($('newPrimaryLabelInput').value||'').trim();
+  var secondary = ($('newSecondaryLabelInput').value||'').trim();
+  if(!primary){ UIModule.toast('primary label required'); return; }
+  try {
+    var resp = await fetch(BACKEND_URL + '/api/labels', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ primaryLabel: primary, secondaryLabel: secondary || null })
+    });
+    var data = await resp.json();
+    if(!resp.ok){ UIModule.toast(data.error || 'failed'); return; }
+    MemoryModule.setLabelCatalog(data.catalog);
+    $('newPrimaryLabelInput').value = '';
+    $('newSecondaryLabelInput').value = '';
+    renderLabelCatalog();
+    renderMemoryPanelBody();
+    UIModule.toast('label added');
+  } catch(e){ UIModule.toast('failed: ' + e.message); }
+}
+
+async function deleteLabel(primary, secondary){
+  try {
+    var url = BACKEND_URL + '/api/labels?primaryLabel=' + encodeURIComponent(primary) + (secondary ? '&secondaryLabel=' + encodeURIComponent(secondary) : '');
+    var resp = await fetch(url, { method:'DELETE' });
+    var data = await resp.json();
+    if(!resp.ok){ UIModule.toast(data.error || 'failed'); return; }
+    MemoryModule.setLabelCatalog(data.catalog);
+    renderLabelCatalog();
+    renderMemoryPanelBody();
+    if(data.referenced) UIModule.toast('label deleted ('+data.referenced+' referenced)');
+    else UIModule.toast('label deleted');
+  } catch(e){ UIModule.toast('failed: ' + e.message); }
+}
+
+function openLabelPicker(memId, curPrimary, curSecondary){
+  var catalog = MemoryModule.getLabelCatalog() || {};
+  var primaries = Object.keys(catalog);
+  var primaryOpts = '<option value="未分类"'+(curPrimary==='未分类'?' selected':'')+'>未分类</option>';
+  primaries.forEach(function(p){ primaryOpts += '<option value="'+jsq(p)+'"'+(p===curPrimary?' selected':'')+'>'+AppCore.escapeHtml(p)+'</option>'; });
+  var body = '<input type="hidden" id="labelPickerMemId" value="'+jsq(memId)+'">' +
+    '<div style="font-size:11px;color:var(--text-lighter);margin-bottom:4px;">primary</div>' +
+    '<select id="labelPickerPrimary" class="modal-input" style="margin-bottom:10px;" onchange="updateLabelPickerSecondary()">'+primaryOpts+'</select>' +
+    '<div style="font-size:11px;color:var(--text-lighter);margin-bottom:4px;">secondary</div>' +
+    '<select id="labelPickerSecondary" class="modal-input"></select>';
+  showModal('Label', body, [
+    {label:'cancel',cls:'cancel',onclick:closeModal},
+    {label:'save',cls:'confirm',onclick:applyLabel}
+  ]);
+  updateLabelPickerSecondary(curSecondary);
+}
+
+function updateLabelPickerSecondary(preselected){
+  var sel = $('labelPickerSecondary'); if(!sel) return;
+  var primary = $('labelPickerPrimary') ? $('labelPickerPrimary').value : '未分类';
+  var catalog = MemoryModule.getLabelCatalog() || {};
+  var seconds = (primary !== '未分类') ? (catalog[primary]||[]) : [];
+  var selectedVal = (preselected!==undefined && preselected!==null) ? preselected : '';
+  var opts = '<option value="">(none)</option>';
+  seconds.forEach(function(s){ opts += '<option value="'+jsq(s)+'"'+(s===selectedVal?' selected':'')+'>'+AppCore.escapeHtml(s)+'</option>'; });
+  sel.innerHTML = opts;
+}
+
+function applyLabel(){
+  var proj = getActiveProject(); if(!proj) return;
+  var memId = ($('labelPickerMemId') ? $('labelPickerMemId').value : '');
+  var primary = ($('labelPickerPrimary') ? $('labelPickerPrimary').value : '未分类');
+  var secondary = ($('labelPickerSecondary') && $('labelPickerSecondary').value) ? $('labelPickerSecondary').value : null;
+  if(!memId){ closeModal(); return; }
+  MemoryModule.setMemoryLabel(proj.id, memId, primary, secondary);
+  closeModal();
+  renderMemoryPanelBody();
+  UIModule.toast(primary==='未分类' ? '设为未分类，关联已解除' : 'label updated');
 }
 // v2.0: Manual export — full 3-layer format with exportMeta
 function triggerWeeklyExport(){
@@ -1793,9 +1913,7 @@ function triggerExport(chatId, exportType) {
     },
     aiEmotionalMemories: cml.aiEmotionalMemories || [],
     userStarredMemories: cml.userStarredMemories || [],
-    diaryAndLitterbox: cml.diaryAndLitterbox || [],
-    derivedRelationalPatterns: getDerivedPatterns() || {},
-    personalityProfiles: getPersonalityProfiles() || {}
+    diaryAndLitterbox: cml.diaryAndLitterbox || []
   };
 
   const jsonStr = JSON.stringify(exportData, null, 2);
@@ -1847,9 +1965,7 @@ function downloadExport(cid, wk) {
     },
     aiEmotionalMemories: cml.aiEmotionalMemories || [],
     userStarredMemories: cml.userStarredMemories || [],
-    diaryAndLitterbox: cml.diaryAndLitterbox || [],
-    derivedRelationalPatterns: getDerivedPatterns() || {},
-    personalityProfiles: getPersonalityProfiles() || {}
+    diaryAndLitterbox: cml.diaryAndLitterbox || []
   };
 
   const jsonStr = JSON.stringify(exportData, null, 2);
@@ -2362,7 +2478,6 @@ function buildDynamicContextBlock() { return ChatModule.buildDynamicContextBlock
 function buildRecentMsgIdBlock(chat) { return ChatModule.buildRecentMsgIdBlock(chat); }
 
 // ── Backward-compat wrapper: returns the full legacy string ──
-// (only used by genAIResponseForCommand; sendMessage uses the split version directly)
 function buildSystemPrompt() { return ChatModule.buildSystemPrompt(); }
 
 // ==================== SELF-REFLECTION (P2) ====================
@@ -2388,15 +2503,6 @@ function getRecentUserAffectLabels() { return ChatModule.getRecentUserAffectLabe
 function detectCommand(input) { return ChatModule.detectCommand(input); }
 
 function executeCommand(cmd, userText) { return ChatModule.executeCommand(cmd, userText); }
-
-// ==================== INTENT CLASSIFICATION ====================
-/**
- * Use AI to classify the user's diary-related intent.
- * Returns 'diary_write' | 'diary_comment' | 'none'.
- */
-function classifyDiaryIntent(userText) { return ChatModule.classifyDiaryIntent(userText); }
-
-function genAIResponseForCommand(userPrompt, systemPrompt) { return ChatModule.genAIResponseForCommand(userPrompt, systemPrompt); }
 
 // ==================== LONG-PRESS / CONTEXT MENU ====================
 
@@ -2478,11 +2584,6 @@ async function executeBatchStar() { ChatModule.executeBatchStar(); }
 
 async function createUserStarredMemory(selectedMsgIds) { return ChatModule.createUserStarredMemory(selectedMsgIds); }
 
-
-// ==================== MEMORY REPAIR FUNCTIONS (v2.2) ====================
-async function regenerateAEM(entryId) { ChatModule.regenerateAEM(entryId); }
-
-async function regenerateUSM(entryId) { ChatModule.regenerateUSM(entryId); }
 
 function toggleBubbleActions(event, idx){ ChatModule.toggleBubbleActions(event, idx); }
 
@@ -2649,15 +2750,9 @@ async function handleEmailSend(chat, subject, body){
   var cfg=getActiveApiConfig();
   if(!cfg||!cfg.apiKey){UIModule.toast('请先配置API Key');return false;}
   try{
-    var msgs=[];
-    for(var i=0;i<chat.messages.length;i++){
-      var m=chat.messages[i];
-      if(m.role==='system')continue;
-      msgs.push({role:m.role==='ai'?'assistant':m.role,content:m.text});
-    }
     var resp=await fetch(AppCore.BACKEND_URL+'/api/email/send',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({subject:subject,messages:msgs,apiConfig:{apiKey:cfg.apiKey,endpoint:cfg.endpoint,model:cfg.model}})
+      body:JSON.stringify({subject:subject,body:body||subject})
     });
     var data=await resp.json();
     if(data.ok){
@@ -3210,7 +3305,7 @@ async function sendPushNotification(title, body, opts = {}) {
 }
 
 // Init — delegated to AppCore
-function init() { AppCore.init(); }
+function init() { AppCore.init(); MemoryModule.loadLabelCatalog().then(function(){ renderLabelCatalog(); }); }
 init();
 
 // Lightweight wrappers → migrated to app-core.js

@@ -215,9 +215,7 @@ var BackupModule = (function() {
       },
       aiEmotionalMemories: cml.aiEmotionalMemories || [],
       userStarredMemories: cml.userStarredMemories || [],
-      diaryAndLitterbox: cml.diaryAndLitterbox || [],
-      derivedRelationalPatterns: MemoryModule.getDerivedPatterns(proj.id) || {},
-      personalityProfiles: MemoryModule.getPersonalityProfiles(proj.id) || {}
+      diaryAndLitterbox: cml.diaryAndLitterbox || []
     };
 
     var jsonStr = JSON.stringify(exportData, null, 2);

@@ -178,6 +178,38 @@ var LitterBoxModule = (function() {
       syncToDiaryLitterboxLayer('litterbox', result.content);
     },
 
+    /** Main-chat write path — AI outputs <!--LITTER:type-->...<!--/LITTER--> directly in chat.
+     *  No 30min cooldown; reuses the daily 5-item cap; does NOT touch _lastLitterTime. */
+    ingestFromMainChat: function(content, type, chat) {
+      var store = AppCore.getStore();
+      if (!content || !content.trim()) return false;
+      if (countTodayLitter() >= LITTER_MAX_PER_DAY) return false;
+      var validationErr = validateLitterContent(content);
+      if (validationErr) { console.log('[litter] Main-chat content rejected:', validationErr, content.slice(0, 50)); return false; }
+      if (!store.litterThoughts) store.litterThoughts = [];
+      var proj = AppCore.getActiveProject();
+      var winName = (proj && chat) ? proj.name + ' / ' + chat.name : (chat && chat.name ? chat.name : 'unknown');
+      var thoughtType = (type && type.trim()) ? type.trim().slice(0, 4) : 'unclear';
+      store.litterThoughts.unshift({
+        id: 'lt' + AppCore.gid(''),
+        content: content.trim(),
+        thought_type: thoughtType,
+        trigger_type: 'ai_active',
+        context_snapshot: '',
+        date: AppCore.fmtDate().iso,
+        time: AppCore.nowTime(),
+        sourceChatId: store.activeChat,
+        sourceWindow: winName,
+        revealed: false
+      });
+      if (store.litterThoughts.length > 50) store.litterThoughts.length = 50;
+      if (chat) {
+        chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: AppCore.nowTime(), id: AppCore.generateMsgId() });
+      }
+      syncToDiaryLitterboxLayer('litterbox', content.trim());
+      return true;
+    },
+
     /** Render litter box icon on home page */
     render: function() {
       var store = AppCore.getStore();
@@ -195,7 +227,7 @@ var LitterBoxModule = (function() {
       var area = AppCore.$('litterThoughtArea');
       if (store.litterThoughts.length > 0) {
         var t = store.litterThoughts[0];
-        var typeLabel = LITTER_TYPE_LABELS[t.thought_type] || '';
+        var typeLabel = LITTER_TYPE_LABELS[t.thought_type] || t.thought_type || '';
         var displayName = getChatDisplayName(t.sourceChatId) || t.sourceWindow || 'unknown';
         area.innerHTML = '<div class="litter-thought-card">' +
           '<button class="litter-thought-close" data-action="dismissLitterThought" data-args="' + t.id + '">✕</button>' +

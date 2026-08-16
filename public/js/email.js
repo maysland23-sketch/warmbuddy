@@ -7,18 +7,6 @@ var EmailModule = (function() {
   'use strict';
 
   // ═══════════════════════════════════════════
-  //  Private helpers
-  // ═══════════════════════════════════════════
-
-  function extractEmailFromResponse(text) {
-    if (!text) return null;
-    var re = /\[\[EMAIL:([^\]|]+)(?:\|([\s\S]*?))?\]\]/;
-    var m = text.match(re);
-    if (!m) return null;
-    return { subject: m[1].trim(), body: (m[2] || '').trim() };
-  }
-
-  // ═══════════════════════════════════════════
   //  Show config modal
   // ═══════════════════════════════════════════
 
@@ -88,44 +76,6 @@ var EmailModule = (function() {
   }
 
   // ═══════════════════════════════════════════
-  //  Send email
-  // ═══════════════════════════════════════════
-
-  async function send(chat, subject, body) {
-    var typingArea = AppCore.$('chatTypingArea');
-    if (typingArea) typingArea.innerHTML = '<div class="typing-indicator">正在写邮件……<span class="streaming-cursor">|</span></div>';
-    var cfg = AppCore.getActiveApiConfig();
-    if (!cfg || !cfg.apiKey) { UIModule.toast('请先配置API Key'); return false; }
-    try {
-      var msgs = [];
-      for (var i = 0; i < chat.messages.length; i++) {
-        var m = chat.messages[i];
-        if (m.role === 'system') continue;
-        msgs.push({ role: m.role === 'ai' ? 'assistant' : m.role, content: m.text });
-      }
-      var resp = await fetch(AppCore.BACKEND_URL + '/api/email/send', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject: subject, messages: msgs, apiConfig: { apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model } })
-      });
-      var data = await resp.json();
-      if (data.ok) {
-        chat.messages.push({ role: 'system', contentType: 'email_notification', text: '邮件已发送', time: AppCore.nowTime() });
-        if (typingArea) typingArea.innerHTML = '';
-        return true;
-      } else {
-        UIModule.toast('邮件发送失败: ' + (data.error || '未知错误'));
-        if (typingArea) typingArea.innerHTML = '';
-        return false;
-      }
-    } catch (e) {
-      console.error('[email]', e.message);
-      UIModule.toast('邮件发送失败: ' + e.message);
-      if (typingArea) typingArea.innerHTML = '';
-      return false;
-    }
-  }
-
-  // ═══════════════════════════════════════════
   //  Init
   // ═══════════════════════════════════════════
 
@@ -142,9 +92,7 @@ var EmailModule = (function() {
     showConfig: showConfig,
     saveConfig: saveConfig,
     toggleEnabled: toggleEnabled,
-    updateUI: updateUI,
-    extractFromResponse: extractEmailFromResponse,
-    send: send
+    updateUI: updateUI
   };
 })();
 

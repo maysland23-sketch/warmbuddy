@@ -115,13 +115,9 @@ var AppCore = (function() {
     memorySystem: {
       _dataSource: 'MemoryModule',
       retention: { full: 7, half: 14, quarter: 30 },
-      coreMemories: [], coreMemoryMax: 200, _coreMemories_migrated: true,
-      relationalPortrait: { patterns: {}, lastRefined: null },
       reflections: [], reflectionMax: 50,
-      chatSummaries: {},
-      bm25Index: { _dirty: true, _lastBuild: null, _docCount: 0, index: {} },
       affectGraph: { edges: {} },
-      _pendingCoreMemories: [], _quietPresenceCount: 0, _evictedMessages: [],
+      _evictedMessages: [],
       _aemSinceLastDerive: 0, _usmSinceLastDerive: 0, _lastWeeklyWrite: ''
     },
     tokenLogs: {},
@@ -398,30 +394,16 @@ var AppCore = (function() {
       _store.memorySystem = {
         retention: { full: 7, half: 14, quarter: 30 },
         lastMaintenance: fmtDate().iso,
-        coreMemories: [], coreMemoryMax: 200,
-        relationalPortrait: { patterns: {}, lastRefined: null },
         reflections: [], reflectionMax: 50,
-        chatSummaries: {},
-        bm25Index: { _dirty: true, _lastBuild: null, _docCount: 0, index: {} },
-        affectGraph: { edges: {} },
-        _pendingCoreMemories: [], _quietPresenceCount: 0
+        affectGraph: { edges: {} }
       };
     }
     var ms = _store.memorySystem;
     if (!ms.retention) ms.retention = { full: 7, half: 14, quarter: 30 };
     if (!ms.lastMaintenance) ms.lastMaintenance = fmtDate().iso;
-    if (!ms.coreMemories) ms.coreMemories = [];
-    if (!ms.coreMemoryMax) ms.coreMemoryMax = 200;
-    if (ms._coreMemories_migrated === undefined) ms._coreMemories_migrated = false;
-    if (!ms.relationalPortrait) ms.relationalPortrait = { patterns: {}, lastRefined: null };
-    if (!ms.relationalPortrait.patterns) ms.relationalPortrait.patterns = {};
     if (!ms.reflections) ms.reflections = [];
     if (!ms.reflectionMax) ms.reflectionMax = 50;
-    if (!ms.chatSummaries) ms.chatSummaries = {};
-    if (!ms.bm25Index) ms.bm25Index = { _dirty: true, _lastBuild: null, _docCount: 0, index: {} };
     if (!ms.affectGraph) ms.affectGraph = { edges: {} };
-    if (!ms._pendingCoreMemories) ms._pendingCoreMemories = [];
-    if (ms._quietPresenceCount === undefined) ms._quietPresenceCount = 0;
     if (!ms._evictedMessages) ms._evictedMessages = [];
     if (ms._aemSinceLastDerive === undefined) ms._aemSinceLastDerive = 0;
     if (ms._usmSinceLastDerive === undefined) ms._usmSinceLastDerive = 0;
@@ -446,24 +428,7 @@ var AppCore = (function() {
         proj._cmlDetached = true;
       }
 
-      if (!proj._coreMemoriesMigrated && cml.aiEmotionalMemories.length === 0 && ms.coreMemories && ms.coreMemories.length > 0) {
-        for (var k = 0; k < ms.coreMemories.length; k++) {
-          var cm = ms.coreMemories[k];
-          cml.aiEmotionalMemories.unshift({
-            id: cm.id || ('aem_' + Math.random().toString(36).slice(2, 10)),
-            timestamp: cm.date || new Date().toISOString(),
-            affectFirst: cm.affect_first || { ai: { label: cm.affectLabel || 'neutral', intensity: cm.affectIntensity || 5 }, user: { label: 'neutral', intensity: 3 } },
-            eventSummary: cm.event_summary || cm.content || '',
-            relationalNote: cm.relational_note || '',
-            reflectionSummary: cm.reflectionSummary || '',
-            sourceChatId: cm.sourceChatId || '', sourceProjectId: proj.id,
-            evidenceMsgIds: cm.evidenceMsgIds || [], decayed: cm.decayed || false
-          });
-        }
-        proj._coreMemoriesMigrated = true;
-      }
     }
-    if (!ms._coreMemories_migrated && ms.coreMemories && ms.coreMemories.length > 0) ms._coreMemories_migrated = true;
 
     // Load memory files (delegates to external function — will be resolved by index.html)
     if (typeof loadMemoryFilesForAllProjects === 'function') {
@@ -513,14 +478,6 @@ var AppCore = (function() {
         var tp = _store.projects[pi];
         if (tp && tp.coreMemoryLayers) {
           MemoryModule.save(tp.id);
-          var freshDrp = MemoryModule.getDerivedPatterns(tp.id);
-          if (freshDrp && freshDrp.patterns && freshDrp.patterns.length > 0) {
-            tp.derivedRelationalPatterns = Object.assign({}, freshDrp);
-          }
-          var freshPp = MemoryModule.getPersonalityProfiles(tp.id);
-          if (freshPp && (freshPp.user || freshPp.ai)) {
-            tp.personalityProfiles = Object.assign({}, freshPp);
-          }
         }
       }
       saveStore();
@@ -580,39 +537,6 @@ var AppCore = (function() {
       ['dominantEmotions','reactionPatterns','growthMoments','evidenceIds'].forEach(function(k) {
         if (!pp.ai[k]) pp.ai[k] = [];
       });
-    }
-
-    // v2.0: legacy coreMemories migration (dead code path guarded by _coreMemories_migrated)
-    if (!ms._coreMemories_migrated && ms.coreMemories && ms.coreMemories.length > 0) {
-      var firstProj = _store.projects[0];
-      if (firstProj && firstProj.coreMemoryLayers) {
-        var targetCml = firstProj.coreMemoryLayers;
-        for (var m = 0; m < ms.coreMemories.length; m++) {
-          var old = ms.coreMemories[m];
-          if (targetCml.aiEmotionalMemories.some(function(a) { return a.id === 'aem_migrated_' + old.id; })) continue;
-          targetCml.aiEmotionalMemories.unshift({
-            id: 'aem_migrated_' + (old.id || ('cm' + Date.now().toString(36) + Math.random().toString(36).slice(2,6))),
-            timestamp: old.timestamp || new Date().toISOString(),
-            sourceChatId: old.sourceChatId || '',
-            sourceWindowId: old.sourceChatId || '',
-            sourceProjectId: old.sourceProjectId || '',
-            aiSelfEval: {
-              label: (old.affect_first && old.affect_first.ai) ? old.affect_first.ai.label : '未知',
-              intensity: (old.affect_first && old.affect_first.ai) ? old.affect_first.ai.intensity : 5,
-              internalNote: old.relational_note || ''
-            },
-            userStateAtTime: {
-              label: (old.affect_first && old.affect_first.user) ? old.affect_first.user.label : '未知',
-              intensity: (old.affect_first && old.affect_first.user) ? old.affect_first.user.intensity : 5
-            },
-            summary: old.event_summary || '',
-            rawDialogue: old.raw_quote ? [{ role: 'mixed', text: old.raw_quote, time: old.timestamp || '' }] : [],
-            triggerSource: 'migrated'
-          });
-        }
-        ms._coreMemories_migrated = true;
-        console.log('[migrate] v2.0: migrated ' + ms.coreMemories.length + ' legacy coreMemories → aiEmotionalMemories');
-      }
     }
 
     // Common: ensure modern fields
@@ -720,6 +644,8 @@ var AppCore = (function() {
       var proj5 = _store.projects[i10];
       for (var memK = 0; memK < proj5.memories.length; memK++) {
         var mem = proj5.memories[memK];
+        if (mem.summary === undefined) mem.summary = mem.content;
+        if (mem.rawDialogue === undefined) mem.rawDialogue = [];
         if (mem.decayFactor === undefined) mem.decayFactor = 1.0;
         if (mem.affectLabel === undefined) mem.affectLabel = null;
         if (mem.affectIntensity === undefined) mem.affectIntensity = null;
@@ -749,16 +675,18 @@ var AppCore = (function() {
       for (var u = 0; u < cml3.userStarredMemories.length; u++) {
         existingUSMIds[cml3.userStarredMemories[u].id] = true;
       }
-      for (var j5 = 0; j5 < proj6.memories.length; j5++) {
+      for (var j5 = proj6.memories.length - 1; j5 >= 0; j5--) {
         var mem2 = proj6.memories[j5];
         if (!mem2.starred) continue;
+        var legacySummary = (mem2.content || '').slice(0, 15);
         var alreadyExists = cml3.userStarredMemories.some(function(u2) {
-          return (u2.summary || '') === (mem2.content || '').slice(0, 15) ||
-            u2.starredMsgIds.some(function(sid) { return sid === mem2.sourceChatId + '_' + mem2.id; });
+          var s = u2.summary || '';
+          return s === (mem2.content || '') || s === legacySummary ||
+            (u2.starredMsgIds || []).some(function(sid) { return sid === mem2.sourceChatId + '_' + mem2.id; });
         });
-        if (alreadyExists) continue;
+        if (alreadyExists) { proj6.memories.splice(j5, 1); continue; }
         var usmId = 'usm_legacy_' + (mem2.id || Date.now().toString(36));
-        if (existingUSMIds[usmId]) continue;
+        if (existingUSMIds[usmId]) { proj6.memories.splice(j5, 1); continue; }
         existingUSMIds[usmId] = true;
         cml3.userStarredMemories.unshift({
           id: usmId,
@@ -767,10 +695,14 @@ var AppCore = (function() {
           sourceWindowId: mem2.sourceChatId || 'unknown',
           sourceProjectId: proj6.id,
           rawDialogue: [{ role: 'mixed', text: mem2.content || '', time: mem2.date || '', msgId: mem2.id || '' }],
-          summary: (mem2.content || '').slice(0, 15),
+          summary: mem2.content || '',
+          semanticKey: mem2.semanticKey || '',
+          starred: true,
+          decayFactor: mem2.decayFactor !== undefined ? mem2.decayFactor : 1,
           starredMsgIds: [],
           userNote: ''
         });
+        proj6.memories.splice(j5, 1);
       }
     }
   }
@@ -837,12 +769,10 @@ var AppCore = (function() {
         Math.floor(now.getTime() / 60000),
         (store.weather && store.weather.text) || '',
         (p && p.preference || '').slice(0, 100),
-        (ms.coreMemories && ms.coreMemories.length) || 0,
         (c && c.sharedMemoryIds && c.sharedMemoryIds.join(',')) || '',
         store.todos.filter(function(t) { return !t.done; }).map(function(t) { return t.id + t.text; }).join(','),
         (store.diaries && store.diaries.length) || 0,
-        (MemoryModule.getDerivedPatterns(store.activeProject) && MemoryModule.getDerivedPatterns(store.activeProject).lastDerived) || '',
-        (MemoryModule.getPersonalityProfiles(store.activeProject) && MemoryModule.getPersonalityProfiles(store.activeProject).lastDerived) || '',
+        (MemoryModule.getCoreOverview(store.activeProject) && MemoryModule.getCoreOverview(store.activeProject).updatedAt) || '',
         (c && c._pendingRetrievalBlock) ? 'rb' : '',
         Math.floor(((c && c._messageCount) || 0) / 3)
       ].join('|');
@@ -1032,8 +962,6 @@ var AppCore = (function() {
       });
 
       MemoryModule.applyForgettingCurve();
-      MemoryModule.ensureColdStartPatterns();
-      MemoryModule.rebuildBM25Index();
 
       var pwa = AppCore.getModule('pwa');
       if (pwa && pwa.registerSW) pwa.registerSW();
@@ -1096,9 +1024,6 @@ var AppCore = (function() {
       }, 1800000);
 
       AppCore._addInterval(function() { AppCore.saveStore(); }, 2000);
-
-      var todo = AppCore.getModule('todo');
-      AppCore._addInterval(function() { if (todo && todo.checkTodoReminders) todo.checkTodoReminders(); }, 60000);
 
       AppCore._addInterval(function() { if (sync && sync.pollSystemEvents) sync.pollSystemEvents(); }, 30000);
 

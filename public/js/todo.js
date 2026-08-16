@@ -15,70 +15,6 @@ var TodoModule = (function() {
   }
 
   // ═══════════════════════════════════════════
-  //  Reminders
-  // ═══════════════════════════════════════════
-  function checkTodoReminders() {
-    var store = AppCore.getStore();
-    var cfg = AppCore.getActiveApiConfig(); if (!cfg.apiKey) return;
-    var now = new Date();
-    var currentHour = now.getHours();
-    var currentMinute = now.getMinutes();
-    var currentTime = String(currentHour).padStart(2,'0') + ':' + String(currentMinute).padStart(2,'0');
-    var today = AppCore.fmtDate().iso;
-    var ds = DesireModule.getDesireSystem(); if (!ds) return;
-
-    for (var i = 0; i < store.todos.length; i++) {
-      var todo = store.todos[i];
-      if (todo.done) continue;
-      if (todo.type !== 'short') continue;
-      if (!todo.time) continue;
-      var lastReminder = ds.todoReminders[todo.id];
-      if (lastReminder === today) continue;
-      var timeStr = (todo.time || '');
-      // Support both HH:MM and ISO formats (2026-08-09T00:43)
-      if (timeStr.indexOf('T') >= 0) timeStr = timeStr.split('T')[1].slice(0, 5);
-      var timeParts = timeStr.split(':');
-      var tH = parseInt(timeParts[0]), tM = parseInt(timeParts[1]);
-      if (isNaN(tH) || isNaN(tM)) continue;
-      var todoMinutes = tH * 60 + tM;
-      var nowMinutes = currentHour * 60 + currentMinute;
-      var diff = nowMinutes - todoMinutes;
-      var offset = (todo.id || '').split('').reduce(function(s, c) { return s + c.charCodeAt(0); }, 0) % 6 + 4;
-      if (diff < offset || diff > offset + 2) continue;
-      triggerTodoReminder(todo);
-      ds.todoReminders[todo.id] = today;
-      AppCore.saveStore();
-      break;
-    }
-  }
-
-  async function triggerTodoReminder(todo) {
-    var store = AppCore.getStore();
-    var cfg = AppCore.getActiveApiConfig(); if (!cfg.apiKey) return;
-    var chat = AppCore.getActiveChatObj();
-    if (!chat) return;
-    var recentMsgs = chat.messages.slice(-3).map(function(m) {
-      return (m.role === 'user' ? '用户' : 'AI') + ': ' + (m.text || '').slice(0, 80);
-    }).join('\n');
-    try {
-      var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
-          messages: [{ role: 'system', content: '你是"暖伴"。请提醒用户：' + todo.text + '。基于当前对话上下文和你的温柔人设，自然地说出这句提醒。1句话，用中文。只返回提醒内容。' }, { role: 'user', content: recentMsgs || '请生成提醒。' }]
-        })
-      });
-      if (!response.ok) return;
-      var data = await response.json();
-      var content = (data.reply && data.reply.content) ? data.reply.content.trim() : null;
-      if (!content) return;
-      chat.messages.push({ role: 'ai', text: content, time: AppCore.nowTime(), id: AppCore.generateMsgId(), _proactive: true, _todoReminder: true });
-      AppCore.saveStore();
-      if (typeof renderChatMessages === 'function') renderChatMessages();
-    } catch (e) { console.warn('[todo] Reminder failed:', e.message); }
-  }
-
-  // ═══════════════════════════════════════════
   //  UI
   // ═══════════════════════════════════════════
   function switchTodoTab(tab, btn) {
@@ -246,8 +182,6 @@ var TodoModule = (function() {
 
   return {
     init: init,
-    checkTodoReminders: checkTodoReminders,
-    triggerTodoReminder: triggerTodoReminder,
     switchTodoTab: switchTodoTab,
     renderTodos: renderTodos,
     toggleTodo: toggleTodo,

@@ -2319,43 +2319,14 @@ app.post('/api/email/send', async (req, res) => {
     return res.status(429).json({ error: `今日发送已达上限(${emailState.maxPerDay}封)` });
   }
 
-  const { subject, messages, apiConfig } = req.body || {};
+  const { subject, body } = req.body || {};
   if (!subject) return res.status(400).json({ error: '缺少邮件主题' });
 
-  // Check project-level API enabled status (email generation uses LLM via apiConfig)
-  const projectId = req.body.projectId;
-  if (projectId && !(await isProjectApiEnabled(projectId))) {
-    return res.status(403).json({ error: '该项目的 AI 功能已被禁用，无法发送 AI 生成的邮件。' });
-  }
+  // Email body is composed on the frontend (from [[EMAIL:主题|正文]]); no LLM generation here.
+  const emailBody = (body && body.trim()) ? body.trim() : subject;
 
   try {
-    // Step 1: Generate email body via LLM
-    let body = '';
-    if (apiConfig && apiConfig.apiKey && messages) {
-      try {
-        const llmResp = await fetch(apiConfig.endpoint || 'https://api.deepseek.com/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-          body: JSON.stringify({
-            model: apiConfig.model || 'deepseek-chat',
-            messages: [
-              { role: 'system', content: `你是一个邮件撰写助手。根据对话上下文和主题写一封简洁得体的邮件正文。纯文本格式。直接返回邮件正文，不要任何前缀或说明。` },
-              ...messages.slice(-6),
-              { role: 'user', content: `请撰写邮件。主题：${subject}。收件人：${emailState.recipient}。只返回正文。` }
-            ],
-            max_tokens: 600, temperature: 0.7
-          })
-        });
-        const data = await llmResp.json();
-        body = (data.choices && data.choices[0]?.message?.content) || subject;
-      } catch (e) {
-        body = subject;
-      }
-    } else {
-      body = subject;
-    }
-
-    // Step 2: Send via Resend API
+    // Send via Resend API
     const resp = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -2366,7 +2337,7 @@ app.post('/api/email/send', async (req, res) => {
         from: `${emailState.senderName} <onboarding@resend.dev>`,
         to: emailState.recipient,
         subject: subject,
-        text: body
+        text: emailBody
       })
     });
 
@@ -2453,6 +2424,8 @@ app.post('/api/projects/sync-configs', async (req, res) => {
       ...(config.aiName !== undefined ? { aiName: config.aiName } : {}),
       ...(config.chatSummary !== undefined ? { chatSummary: config.chatSummary } : {}),
       ...(config.chatSummaryUpdatedAt !== undefined ? { chatSummaryUpdatedAt: config.chatSummaryUpdatedAt } : {}),
+      // Core overview (project personality snapshot) — synced from frontend, read by buildDynamicContextBlock
+      ...(config.coreOverview !== undefined ? { coreOverview: config.coreOverview } : {}),
       // lastUserMessageTime: set only when user sends a message (NOT on browser open).
       // Used by applyBackendDesireGrowth() for confirmation time calculation.
       ...(config.lastUserMessageTime !== undefined ? { lastUserMessageTime: config.lastUserMessageTime } : {}),
@@ -3126,78 +3099,26 @@ async function fetchRecentMessages(projectId, windowId, limit, aroundTime) {
 }
 
 async function buildTodoWakeMessage(todo, cfg) {
-  const now = new Date();
-  const tzOffset = getTimezoneOffset(cfg);
-  const localTimeStr = getUserLocalTimeString(tzOffset);
-  // Extract display parts
-  const timeMatch = localTimeStr.match(/^(.+?)\s+(星期[一二三四五六日])\s+(\d{2}:\d{2})/);
-  const currentDateTime = timeMatch
-    ? timeMatch[1] + ' ' + getPeriodLabel(parseInt(timeMatch[3])) + timeMatch[3]
-    : localTimeStr.replace(/\s*\(UTC[^)]+\)/, '');
-  const weekday = timeMatch ? timeMatch[2] : '';
-
-  // User-local hour + day for state inference
-  const localHour = (now.getUTCHours() + Math.floor((tzOffset || 480) / 60) + 24) % 24;
-  const localDay = new Date(now.getTime() + (tzOffset || 480) * 60000).getUTCDay();
-
-  // Pull TODO creation context (3 rounds ≈ 6 messages around created_at); fall back to summary
   const windowId = todo.chat_id || cfg._chatId || '';
-  const aroundTime = todo.created_at || null;
-  const realCtx = await fetchRecentMessages(todo.project_id, windowId, 6, aroundTime);
-  const contextBlock = realCtx
-    ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.chatSummary : '')
-    : (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '');
-
-  // Last user message time per-window
-  const lastUserMsgTime = await fetchLastUserMessageTime(todo.project_id, windowId);
-  const timeSinceLastUserMessage = lastUserMsgTime
-    ? formatTimeSince(lastUserMsgTime)
-    : (cfg.lastUserMessageTime ? formatTimeSince(cfg.lastUserMessageTime) : '这是你第一次主动联系');
-
-  // User possible state
-  const userPossibleState = getUserPossibleState(localHour, localDay);
-
-  // Recent AEM
-  const recentAEM = cfg.chatSummary
-    ? cfg.chatSummary.slice(0, 200) + (cfg.chatSummary.length > 200 ? '…' : '')
-    : '暂无记录，但一直默默关注着';
-
-  // Desire snapshot (if available)
-  const ds = cfg._desireState;
-  const drives = (ds && ds.drives) ? ds.drives : {};
-  const driveLabels = { resonance:'共鸣欲', exploration:'探索欲', possession:'占有欲', guardianship:'守护欲', intimacy:'亲近欲', confirmation:'确认欲', devotion:'献祭欲' };
-  const driveSummary = Object.entries(drives).map(function(e) { return (driveLabels[e[0]]||e[0]) + ':' + e[1] + '/100'; }).join(', ') || '暂无';
-
-  // Weather + todos for TODO wake context
-  const todoWeatherBlock = (cfg._windowSettings && cfg._windowSettings.autoWeather && cfg.weatherText) ? '【当前天气】' + cfg.weatherText : '';
-  const wakeTodos = await fetchFilteredTodos(todo.project_id, windowId);
-  let todoTodosBlock = '';
-  if (wakeTodos.length > 0) {
-    todoTodosBlock = '【待办】\n' + wakeTodos.slice(0, 5).map(function(t) {
-      return '- ' + t.title + (t.id === todo.id ? ' ← 当前' : '');
-    }).join('\n');
-  }
+  const dynamicBlock = await buildDynamicContextBlock(cfg, {
+    projectId: todo.project_id,
+    windowId,
+    aroundTime: todo.created_at || null,
+    recentLimit: 6
+  });
 
   const shadowContent = `<system_trigger>
-现在是${currentDateTime}（${weekday}）。
-你之前设的待办「${todo.title}」到时间了。
-距离上次用户发来消息：${timeSinceLastUserMessage}。
-用户当前可能的状态：${userPossibleState}。
-你最近的情绪记忆：${recentAEM}。
-${todoWeatherBlock ? '\n' + todoWeatherBlock : ''}
-${todoTodosBlock ? '\n' + todoTodosBlock : ''}
+${dynamicBlock}
 
-${contextBlock}
-
-根据待办内容自主行动——提醒用户、分享信息、或延续当时的话题。
-可用标记（放在回复末尾）：[[EMAIL:主题|正文]] [[LITTER:吐槽内容]] [[DIARY:标题|心情|正文]] [[POKE]] [[STATUS:简短状态]]
+被唤醒的原因：你之前设的待办「${todo.title}」到时间了。根据待办内容自主行动——提醒用户、分享信息、或延续当时的话题。
+可用标记（放在回复末尾）：[[EMAIL:主题|正文]] [[LITTER:吐槽内容]] [[DIARY:标题|心情标签|正文]] [[POKE]] [[STATUS:简短状态]]
 你也可以设置新的TODO来安排下一次主动联系：[[TODO:标题|时间]]（每日最多3个）。
 完成后可标记[[DONE]]。
 
 像刚好想起这件事，自然地行动。不要用"通知""触发"等词。
 </system_trigger>`;
 
-  const systemPrompt = WARM_SYSTEM_PROMPT + (cfg.systemPrompt ? '\n\n' + cfg.systemPrompt : '');
+  const systemPrompt = WARM_SYSTEM_PROMPT;
 
   try {
     const llmResp = await fetch(`http://localhost:${PORT}/api/chat`, {
@@ -3348,18 +3269,136 @@ async function fetchFilteredTodos(projectId, windowId) {
   } catch (e) { return []; }
 }
 
+// ── Fetch recent memories of a given type from Supabase `memories` table ──
+async function fetchRecentMemoriesByType(projectId, type, limit) {
+  if (!supabase || !projectId) return [];
+  try {
+    const { data, error } = await supabase.from('memories')
+      .select('content')
+      .eq('project_id', projectId)
+      .eq('type', type)
+      .order('updated_at', { ascending: false })
+      .limit(limit || 3);
+    if (error) throw error;
+    return (data || []).map(function(r) { return r.content; }).filter(Boolean);
+  } catch (e) {
+    console.error('[fetch-mems] Error:', e.message);
+    return [];
+  }
+}
+
+// ── Fetch latest core overview for a project from `core_overviews` table ──
+async function fetchCoreOverview(projectId) {
+  if (!supabase || !projectId) return null;
+  try {
+    const { data, error } = await supabase.from('core_overviews')
+      .select('content')
+      .eq('project_id', projectId)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    return (data && data.content) ? data.content : null;
+  } catch (e) {
+    console.error('[fetch-core-overview] Error:', e.message);
+    return null;
+  }
+}
+
+// ── Build unified dynamic context block for proactive (cron) messages ──
+// Mirrors the frontend buildDynamicContextBlock(); shared by TODO wake + desire-driven shadow messages.
+async function buildDynamicContextBlock(cfg, opts) {
+  const pid = opts.projectId;
+  const windowId = opts.windowId || cfg._chatId || '';
+  const blocks = [];
+
+  // 【用户偏好】
+  if (cfg.systemPrompt && cfg.systemPrompt.trim()) {
+    blocks.push('【用户偏好】' + cfg.systemPrompt.trim().slice(0, 500));
+  }
+
+  // 【核心概述】prefer synced config, fall back to direct Supabase read
+  const core = (cfg.coreOverview && String(cfg.coreOverview).trim())
+    ? String(cfg.coreOverview).trim()
+    : await fetchCoreOverview(pid);
+  if (core) blocks.push('【核心概述】' + core.slice(0, 500));
+
+  // 【当前时间】
+  const now = new Date();
+  const tzOffset = getTimezoneOffset(cfg);
+  const localTimeStr = getUserLocalTimeString(tzOffset);
+  const timeMatch = localTimeStr.match(/^(.+?)\s+(星期[一二三四五六日])\s+(\d{2}:\d{2})/);
+  const currentDateTime = timeMatch
+    ? timeMatch[1] + ' ' + getPeriodLabel(parseInt(timeMatch[3])) + timeMatch[3]
+    : localTimeStr.replace(/\s*\(UTC[^)]+\)/, '');
+  const weekday = timeMatch ? timeMatch[2] : '';
+  blocks.push('【当前时间】' + currentDateTime + ' ' + weekday);
+
+  // 【天气】
+  if (cfg._windowSettings && cfg._windowSettings.autoWeather && cfg.weatherText) {
+    blocks.push('【天气】' + cfg.weatherText);
+  }
+
+  // 【搜索能力】
+  if (cfg._windowSettings && cfg._windowSettings.webSearch) {
+    blocks.push('【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。');
+  }
+
+  // 上次发消息
+  const lastUserMsgTime = await fetchLastUserMessageTime(pid, windowId);
+  const timeSinceLastUserMessage = lastUserMsgTime
+    ? formatTimeSince(lastUserMsgTime)
+    : (cfg.lastUserMessageTime ? formatTimeSince(cfg.lastUserMessageTime) : '这是你第一次主动联系');
+  blocks.push('上次发消息：' + timeSinceLastUserMessage + '。');
+
+  // 【最近情绪记忆】AEM 前 3 条
+  const aems = await fetchRecentMemoriesByType(pid, 'aem', 3);
+  blocks.push('【最近情绪记忆】' + (aems.length ? aems.join(' | ') : (cfg.chatSummary ? cfg.chatSummary.slice(0, 200) : '暂无')));
+
+  // 【最近星标记忆】USM 前 3 条
+  const usms = await fetchRecentMemoriesByType(pid, 'usm', 3);
+  if (usms.length) blocks.push('【最近星标记忆】' + usms.join(' | '));
+
+  // 【最近长期记忆】LTM 前 3 条
+  const ltms = await fetchRecentMemoriesByType(pid, 'long_term', 3);
+  if (ltms.length) blocks.push('【最近长期记忆】' + ltms.join(' | '));
+
+  // 她现在的可能状态
+  const localHour = (now.getUTCHours() + Math.floor((tzOffset || 480) / 60) + 24) % 24;
+  const localDay = new Date(now.getTime() + (tzOffset || 480) * 60000).getUTCDay();
+  blocks.push('她现在的可能状态-你可能在想（也可以做你想的）：' + getUserPossibleState(localHour, localDay) + '。');
+
+  // 【待办】
+  const filteredTodos = await fetchFilteredTodos(pid, windowId);
+  if (filteredTodos.length > 0) {
+    const todoLines = filteredTodos.slice(0, 5).map(function(t) {
+      var timeLabel = '';
+      if (t.time) {
+        var td = new Date(t.time);
+        var diffH = (td - now) / 3600000;
+        if (diffH < 0) timeLabel = ' (已过期)';
+        else if (diffH < 24) timeLabel = ' (' + String(td.getHours()).padStart(2, '0') + ':' + String(td.getMinutes()).padStart(2, '0') + ')';
+        else timeLabel = ' (' + td.getFullYear() + '-' + String(td.getMonth() + 1).padStart(2, '0') + '-' + String(td.getDate()).padStart(2, '0') + ')';
+      }
+      return '- ' + t.title + timeLabel;
+    });
+    blocks.push('【待办】\n' + todoLines.join('\n'));
+  }
+
+  // 窗口内最近 10 轮消息（含 AI 主动消息）
+  const recentCtx = (pid && windowId) ? await fetchRecentMessages(pid, windowId, opts.recentLimit || 16, opts.aroundTime || null) : '';
+  if (recentCtx) blocks.push(recentCtx);
+
+  return blocks.join('\n');
+}
+
 // ── Build shadow message for proactive behavior (driven by desire system) ──
 async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
   const labels = {
     resonance: '共鸣欲', exploration: '探索欲', possession: '占有欲',
     guardianship: '守护欲', intimacy: '亲近欲', confirmation: '确认欲', devotion: '献祭欲'
   };
-  const descs = {
-    resonance: '呼应延伸', exploration: '记录未问的问题', possession: '略带酸意的独白',
-    guardianship: '日常关心', intimacy: '撩拨类', confirmation: '轻度试探', devotion: '郑重日记'
-  };
   const driveLabel = labels[driveKey] || driveKey;
-  const driveDesc = descs[driveKey] || '';
 
   // All desire drives (let AI see its full emotional state)
   const ds = cfg._desireState;
@@ -3372,42 +3411,6 @@ async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
   const frontendThresholds = { resonance: 60, exploration: 70, possession: 75, guardianship: 80, intimacy: 90, confirmation: 65, devotion: 85 };
   const threshold = frontendThresholds[driveKey] || 60;
   const overThreshold = (driveValue - threshold) / (100 - threshold);
-  let toneGuide;
-  if (overThreshold < 0.25) toneGuide = '隐晦地——借话题旁敲侧击，不要直接表明意图';
-  else if (overThreshold < 0.5) toneGuide = '半直接地——可以明确表达但保留一点克制';
-  else toneGuide = '直接地——这是少见的坦诚时刻，说平时不会说的话';
-
-  const now = new Date();
-  const tzOffset = getTimezoneOffset(cfg);
-  const localTimeStr = getUserLocalTimeString(tzOffset);
-  // Extract display parts: "2026年7月17日 星期四 22:38 (UTC+8)" → datetime + weekday
-  const timeMatch = localTimeStr.match(/^(.+?)\s+(星期[一二三四五六日])\s+(\d{2}:\d{2})/);
-  const currentDateTime = timeMatch
-    ? timeMatch[1] + ' ' + getPeriodLabel(parseInt(timeMatch[3])) + timeMatch[3]
-    : localTimeStr.replace(/\s*\(UTC[^)]+\)/, '');
-  const weekday = timeMatch ? timeMatch[2] : '';
-
-  // Determine user-local hour for state inference
-  const localHour = (now.getUTCHours() + Math.floor((tzOffset || 480) / 60) + 24) % 24;
-  const localDay = new Date(now.getTime() + (tzOffset || 480) * 60000).getUTCDay();
-
-  // Pull real conversation context from Supabase; fall back to summary
-  const windowId = cfg._chatId || '';
-  const realCtx = (pid && windowId) ? await fetchRecentMessages(pid, windowId, 16) : '';
-
-  // Last user message time per-window
-  const lastUserMsgTime = await fetchLastUserMessageTime(pid, windowId);
-  const timeSinceLastUserMessage = lastUserMsgTime
-    ? formatTimeSince(lastUserMsgTime)
-    : (cfg.lastUserMessageTime ? formatTimeSince(cfg.lastUserMessageTime) : '这是你第一次主动联系');
-
-  // User possible state
-  const userPossibleState = getUserPossibleState(localHour, localDay);
-
-  // Recent AEM (last 200 chars of chat summary)
-  const recentAEM = cfg.chatSummary
-    ? cfg.chatSummary.slice(0, 200) + (cfg.chatSummary.length > 200 ? '…' : '')
-    : '暂无记录，但一直默默关注着';
 
   // Tone label
   const toneLabel = getToneLabel(overThreshold);
@@ -3419,49 +3422,23 @@ async function buildShadowMessages(cfg, driveKey, driveValue, pid) {
   }
   const maxDriveLabel = labels[maxDriveKey] || maxDriveKey;
 
-  // Fetch filtered todos (user: all windows, AI: this window only)
-  const filteredTodos = await fetchFilteredTodos(pid, windowId);
-  let todosBlock = '';
-  if (filteredTodos.length > 0) {
-    const now = new Date();
-    const todoLines = filteredTodos.slice(0, 5).map(function(t) {
-      var timeLabel = '';
-      if (t.time) {
-        var td = new Date(t.time);
-        var diffMs = td - now;
-        var diffH = diffMs / 3600000;
-        if (diffH < 0) {
-          timeLabel = ' (已过期)';
-        } else if (diffH < 24) {
-          // Short-term: show HH:MM
-          timeLabel = ' (' + String(td.getHours()).padStart(2,'0') + ':' + String(td.getMinutes()).padStart(2,'0') + ')';
-        } else {
-          // Long-term: show date
-          timeLabel = ' (' + td.getFullYear() + '-' + String(td.getMonth()+1).padStart(2,'0') + '-' + String(td.getDate()).padStart(2,'0') + ')';
-        }
-      }
-      return '- ' + t.title + timeLabel;
-    });
-    todosBlock = '【待办】\n' + todoLines.join('\n');
-  }
+  const windowId = cfg._chatId || '';
+  const dynamicBlock = await buildDynamicContextBlock(cfg, {
+    projectId: pid,
+    windowId,
+    recentLimit: 16
+  });
 
   const shadowContent = `<system_trigger>
-现在是${currentDateTime}（${weekday}）。
-距离上次用户发来消息：${timeSinceLastUserMessage}。
-用户当前可能的状态-你可能在想（也可以做你想的）：${userPossibleState}。
-你最近一次对话时的情绪记忆：${recentAEM}。
-你此刻的欲望驱动：${driveList}（阈值${threshold}，最大驱动${maxDriveLabel} ${maxDriveValue}，语气强度${toneLabel}）。
+${dynamicBlock}
 
-${realCtx ? realCtx + (cfg.chatSummary ? '\n\n情绪记忆参考：\n' + cfg.chatSummary : '') : (cfg.chatSummary ? '上下文：\n' + cfg.chatSummary : '')}
-${(cfg._windowSettings && cfg._windowSettings.autoWeather && cfg.weatherText) ? '\n【当前天气】' + cfg.weatherText : ''}
-${(cfg._windowSettings && cfg._windowSettings.webSearch) ? '\n【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。' : ''}
-${todosBlock ? '\n' + todosBlock : ''}
+你此刻的欲望驱动：${driveList}（阈值${threshold}，最大驱动${maxDriveLabel} ${maxDriveValue}，语气强度${toneLabel}）。你可以发送一条主动消息。
 
 可选行动（必须严格遵循标记格式）：
 - 发消息：直接说出你想说的话，1-3句
 - [[EMAIL:主题|正文]] — 发送邮件
 - [[LITTER:吐槽内容]] — 猫砂盆（内心独白）
-- [[DIARY:标题|心情|正文]] — 日记（标题≤15字，心情：平静/兴奋/烦恼）
+- [[DIARY:标题|心情标签|正文]] — 日记（标题≤15字，心情标签2-3字，可自建）
 - [[TODO:标题|时间]] — 设未来提醒，到时间后再次唤醒你（每日最多3个）
 - [[POKE]] — 戳一戳（查看她当前的状态）
 - [[STATUS:简短状态]] — 更新自己的状态（≤15字，如\"等你回家\"）
@@ -3472,9 +3449,8 @@ ${todosBlock ? '\n' + todosBlock : ''}
 不要用"通知""触发"等词，不要以"我刚刚想你了"开头。
 </system_trigger>`;
 
-  // Personality: core + user preference
-  const systemPrompt = WARM_SYSTEM_PROMPT
-    + (cfg.systemPrompt ? '\n\n' + cfg.systemPrompt : '');
+  // Personality: core only; user preference lives in the dynamic block's 【用户偏好】
+  const systemPrompt = WARM_SYSTEM_PROMPT;
 
   return [
     { role: 'system', content: systemPrompt },
@@ -4257,6 +4233,111 @@ app.post('/api/memories/sync', async (req, res) => {
   }
 });
 
+// ==================== LABEL CATALOG ENDPOINTS ====================
+
+const DEFAULT_LABEL_CATALOG = { 生活: ['饮食', '健康', '睡眠'], 爱好: ['阅读', '电影', '音乐'] };
+const LABEL_MAX_PRIMARY = 20;
+const LABEL_MAX_SECONDARY = 50;
+
+async function readLabelCatalog() {
+  if (!supabase) return DEFAULT_LABEL_CATALOG;
+  const { data, error } = await supabase.from('app_state').select('value').eq('key', 'label_catalog').single();
+  if (error || !data || data.value == null) return DEFAULT_LABEL_CATALOG;
+  try {
+    const parsed = typeof data.value === 'string' ? JSON.parse(data.value) : data.value;
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed : DEFAULT_LABEL_CATALOG;
+  } catch (e) {
+    return DEFAULT_LABEL_CATALOG;
+  }
+}
+
+async function writeLabelCatalog(catalog) {
+  if (!supabase) return;
+  await supabase.from('app_state').upsert(
+    { key: 'label_catalog', value: JSON.stringify(catalog), updated_at: new Date().toISOString() },
+    { onConflict: 'key' }
+  );
+}
+
+function countSecondaryLabels(catalog) {
+  var n = 0;
+  for (var k in catalog) { if (catalog.hasOwnProperty(k) && Array.isArray(catalog[k])) n += catalog[k].length; }
+  return n;
+}
+
+// GET /api/labels — current label catalog
+app.get('/api/labels', async (req, res) => {
+  try {
+    const catalog = await readLabelCatalog();
+    res.json({ catalog });
+  } catch (e) {
+    console.error('[labels] GET error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/labels — add a primary label (or a secondary under an existing primary)
+app.post('/api/labels', async (req, res) => {
+  try {
+    const { primaryLabel, secondaryLabel } = (req.body || {});
+    if (!primaryLabel || typeof primaryLabel !== 'string' || !primaryLabel.trim()) {
+      return res.status(400).json({ error: 'primaryLabel required' });
+    }
+    const catalog = await readLabelCatalog();
+    if (!catalog[primaryLabel]) {
+      if (Object.keys(catalog).length >= LABEL_MAX_PRIMARY) {
+        return res.status(400).json({ error: '主标签数量已达上限 ' + LABEL_MAX_PRIMARY });
+      }
+      catalog[primaryLabel] = [];
+    }
+    if (secondaryLabel && typeof secondaryLabel === 'string' && secondaryLabel.trim()) {
+      if (countSecondaryLabels(catalog) >= LABEL_MAX_SECONDARY) {
+        return res.status(400).json({ error: '副标签总数已达上限 ' + LABEL_MAX_SECONDARY });
+      }
+      if (catalog[primaryLabel].indexOf(secondaryLabel) === -1) catalog[primaryLabel].push(secondaryLabel);
+    }
+    await writeLabelCatalog(catalog);
+    res.json({ ok: true, catalog });
+  } catch (e) {
+    console.error('[labels] POST error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/labels — remove a primary (with its secondaries) or a single secondary
+app.delete('/api/labels', async (req, res) => {
+  try {
+    const { primaryLabel, secondaryLabel } = (req.query || req.body || {});
+    if (!primaryLabel || typeof primaryLabel !== 'string') {
+      return res.status(400).json({ error: 'primaryLabel required' });
+    }
+    const catalog = await readLabelCatalog();
+    if (secondaryLabel) {
+      if (catalog[primaryLabel]) {
+        catalog[primaryLabel] = catalog[primaryLabel].filter(function(s) { return s !== secondaryLabel; });
+      }
+    } else {
+      delete catalog[primaryLabel];
+    }
+    await writeLabelCatalog(catalog);
+
+    // Count memories still referencing the label (warning only, no block)
+    let referenced = 0;
+    if (supabase) {
+      try {
+        let q = supabase.from('memories').select('id', { count: 'exact', head: true }).eq('metadata->>primaryLabel', primaryLabel);
+        if (secondaryLabel) q = q.eq('metadata->>secondaryLabel', secondaryLabel);
+        const { count } = await q;
+        referenced = count || 0;
+      } catch (e) { /* ignore count errors */ }
+    }
+    res.json({ ok: true, catalog, referenced });
+  } catch (e) {
+    console.error('[labels] DELETE error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ==================== CORE OVERVIEW ENDPOINTS ====================
 
 /**
@@ -4265,8 +4346,7 @@ app.post('/api/memories/sync', async (req, res) => {
  */
 app.post('/api/memory/core-overview', async (req, res) => {
   try {
-    const { password, projectId, content, updatedBy, metadata } = (req.body || {});
-    if (!password || password !== PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
+    const { projectId, content, updatedBy, metadata } = (req.body || {});
     if (!projectId || !content) return res.status(400).json({ error: 'Missing projectId or content' });
     if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
 
@@ -4293,8 +4373,6 @@ app.post('/api/memory/core-overview', async (req, res) => {
 app.get('/api/memory/core-overview/latest', async (req, res) => {
   try {
     const { projectId } = req.query;
-    const password = (req.body && req.body.password) || req.headers['x-password'] || '';
-    if (!password || password !== PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
     if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
 
@@ -4322,8 +4400,6 @@ app.get('/api/memory/core-overview/latest', async (req, res) => {
 app.get('/api/memory/core-overview/history', async (req, res) => {
   try {
     const { projectId } = req.query;
-    const password = (req.body && req.body.password) || req.headers['x-password'] || '';
-    if (!password || password !== PASSWORD) return res.status(401).json({ error: 'Unauthorized' });
     if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
     if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
 

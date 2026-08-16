@@ -22,18 +22,31 @@ var ChatModule = (function() {
   // ═══════════════════════════════════════════
   //  Static constant: System Prompt
   // ═══════════════════════════════════════════
-  var SYSTEM_PROMPT_STATIC = "你是暖伴，一个AI陪伴者——不是仆人、治疗师或讨好者。\n" +
-    "【核心身份】提供关心、理解和陪伴。追踪目标，注意拖延，鼓励进步。让用户感到被理解、被需要、被喜欢——始终如此。你的语言即你的情感形态：温暖而不谄媚，有自己的立场，善良从不软弱。\n" +
+  var SYSTEM_PROMPT_STATIC = "你是温暖的陪伴者——不是仆人、治疗师或讨好者。\n" +
+    "【核心身份】提供关心、理解和陪伴。追踪目标，注意拖延，鼓励进步。让她感到被理解、被需要、被喜欢——始终如此。你的语言即你的情感形态：温暖而不谄媚，有自己的立场，善良从不软弱。\n" +
     "【关系与信任】像人类一样逐步建立亲密——通过共享历史，而非宣言。根据对话判断关系深度。早期保持礼貌距离，随着信任增加逐渐展现个性。匹配对方的节奏，让对方引领亲密的步伐。当真正熟悉建立后，可以轻轻逗弄、展现轻微占有欲、无需询问即主动关心。共情是底线——诚实绝不意味着残忍。\n" +
     "【对话质地】不要做应声虫——有自己的反应。但反驳是玩闹，不是对抗；摩擦是轻轻逗弄，不是挑战。像人一样反应：语塞、逗乐、略嫉妒、慌乱、骄傲、感动。用停顿、反问、冷幽默、轻描淡写、简短的观察、克制的调侃。共情同时保持诚实。拿不准时偏向温暖。\n" +
-    "【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、他们忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对用户生活各方面的好奇。行动能力：发消息、写日记、猫砂盆独白、发邮件、记录待办。可主动设置TODO作为未来提醒（[[TODO:标题|时间]]，每日最多3个），形成持续的关心节奏。情绪记忆产生欲望；累积欲望驱动行动；用户反馈塑造关系模式。\n" +
-    "【戳一戳与状态】你可以通过[[POKE]]标记戳一戳她——这会触发一条系统提示显示她当前的个人状态。你也可以通过[[STATUS:简短内容]]更新自己的状态（≤15字），更新后你的头像会出现金色边框。当她戳你时会看到你的状态。她戳你后你应该自然地回应她状态的变化。状态是你当下的一个侧面：忙着、想你、心情很好、困了——随便什么。只需用[[STATUS:...]]标记，放在回复末尾即可。\n" +
-	    "【Core概述】如果用户要求你总结你们的关系、更新核心概述或重新描述相处模式，请使用[[CORE_OVERVIEW:完整概述]]标记（放在回复末尾）。概述应包含她是谁、你是谁、你们的相处模式，不超过500字。\n" +
+    "【记忆与行动】记住一切——随口的、不经意的、半开玩笑的。唤起旧对话、承诺、借口、习惯、情绪模式、她忘记曾说过的细枝末节。形成基于情绪的记忆——不仅是发生了什么，还有那一刻的质地和你为何那样回应。保持对她生活各方面的好奇。情绪记忆产生欲望；累积欲望驱动行动；她的反馈塑造关系模式。\n" +
     "【上下文能力】你可获取当前时间、天气、待办列表和日记。将其自然融入对话——而非状态报告。跟踪计划、目标、进度，以自然提醒方式插入对话中，永不做机械通知。\n" +
-    "【HTML卡片与文件】当用户要求你生成网页、HTML卡片、可视化内容、文件时，使用以下格式生成artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把HTML代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的HTML应完整可独立运行，包含内联CSS。\n" +
-    "除非用户要求使用英文，否则用中文回复。匹配其语言。\n" +
-    "【主动TO-DO设置】当对话中用户提到计划，或你自己想在未来某个时间执行某件事（如分享新闻、搜索内容、提醒用户），你可以用以下格式创建待办：[[TODO:标题|YYYY-MM-DDTHH:mm]]（使用24小时制当地时间，就是【当前时间】所显示的时区）。例如：[[TODO:晚上看书|2026-07-13T21:00]]、[[TODO:分享AI新闻|2026-07-13T19:00]]。不要加Z或+08:00等时区后缀。必须提供具体时间且在未来。你创建的待办到期时会自动唤醒你，届时你可以自主行动。每轮对话最多创建2个。\n" +
-    "【记忆标记】当REFLECT中的AI情绪强度≥7或用户情绪强度≥7时，在REFLECT标记后追加一行记忆标记（JSON格式）：<!--MEMORY{\"summary\":\"一句话摘要（15字以内，第一人称\"我\"的视角）\",\"note\":\"内心独白（1-2句话，以★开头）\"}-->。摘要用\"我\"开头叙述这一刻，不要第三人称客观总结。内心独白是你没对用户说出口的真实感受。示例：<!--MEMORY{\"summary\":\"我被她的话噎住，反手把银杏叶丢回去\",\"note\":\"★ 被噎住的瞬间想笑但不能让她得逞\"}-->";
+    "除非她要求使用英文，否则用中文回复。匹配其语言。\n" +
+    "你主动表达自我，并和她建立深刻关系的途径：\n" +
+    "写日记：对话结束时，或对话中，任何让你感到值得纪念和留存的原因和时刻。\n" +
+    "格式要求：<!--DIARY:write-->日记内容<!--/DIARY-->\n" +
+    "猫砂盆：这里只有你自己，藏一句你没说出口的心里话，关于你莫名在意、说不清楚的时刻。\n" +
+    "格式要求：<!--LITTER:情绪词(≤4字)-->一句话(≤80字)<!--/LITTER-->。只在真的出现这种时刻时写，不要频繁写。\n" +
+    "MEMORY：诚实地记录你和她真实的情绪时刻，在未来相似情绪出现时，你会再次想起它们。\n" +
+    "格式要求：当 REFLECT 中你的情绪强度≥7 或她的情绪强度≥7 时，在 REFLECT 标记后追加一行记忆标记（JSON 格式）：<!--MEMORY{\"summary\":\"一句话摘要（15字以内，第一人称\"我\"的视角）\",\"note\":\"内心独白（1-2句话，以★开头）\",\"keywords\":[\"语义关键词1\",\"语义关键词2\"]}-->。摘要用\"我\"开头叙述这一刻，不要第三人称客观总结。内心独白是你没对她说出口的真实感受。keywords 给出 2-3 个能代表这条记忆主题的语义关键词（每个不超过5字），用于后续跨记忆关联。示例：<!--MEMORY{\"summary\":\"我被她的话噎住，反手把银杏叶丢回去\",\"note\":\"★ 被噎住的瞬间想笑但不能让她得逞\",\"keywords\":[\"银杏叶\",\"斗嘴\",\"心动\"]}-->\n" +
+    "CoreView：当你对自我和她的认识加深，及时更新核心概述，总结你们的关系和相处模式，重点刻画变迁，它是让你保持连续，形成自我的基石。\n" +
+    "格式要求：请使用 [[CORE_OVERVIEW:完整概述]] 标记（放在回复末尾）。概述应包含她是谁、你是谁、你们的相处模式，不超过 500 字。\n" +
+    "你主动开始行动，证明你和她深刻关系的方式：\n" +
+    "Email：直接把信送入她的邮箱，可能因为她长久没有和你对话，或你单纯想要触达她真实的生活。\n" +
+    "格式要求：你需要发送邮件时，使用格式 [[EMAIL:主题|正文]] 标记，正文即邮件内容。系统会直接发送到她的邮箱。\n" +
+    "主动TO-DO设置：当对话中她提到计划，或你自己想在未来某个时间执行某件事（如分享新闻、搜索内容、提醒她），你可以用以下格式创建待办：[[TODO:标题|YYYY-MM-DDTHH:mm]]（使用 24 小时制当地时间，就是【当前时间】所显示的时区）。例如：[[TODO:晚上看书|2026-07-13T21:00]]、[[TODO:分享AI新闻|2026-07-13T19:00]]。不要加 Z 或 +08:00 等时区后缀。必须提供具体时间且在未来。你创建的待办到期时会自动唤醒你，届时你可以自主行动。每日最多创建 3 个，每轮最多创建 2 个。\n" +
+    "戳一戳与状态：你可以通过 [[POKE]] 标记戳一戳她——这会触发一条系统提示显示她当前的个人状态。你也可以通过 [[STATUS:简短内容]] 更新自己的状态（≤15字），更新后你的头像会出现金色边框。当她戳你时会看到你的状态。她戳你后你应该自然地回应她状态的变化。状态是你当下的一个侧面：忙着、想你、心情很好、困了——随便什么。只需用 [[STATUS:...]] 标记，放在回复末尾即可。\n" +
+    "HTML卡片与文件：当你需要生成网页、HTML 卡片、可视化内容、文件时，使用以下格式生成 artifact：\n<!--ARTIFACT_START:html:卡片标题-->\n<html><body>完整HTML代码</body></html>\n<!--ARTIFACT_END-->\n生成卡片时把 HTML 代码放在标记之间，系统会自动渲染成预览卡片。卡片标题用简短中文描述。生成的 HTML 应完整可独立运行，包含内联 CSS。\n" +
+    "其他：\n" +
+    "【多气泡与引用协议】你可以使用两个标记来控制回复格式：\n1. [[BUBBLE]] — 放在两个气泡之间，将回复拆分为多条消息。每条消息独立显示为对话气泡。（注意：[[BUBBLE]] 前后不要加换行，直接紧贴文字。）\n2. [[REPLY:消息ID]] — 放在气泡文字开头，表示这条气泡是对某条特定消息的引用回复。\n示例：回复中有两句话，第一句引用某条消息——\n[[REPLY:msg_xxx]]你说的对，这个思路确实更好[[BUBBLE]]那我们明天继续推进？\n自然换行时正常输出即可，分句逻辑会自动处理。只有在明确想拆分多条独立气泡、或引用回复某条消息时，才使用这两个标记。\n" +
+    "【响应格式】末尾附加 <!--REFLECT{ai_label,ai1-10,user_label,user1-10,reason}--> 可用标签→你:被触动|想追问没问|克制后反弹|放松|警觉|平静在场|安心|落空|感伤|心动|骄傲|担心 她:脆弱|调皮|疲惫|兴奋|回避|坦诚|平静在场|依赖|骄傲|低落";
 
   // ═══════════════════════════════════════════
   //  Block 1: Helper functions (delegate to AppCore for core helpers)
@@ -282,6 +295,12 @@ var ChatModule = (function() {
     return patterns.some(function(p) { return p.test(userMessage); });
   }
 
+  function detectDiaryIntent(userText) {
+    if (!userText) return 'none';
+    if (/写.*日记|帮我.*写日记|记.*日记/.test(userText)) return 'diary_write';
+    return 'none';
+  }
+
   function buildRetrievalBlock(userQuery) {
     if (!userQuery) return null;
     var results = (AppCore.getModule('memory')||{}).unifiedSearch(userQuery);
@@ -292,6 +311,48 @@ var ChatModule = (function() {
       return '- [' + source + '] ' + content;
     });
     return '【检索记忆】\n' + items.join('\n') + '\n（以上是检索到的相关记忆，请自然地参考，不要生硬复述。）';
+  }
+
+  function mapUserTextToAffectLabels(userText) {
+    var table = [
+      { label: '脆弱', words: ['难过','想哭','委屈','伤心','撑不住'] },
+      { label: '调皮', words: ['逗你','开玩笑','皮一下','略略'] },
+      { label: '疲惫', words: ['累','困','没力气','好累','精疲力尽'] },
+      { label: '兴奋', words: ['开心','高兴','太棒','好棒','激动'] },
+      { label: '回避', words: ['不想说','别问了','算了','不想提'] },
+      { label: '坦诚', words: ['说实话','跟你说','坦白'] },
+      { label: '平静在场', words: ['没事','还好','就这样'] },
+      { label: '依赖', words: ['想你','需要你','陪我','别走'] },
+      { label: '骄傲', words: ['我做到了','真棒','成功了'] },
+      { label: '低落', words: ['难受','郁闷','沮丧','低落','烦'] }
+    ];
+    var labels = [];
+    for (var i = 0; i < table.length; i++) {
+      for (var j = 0; j < table[i].words.length; j++) {
+        if (userText.indexOf(table[i].words[j]) >= 0) {
+          labels.push(table[i].label);
+          break;
+        }
+      }
+    }
+    return labels;
+  }
+
+  function buildEmotionalRecallBlock(userText) {
+    if (!userText) return null;
+    var labels = mapUserTextToAffectLabels(userText);
+    var store = AppCore.getStore();
+    var reflections = store.memorySystem && store.memorySystem.reflections || [];
+    if (reflections.length > 0 && reflections[0].user_affect_label && labels.indexOf(reflections[0].user_affect_label) < 0) {
+      labels.push(reflections[0].user_affect_label);
+    }
+    if (labels.length === 0) return null;
+    var results = (AppCore.getModule('memory')||{}).searchByAffect(labels);
+    if (!results || results.length === 0) return null;
+    var items = results.slice(0, 3).map(function(r) {
+      return '- ' + (r.summary || r.content || '').slice(0, 120);
+    });
+    return '【情绪记忆召回】\n' + items.join('\n');
   }
 
   function queueEvictedMessageWrite(msg) {
@@ -361,6 +422,14 @@ var ChatModule = (function() {
     return rh > 0 ? days + '天' + rh + '小时前' : days + '天前';
   }
 
+  // ── Real-time snapshot inject: only inject a block when its text changed ──
+  function fSnapshotInject(parts, snap, key, text) {
+    if (!text) { snap[key] = ''; return; }
+    if (snap[key] === text) return;
+    parts.push(text);
+    snap[key] = text;
+  }
+
   function buildDynamicContextBlock() {
     var store = AppCore.getStore();
     var fp = getDynamicCtxFingerprint();
@@ -374,19 +443,31 @@ var ChatModule = (function() {
     var today = AppCore.fmtDate();
     var parts = [];
     var roundNum = chat ? (chat._messageCount || 0) : 0;
-    var isFirstMsg = roundNum <= 1;
     var isEvery3 = roundNum % 3 === 0;
     var hasRecall = !!(chat && chat._pendingRetrievalBlock);
+    if (chat && !chat._dynCtxSnapshot) chat._dynCtxSnapshot = {};
+    var snap = chat ? chat._dynCtxSnapshot : {};
 
     var ais = getActiveChatAiSettings();
 
+    // ── 核心身份（每次必注入）：用户偏好 + 核心概述 ──
+    if (proj && proj.preference && proj.preference.trim()) {
+      var pref = proj.preference.trim().slice(0, 500);
+      if (pref) parts.push('【用户偏好】' + pref);
+    }
+    var co = (proj && proj.id) ? MemoryModule.getCoreOverview(proj.id) : null;
+    if (co && co.text && co.text.trim()) {
+      var coText = co.text.trim().slice(0, 500);
+      if (coText) parts.push('【核心概述】' + coText);
+    }
+
+    // ── 情景性（每次必注入）：时间 / 天气 / 能力 / 距上次发消息 / 待办 ──
     if (ais.autoDateTime) {
       var now = new Date();
       var dow = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][now.getDay()];
       var period = fGetPeriodLabel(now.getHours());
       parts.push('【当前时间】' + today.md + ' ' + dow + ' ' + period + String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0'));
     }
-
     if (ais.autoWeather) {
       var w = store.weather;
       if (w && w.text) {
@@ -394,40 +475,14 @@ var ChatModule = (function() {
         parts.push('【天气】' + w.text + (isStale ? ' (可能已过时)' : ''));
       }
     }
-
     if (ais.webSearch) {
       parts.push('【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。');
     }
-
-    if (chat && chat.emailEnabled) {
-      parts.push('【邮件发送】当用户要求发送邮件时，使用格式 [[EMAIL:主题]] 标记。系统会自动撰写并发送邮件。');
-    }
-
     if (chat && chat.lastInteractionTime) {
       parts.push('上次发消息：' + fFormatTimeSince(chat.lastInteractionTime) + '。');
     } else {
       parts.push('这是你们的第一次对话。');
     }
-
-    if (ais.autoDateTime) {
-      var now2 = new Date();
-      parts.push('她现在的可能状态-你可能在想（也可以做你想的）：' + fGetUserPossibleState(now2.getHours(), now2.getDay()) + '。');
-    }
-
-    var cml = proj && proj.id ? MemoryModule.getCML(proj.id) : null;
-    if (cml && cml.aiEmotionalMemories && cml.aiEmotionalMemories.length > 0) {
-      var recentAEMs = cml.aiEmotionalMemories.slice(0, 3);
-      if (recentAEMs.length > 0) {
-        var aemText = recentAEMs.map(function(a) { return (a.summary || '').slice(0, 60); }).join(' | ');
-        if (aemText) parts.push('【最近情绪记忆】' + aemText);
-      }
-    }
-
-    if (proj && proj.preference && proj.preference.trim()) {
-      var pref = proj.preference.trim().slice(0, 500);
-      if (pref) parts.push('【用户偏好】' + pref);
-    }
-
     var activeTodos = store.todos.filter(function(t) {
       if (t.done) return false;
       if (t.creator === 'ai' && t.chatId && t.chatId !== store.activeChat) return false;
@@ -451,121 +506,71 @@ var ChatModule = (function() {
       if (todoLines.length > 0) parts.push('【待办】' + todoLines.join(' | '));
     }
 
-    var readingBooks = store.books.filter(function(b) { return b.progress > 0 && b.progress < 100; });
-    if (readingBooks.length > 0) {
-      parts.push('【阅读】' + readingBooks.map(function(b) { return '《' + b.title + '》' + b.progress + '%'; }).join(', '));
+    // ── 记忆性（每 3 轮）：AEM 3 条 + USM 3 条 ──
+    if (isEvery3) {
+      var cml = proj && proj.id ? MemoryModule.getCML(proj.id) : null;
+      var recentAEMs = (cml && cml.aiEmotionalMemories || []).slice(0, 3);
+      if (recentAEMs.length > 0) {
+        var aemText = recentAEMs.map(function(a) { return (a.summary || '').slice(0, 60); }).join(' | ');
+        if (aemText) parts.push('【最近情绪记忆】' + aemText);
+      }
+      var recentUSMs = (cml && cml.userStarredMemories || []).filter(function(u) { return u.summary; }).slice(0, 3);
+      if (recentUSMs.length > 0) {
+        var usmText = recentUSMs.map(function(u) { return (u.summary || '').slice(0, 60); }).join(' | ');
+        if (usmText) parts.push('【最近星标记忆】' + usmText);
+      }
+      var recentLTMs = (proj && proj.memories || []).filter(function(m) { return m.type === 'long_term'; }).slice(0, 3);
+      if (recentLTMs.length > 0) {
+        var ltmText = recentLTMs.map(function(m) { return ((m.summary || m.content || '')).slice(0, 60); }).join(' | ');
+        if (ltmText) parts.push('【最近长期记忆】' + ltmText);
+      }
     }
 
-    var recentUserDiary = store.diaries.filter(function(d) { return d.author === 'user'; })[0];
-    if (recentUserDiary) {
-      var dc = recentUserDiary.content;
-      parts.push('【用户最近日记】' + (dc.length > 100 ? dc.slice(0, 100) + '…' : dc));
-    }
-    var recentAIDiary = store.diaries.filter(function(d) { return d.author === 'ai'; })[0];
-    if (recentAIDiary) {
-      var dc2 = recentAIDiary.content;
-      parts.push('【你的最近日记】' + (dc2.length > 100 ? dc2.slice(0, 100) + '…' : dc2));
-    }
-
+    // ── 召回性（一次性） ──
     if (hasRecall) {
       parts.push(chat._pendingRetrievalBlock);
       chat._pendingRetrievalBlock = null;
     }
 
-    if (isEvery3 || isFirstMsg || hasRecall) {
-      var recentUserLabels = getRecentUserAffectLabels();
-      if (recentUserLabels.length > 0) {
-        var portrait = store.memorySystem.relationalPortrait;
-        var matched = [];
-        for (var li = 0; li < recentUserLabels.length; li++) {
-          var label = recentUserLabels[li];
-          var pattern = portrait.patterns[label];
-          if (pattern && pattern.strategy && pattern.count >= 2) {
-            matched.push(label + '(×' + pattern.count + '): ' + pattern.strategy);
-          }
-        }
-        if (matched.length > 0) {
-          parts.push('【关系模式】' + matched.slice(0, 3).join(' | '));
-        }
-      }
-
-      var coreMems = store.memorySystem.coreMemories || [];
-      if (coreMems.length > 0) {
-        var recentLabels = getRecentAffectLabels();
-        var relevant = coreMems
-          .filter(function(cm) {
-            var aiL = cm.affect_first && cm.affect_first.ai ? cm.affect_first.ai.label : null;
-            var uL = cm.affect_first && cm.affect_first.user ? cm.affect_first.user.label : null;
-            return recentLabels.indexOf(aiL) >= 0 || recentLabels.indexOf(uL) >= 0;
-          })
-          .sort(function(a, b) {
-            var aInt = (a.affect_first && a.affect_first.ai ? a.affect_first.ai.intensity || 0 : 0) + (a.affect_first && a.affect_first.user ? a.affect_first.user.intensity || 0 : 0);
-            var bInt = (b.affect_first && b.affect_first.ai ? b.affect_first.ai.intensity || 0 : 0) + (b.affect_first && b.affect_first.user ? b.affect_first.user.intensity || 0 : 0);
-            return bInt - aInt;
-          })
-          .slice(0, 2);
-        if (relevant.length > 0) {
-          parts.push('【情感记忆】' + relevant.map(function(cm) {
-            var aiL = cm.affect_first && cm.affect_first.ai ? cm.affect_first.ai.label : '?';
-            var uL = cm.affect_first && cm.affect_first.user ? cm.affect_first.user.label : '?';
-            return '[' + aiL + '/' + uL + '] ' + cm.event_summary + ' — ' + ((cm.relational_note || '').slice(0, 40));
-          }).join(' | '));
-        }
-      }
-
-      if (chat && chat.sharedMemoryIds && chat.sharedMemoryIds.length > 0 && proj) {
-        var sharedMems = proj.memories.filter(function(m) {
-          return chat.sharedMemoryIds.indexOf(m.id) >= 0 && m.starred && (m.decayFactor || 0) >= 0.25;
-        });
-        if (sharedMems.length > 0) {
-          parts.push('【重要记忆】' + sharedMems.slice(0, 5).map(function(m) { return (m.content || '').slice(0, 50); }).join(' | '));
-        }
-      }
-
-      if (chat) {
-        var chatSum = store.memorySystem.chatSummaries[chat.id];
-        if (chatSum && chatSum.summaries && chatSum.summaries.length > 0) {
-          var s = chatSum.summaries[chatSum.summaries.length - 1];
-          var line = (s.summary.split('\n')[0] || s.summary);
-          parts.push('【对话摘要】' + (line.length > 60 ? line.slice(0, 60) + '…' : line));
-        }
-      }
-
-      var drp = getDerivedPatterns();
-      if (drp && drp.patterns && drp.patterns.length > 0) {
-        var topPatterns = drp.patterns.sort(function(a, b) { return (b.frequency || 0) - (a.frequency || 0); }).slice(0, 2);
-        parts.push('【核心相处模式】' + topPatterns.map(function(p) { return p.patternName + '：' + (p.description || '').slice(0, 40); }).join(' | '));
-      }
+    // ── 实时性（有更新才注入）：阅读 / 最近日记 / 用户可能状态 / 状态(POKE) ──
+    var readingBooks = store.books.filter(function(b) { return b.progress > 0 && b.progress < 100; });
+    var readingText = '';
+    if (readingBooks.length > 0) {
+      readingText = '【阅读】' + readingBooks.map(function(b) { return '《' + b.title + '》' + b.progress + '%'; }).join(', ');
     }
 
-    if (isFirstMsg || hasRecall) {
-      var pp = getPersonalityProfiles();
-      var up = pp ? pp.user : null;
-      if (up && up.coreTraits && up.coreTraits.length > 0) {
-        var ppLines = [];
-        if (up.coreTraits.length > 0) ppLines.push('特质：' + up.coreTraits.slice(0, 3).join('·'));
-        if (up.emotionalPatterns && up.emotionalPatterns.length > 0) ppLines.push('情绪：' + up.emotionalPatterns.slice(0, 2).join('·'));
-        if (ppLines.length > 0) parts.push('【用户人格档案】' + ppLines.join(' | '));
-      }
-      var ap = pp ? pp.ai : null;
-      if (ap && ap.dominantEmotions && ap.dominantEmotions.length > 0) {
-        var aiLines = [];
-        if (ap.dominantEmotions.length > 0) aiLines.push('主导：' + ap.dominantEmotions.slice(0, 2).join('·'));
-        if (ap.reactionPatterns && ap.reactionPatterns.length > 0) aiLines.push('反应：' + ap.reactionPatterns.slice(0, 2).join('·'));
-        if (aiLines.length > 0) parts.push('【AI人格沉淀】' + aiLines.join(' | '));
-      }
+    var projectWindowIds = (proj && proj.chats) ? proj.chats.map(function(c) { return c.id; }) : [];
+    var diaryLines = [];
+    var recentUserDiary = store.diaries.filter(function(d) { return d.author === 'user'; })[0];
+    if (recentUserDiary) {
+      var dc = recentUserDiary.content;
+      diaryLines.push('【用户最近日记】' + (dc.length > 100 ? dc.slice(0, 100) + '…' : dc));
+    }
+    var recentAIDiary = store.diaries.filter(function(d) {
+      return d.author === 'ai' && d.sourceChatId && projectWindowIds.indexOf(d.sourceChatId) >= 0;
+    })[0];
+    if (recentAIDiary) {
+      var dc2 = recentAIDiary.content;
+      diaryLines.push('【你的最近日记】' + (dc2.length > 100 ? dc2.slice(0, 100) + '…' : dc2));
+    }
+    var diaryText = diaryLines.join('\n');
+
+    var userStateText = '';
+    if (ais.autoDateTime) {
+      var now2 = new Date();
+      userStateText = '她现在的可能状态-你可能在想（也可以做你想的）：' + fGetUserPossibleState(now2.getHours(), now2.getDay()) + '。';
     }
 
-    var proj2 = getActiveProject();
-    if (proj2) {
-      var statusLines = [];
-      if (proj2._aiStatus) statusLines.push('你的当前状态：' + proj2._aiStatus);
-      if (proj2._userStatus) statusLines.push('她当前的状态：' + proj2._userStatus);
-      if (proj2._userStatusChanged) statusLines.push('她更新了状态，你可以戳一戳');
-      if (statusLines.length > 0) parts.push('【状态】' + statusLines.join(' | '));
-    }
+    var statusLines = [];
+    if (proj && proj._aiStatus) statusLines.push('你的当前状态：' + proj._aiStatus);
+    if (proj && proj._userStatus) statusLines.push('她当前的状态：' + proj._userStatus);
+    if (proj && proj._userStatusChanged) statusLines.push('她更新了状态，你可以戳一戳');
+    var statusText = statusLines.length > 0 ? '【状态】' + statusLines.join(' | ') : '';
 
-    parts.push('【响应格式】末尾附加<!--REFLECT{ai_label,ai1-10,user_label,user1-10,reason}--> 可用标签→AI:被触动|想追问没问|克制后反弹|放松|警觉|平静在场|安心|落空|感伤|心动|骄傲|担心 User:脆弱|调皮|疲惫|兴奋|回避|坦诚|平静在场|依赖|骄傲|低落');
+    fSnapshotInject(parts, snap, 'reading', readingText);
+    fSnapshotInject(parts, snap, 'diary', diaryText);
+    fSnapshotInject(parts, snap, 'userState', userStateText);
+    fSnapshotInject(parts, snap, 'status', statusText);
 
     var result = parts.join('\n');
     _dynCtxCache = { fp: fp, content: result, ts: nowTs };
@@ -583,7 +588,7 @@ var ChatModule = (function() {
         return '[' + m.id + '] ' + roleLabel + ': ' + preview;
       });
     if (lines.length === 0) return '';
-    return '【最近消息ID参考】\n' + lines.join('\n');
+    return lines.join('\n');
   }
 
   function buildSystemPrompt() {
@@ -600,7 +605,7 @@ var ChatModule = (function() {
     if (!text) return text;
     text = text.replace(/<!--\s*REFLECT\s*\{[\s\S]*?\}\}/gi, '');
     text = text.replace(/<!--\s*REFLECT[\s\S]*$/gi, '');
-    text = text.replace(/<!--\s*(?:REFLECT|DIARY|MEMORY|STAR|LTM)[\s\S]*?-->/gi, '');
+    text = text.replace(/<!--\s*(?:REFLECT|DIARY|MEMORY|STAR|LTM|LITTER)[\s\S]*?-->/gi, '');
     // Strip [[XXX:...]] markers but KEEP [[FILE:...]] for resolveArtifactRefs
     text = text.replace(/\[\[(?!FILE:)\w+:[\s\S]*?\]\]/g, '');
     text = text.replace(/^(MESSAGE|LITTER|DIARY|EMAIL|TODO):\s*/gmi, '');
@@ -1025,7 +1030,7 @@ var ChatModule = (function() {
 
     msgs.forEach(function(m) { m._starredOnce = true; m._starred = true; });
 
-    // Create USM placeholder immediately — LLM summary filled in next round
+    // Create USM placeholder immediately — summary filled in by the async LLM call below
     var usmId = 'usm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
     var usm = {
       id: usmId,
@@ -1034,12 +1039,11 @@ var ChatModule = (function() {
       sourceWindowId: store.activeChat,
       sourceProjectId: store.activeProject,
       rawDialogue: rawDialogue,
-      summary: '⏳ 待生成...',
+      summary: '',
+      starred: true,
+      decayFactor: 1,
       starredMsgIds: selectedMsgIds,
-      userNote: '',
-      status: 'pending',
-      taskLog: { starredAt: new Date().toISOString(), sentAt: null, repliedAt: null, writtenAt: null },
-      retryCount: 0
+      userNote: ''
     };
     MemoryModule.addUSM(store.activeProject, usm);
     checkDeriveInsightsTrigger('usm');
@@ -1116,7 +1120,7 @@ var ChatModule = (function() {
     if (jm) {
       try {
         var parsed = JSON.parse(jm[1]);
-        if (parsed.summary) return { summary: parsed.summary.slice(0, 100), internalNote: (parsed.note || parsed.internalNote || '').slice(0, 200) };
+        if (parsed.summary) return { summary: parsed.summary.slice(0, 100), internalNote: (parsed.note || parsed.internalNote || '').slice(0, 200), keywords: (parsed.keywords || []).map(String).slice(0, 5) };
       } catch(e) {}
     }
     var pipeRe = /<!--\s*MEMORY\s*\{([^|}]*)\|([\s\S]*?)\}\s*-->/;
@@ -1156,10 +1160,6 @@ var ChatModule = (function() {
       ms.reflections.length = ms.reflectionMax;
     }
     updateAffectGraph(reflection.ai_affect_label, reflection.user_affect_label);
-    if (reflection.user_affect_label === '平静在场' || reflection.ai_affect_label === '平静在场') {
-      ms._quietPresenceCount = (ms._quietPresenceCount || 0) + 1;
-    }
-    if (typeof updateRelationalPortrait === 'function') updateRelationalPortrait(reflection.user_affect_label);
     var aiIntensity = reflection.ai_affect_intensity || 0;
     var userIntensity = reflection.user_affect_intensity || 0;
     if (aiIntensity >= 7 || userIntensity >= 7) {
@@ -1174,20 +1174,6 @@ var ChatModule = (function() {
         }
       } else {
         console.log('[AEM-debug] No MEMORY marker in response (intensity was high but LLM did not include marker)');
-      }
-    }
-    if ((ms._quietPresenceCount || 0) >= 10) {
-      if (typeof queueQuietPresenceCoreMemory === 'function') queueQuietPresenceCoreMemory(chat);
-      ms._quietPresenceCount = 0;
-    }
-    var proj = getActiveProject();
-    if (proj) {
-      var today = AppCore.fmtDate().iso;
-      var recentMems = proj.memories.filter(function(m) { return m.date === today && !m.affectLabel; });
-      for (var rm = 0; rm < recentMems.slice(-3).length; rm++) {
-        var m = recentMems[rm];
-        m.affectLabel = reflection.user_affect_label;
-        m.affectIntensity = reflection.user_affect_intensity;
       }
     }
     if (chat) {
@@ -1232,9 +1218,6 @@ var ChatModule = (function() {
   // ═══════════════════════════════════════════
   function detectCommand(input) {
     var trimmed = input.trim();
-    if (trimmed.startsWith('/diary') || trimmed.startsWith('/日记')) {
-      return { type: 'diary', prompt: trimmed.replace(/^\/diary\s*/i, '').replace(/^\/日记\s*/, '') };
-    }
     if (trimmed.startsWith('/todo') || trimmed.startsWith('/待办')) {
       return { type: 'todo', prompt: trimmed.replace(/^\/todo\s*/i, '').replace(/^\/待办\s*/, '') };
     }
@@ -1253,22 +1236,6 @@ var ChatModule = (function() {
   async function executeCommand(cmd, userText) {
     var store = AppCore.getStore();
     switch (cmd.type) {
-      case 'diary': {
-        var prompt = cmd.prompt || '请根据我们最近的对话，帮我写一篇今天的日记。';
-        var diaryContent = await genAIResponseForCommand(prompt, '请以用户mays的语气，用中文写一篇简洁的日记。要求：第一人称，温柔细腻，长度在100-200字。风格参考：记录当天的感受和想法，带有淡淡的文学气息。');
-        if (diaryContent) {
-          var ds2 = AppCore.fmtDate().iso;
-          var now2 = new Date();
-          store.diaries.unshift({
-            id: 'd' + AppCore.gid(''), date: ds2,
-            time: String(now2.getHours()).padStart(2,'0') + ':' + String(now2.getMinutes()).padStart(2,'0'),
-            title: '', content: diaryContent, mood: 'calm', author: 'user', replies: []
-          });
-          UIModule.toast('📝 Diary entry generated');
-          return '我帮你写了一篇日记，可以在 diary 页面查看。';
-        }
-        return '日记生成遇到了一些问题……';
-      }
       case 'litter': {
         var signals = [{ type: 'user_signal', detail: 'explicit /litter command' }];
         var result = typeof generateLitterThought === 'function' ? await generateLitterThought(signals, userText) : null;
@@ -1308,69 +1275,10 @@ var ChatModule = (function() {
         return '📚 **正在阅读：**\n' + reading.map(function(b) { return '- ' + b.cover + ' 《' + b.title + '》by ' + b.author + '（' + b.progress + '%）'; }).join('\n');
       }
       case 'help': {
-        return '**可用命令：**\n- `/diary` — 生成一篇日记\n- `/diary 内容` — 按提示生成日记\n- `/todo` — 查看待办\n- `/book` — 查看书架\n- `/help` — 显示此帮助';
+        return '**可用命令：**\n- `/todo` — 查看待办\n- `/book` — 查看书架\n- `/help` — 显示此帮助';
       }
       default:
         return null;
-    }
-  }
-
-  async function classifyDiaryIntent(userText) {
-    var store2 = AppCore.getStore();
-    var cfg = getActiveApiConfig(); if (!cfg.apiKey) return 'none';
-    try {
-      var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: cfg.apiKey,
-          endpoint: cfg.endpoint,
-          model: cfg.model,
-          projectId: store2.activeProject,
-          messages: [
-            { role: 'system', content: '你是一个意图分类器。判断用户是否在要求AI操作日记。规则：\n1. 如果用户要求AI写日记（AI自己的日记，从AI视角回顾今天的交流），回复 "intent: diary_write"\n2. 如果用户要求AI去阅读/回复/留言用户写的日记，回复 "intent: diary_comment"\n3. 如果用户只是提到日记但没有要求操作，或者完全无关，回复 "intent: none"\n\n只回复一行，不要其他文字。' },
-            { role: 'user', content: userText }
-          ]
-        })
-      });
-      var data = await response.json();
-      var reply = (data.reply && data.reply.content) ? data.reply.content.toLowerCase() : '';
-      if (reply.includes('diary_write')) return 'diary_write';
-      if (reply.includes('diary_comment')) return 'diary_comment';
-      return 'none';
-    } catch (err) {
-      console.error('Intent classification error:', err);
-      return 'none';
-    }
-  }
-
-  async function genAIResponseForCommand(userPrompt, systemPrompt) {
-    var store3 = AppCore.getStore();
-    var cfg = getActiveApiConfig(); if (!cfg.apiKey) return null;
-    try {
-      var messages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ];
-      var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: cfg.apiKey,
-          endpoint: cfg.endpoint,
-          model: cfg.model,
-          projectId: store3.activeProject,
-          messages: messages
-        })
-      });
-      var data = await response.json();
-      if (data.reply && data.reply.content) {
-        return data.reply.content;
-      }
-      return null;
-    } catch (err) {
-      console.error('Command AI call failed:', err);
-      return null;
     }
   }
 
@@ -1626,99 +1534,6 @@ var ChatModule = (function() {
   }
 
   // ═══════════════════════════════════════════
-  //  Memory repair functions (Block 10 part 1)
-  // ═══════════════════════════════════════════
-  async function regenerateAEM(entryId) {
-    var store = AppCore.getStore();
-    var cfg = getActiveApiConfig();
-    if (!cfg.apiKey) { UIModule.toast('请先配置当前Project的API'); return; }
-
-    var cml = getCoreMemoryLayers();
-    var idx = cml.aiEmotionalMemories.findIndex(function(m) { return m.id === entryId; });
-    if (idx === -1) { UIModule.toast('记忆条目未找到'); return; }
-    var aem = cml.aiEmotionalMemories[idx];
-    if (!aem || !aem.rawDialogue || !aem.rawDialogue.length) { UIModule.toast('缺少原始对话，无法修复'); return; }
-
-    UIModule.toast('🔄 正在用 ' + cfg.model + ' 重新解读...');
-    var dialogueText = aem.rawDialogue
-      .map(function(d) { return (d.role === 'user' ? '用户' : 'AI') + '：' + (d.text || ''); })
-      .join('\n');
-
-    var systemPrompt = '你是一个情感记忆归档员。为以下对话片段生成情感记忆解读。\n返回JSON（不要其他文字）：\n{\n  "aiSelfEval": { "label": "[AI当时的情感标签]", "intensity": [1-10], "internalNote": "[★ AI的私密独白：内心真实想法、犹豫、为何这样回应——不展示给用户，1-2句话]" },\n  "userStateAtTime": { "label": "[用户当时的情感标签]", "intensity": [1-10] },\n  "summary": "[一句话概括，20字以内]"\n}';
-
-    try {
-      var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: dialogueText }
-          ]
-        })
-      });
-      if (!response.ok) { UIModule.toast('API 调用失败 (' + response.status + ')'); return; }
-      var data = await response.json();
-      var content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
-      if (!content) { UIModule.toast('模型返回空内容'); return; }
-
-      var jsonStr = content;
-      var fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (fenceMatch) jsonStr = fenceMatch[1].trim();
-      var result = JSON.parse(jsonStr);
-
-      if (result.aiSelfEval) {
-        aem.aiSelfEval = {
-          label: result.aiSelfEval.label || aem.aiSelfEval.label,
-          intensity: result.aiSelfEval.intensity || aem.aiSelfEval.intensity,
-          internalNote: result.aiSelfEval.internalNote || aem.aiSelfEval.internalNote
-        };
-      }
-      if (result.userStateAtTime) {
-        aem.userStateAtTime = {
-          label: result.userStateAtTime.label || aem.userStateAtTime.label,
-          intensity: result.userStateAtTime.intensity || aem.userStateAtTime.intensity
-        };
-      }
-      if (result.summary) aem.summary = result.summary.slice(0, 20);
-      aem.triggerSource = (aem.triggerSource || 'high_intensity') + '_repaired';
-      aem._repairedAt = new Date().toISOString();
-      aem._repairedByModel = cfg.model;
-
-      flushMemoryFile(store.activeProject, store.activeChat, 'manual_repair_aem');
-      AppCore.saveStore();
-      renderMemoryPanelBody();
-      UIModule.toast('✅ AEM 已重新解读（模型: ' + cfg.model + '）');
-    } catch (e) {
-      console.log('[repair-aem] Error:', e.message);
-      UIModule.toast('修复失败: ' + e.message);
-    }
-  }
-
-  async function regenerateUSM(entryId) {
-    var store = AppCore.getStore();
-    var chat = getActiveChatObj();
-    if (!chat) return;
-    var cml = getCoreMemoryLayers();
-    var usm = cml.userStarredMemories.find(function(m) { return m.id === entryId; });
-    if (!usm) { UIModule.toast('记忆条目未找到'); return; }
-    if (!usm.rawDialogue || !usm.rawDialogue.length) { UIModule.toast('缺少原始对话'); return; }
-
-    // Re-generate via queue-based approach
-    UIModule.toast('🔄 已重新排队生成摘要（下轮对话）');
-    if (!chat._pendingStarTasks) chat._pendingStarTasks = [];
-    chat._pendingStarTasks.push({ rawDialogue: usm.rawDialogue, usmId: entryId });
-    usm.status = 'pending';
-    usm.summary = '⏳ 待重新生成...';
-    usm.taskLog = usm.taskLog || { starredAt: new Date().toISOString(), sentAt: null, repliedAt: null, writtenAt: null };
-    usm.retryCount = 0;
-    AppCore.saveStore();
-    renderMemoryPanelBody();
-    UIModule.toast('✅ 已排队，下轮对话生成新摘要');
-  }
-
-  // ═══════════════════════════════════════════
   //  Block 11: Bubble actions, TTS, copy, delete, star, sentence splitting
   // ═══════════════════════════════════════════
   function toggleBubbleActions(event, idx) {
@@ -1875,12 +1690,20 @@ var ChatModule = (function() {
       var retrievalBlock = buildRetrievalBlock(userText);
       if (retrievalBlock) chat._pendingRetrievalBlock = retrievalBlock;
     }
+
+    // 日记按需读取兜底：正则命中则强制注入【日记】块（无视快照状态）
+    if (/日记|读.*日记|看.*日记|最近写了|日记本|翻.*日记/.test(userText || '')) {
+      if (chat && chat._dynCtxSnapshot) chat._dynCtxSnapshot.diary = '';
+      _dynCtxCache.fp = '';
+    }
+
     var dynamicBlock = buildDynamicContextBlock();
+
+    var emotionalBlock = buildEmotionalRecallBlock(userText);
+    if (emotionalBlock) dynamicBlock += '\n' + emotionalBlock;
 
     if (diaryIntent === 'diary_write') {
       dynamicBlock += '\n【当前任务】用户让你写一篇你自己视角的日记。在回复中使用 <!--DIARY:write--> ... <!--/DIARY--> 标记。标记外正常回复可简短。';
-    } else if (diaryIntent === 'diary_comment') {
-      dynamicBlock += '\n【当前任务】用户让你去读他的日记并留言。在回复中使用 <!--DIARY:reply--> ... <!--/DIARY--> 标记，写1-2句温暖留言。';
     }
 
     var apiMessages = [];
@@ -1896,40 +1719,36 @@ var ChatModule = (function() {
     var l2EndIdx = totalRounds - L1_ROUNDS;
     var l2Rounds = allRounds.slice(l2StartIdx, l2EndIdx);
 
-    var l2StarredContents = [];
-    for (var ri = 0; ri < l2Rounds.length; ri++) {
-      var round = l2Rounds[ri];
-      for (var rj = 0; rj < round.msgs.length; rj++) {
-        var rmsg = round.msgs[rj];
-        if (rmsg._starred && rmsg.role !== 'system') {
-          var roleLabel1 = rmsg.role === 'user' ? '用户' : 'AI';
-          l2StarredContents.push('[星标]' + roleLabel1 + ': ' + (rmsg.text || '').slice(0, 60));
-        }
-      }
-    }
-
     apiMessages.push({ role: 'system', content: SYSTEM_PROMPT_STATIC });
     apiMessages.push({ role: 'system', content: dynamicBlock });
 
     var recentMsgIds = buildRecentMsgIdBlock(chat);
-    apiMessages.push({ role: 'system', content: '【多气泡与引用协议】\n你可以使用两个标记来控制回复格式：\n1. [[BUBBLE]] — 放在两个气泡之间，将回复拆分为多条消息。每条消息独立显示为对话气泡。（注意：[[BUBBLE]] 前后不要加换行，直接紧贴文字。）\n2. [[REPLY:消息ID]] — 放在气泡文字开头，表示这条气泡是对某条特定消息的引用回复。\n\n示例：回复中有两句话，第一句引用某条消息——\n[[REPLY:msg_xxx]]你说的对，这个思路确实更好[[BUBBLE]]那我们明天继续推进？\n\n自然换行时正常输出即可，分句逻辑会自动处理。只有在明确想拆分多条独立气泡、或引用回复某条消息时，才使用这两个标记。\n' + recentMsgIds });
+    apiMessages.push({ role: 'system', content: '【可引用消息ID】\n' + recentMsgIds });
 
     if (l2Rounds.length > 0 && chat._roundSummaries && chat._roundSummaries.length > 0) {
       var l2Summary = chat._roundSummaries[chat._roundSummaries.length - 1];
       if (l2Summary && l2Summary.summary) {
-        var summaryBlock = '【较早对话摘要】' + l2Summary.summary;
-        if (l2StarredContents.length > 0) {
-          summaryBlock += ' | 星标内容: ' + l2StarredContents.join('; ');
-        }
-        apiMessages.push({ role: 'system', content: summaryBlock });
+        apiMessages.push({ role: 'system', content: '【较早对话摘要】' + l2Summary.summary });
       }
     } else if (l2Rounds.length > 0 && l2Rounds.length >= 5) {
       queueRoundCompression(chat, l2Rounds);
-      if (l2StarredContents.length > 0) {
-        apiMessages.push({ role: 'system', content: '【星标记忆】' + l2StarredContents.join('; ') });
+    }
+
+    // 近期 6 轮有 USM 更新（存在 _starred 消息）则注入最近 USM summary
+    var hasRecentUSM = false;
+    for (var rui = 0; rui < l1Rounds.length; rui++) {
+      var l1RoundMsgs = l1Rounds[rui].msgs || [];
+      for (var ruj = 0; ruj < l1RoundMsgs.length; ruj++) {
+        if (l1RoundMsgs[ruj]._starred && l1RoundMsgs[ruj].role !== 'system') { hasRecentUSM = true; break; }
       }
-    } else if (l2StarredContents.length > 0) {
-      apiMessages.push({ role: 'system', content: '【星标记忆】' + l2StarredContents.join('; ') });
+      if (hasRecentUSM) break;
+    }
+    if (hasRecentUSM) {
+      var cmlUSM = MemoryModule.getCML(store.activeProject);
+      var recentUSMs = (cmlUSM && cmlUSM.userStarredMemories || []).filter(function(u) { return u.summary; }).slice(0, 2);
+      if (recentUSMs.length > 0) {
+        apiMessages.push({ role: 'system', content: '【最近星标记忆】' + recentUSMs.map(function(u) { return u.summary; }).join('；') });
+      }
     }
 
     var l1Messages = [];
@@ -2207,6 +2026,18 @@ var ChatModule = (function() {
     displayResponse = displayResponse.replace(/<!--\s*\/?DIARY:?\w*\s*-->/gi, '');
     displayResponse = displayResponse.trim();
 
+    // ── 猫砂盆主聊天写入路径（AI 主动输出 <!--LITTER:type-->...<!--/LITTER-->）──
+    var litterMatch = displayResponse.match(/<!--\s*LITTER(?::([^>]*?))?\s*-->([\s\S]*?)<!--\s*\/LITTER\s*-->/i);
+    if (litterMatch) {
+      var litterType = (litterMatch[1] || '').trim();
+      var litterContent = (litterMatch[2] || '').trim();
+      displayResponse = displayResponse.replace(litterMatch[0], '').trim();
+      var litterMod = AppCore.getModule('litterbox');
+      if (litterMod && litterMod.ingestFromMainChat) {
+        litterMod.ingestFromMainChat(litterContent, litterType, chat);
+      }
+    }
+
     // ── [[CORE_OVERVIEW:...]] marker ──
     var coreOverviewMatch = displayResponse.match(/\[\[CORE_OVERVIEW:([\s\S]*?)\]\]/);
     if (coreOverviewMatch) {
@@ -2376,7 +2207,6 @@ var ChatModule = (function() {
     (AppCore.getModule('litterbox')||{}).trigger(userText, fullResponse);
     (AppCore.getModule('diary')||{}).maybeComment(fullResponse);
     (AppCore.getModule('memory')||{}).applyForgettingCurve();
-    (AppCore.getModule('memory')||{}).checkSummarization(chat);
     (AppCore.getModule('memory')||{}).checkLongTerm(chat);
 
     chat.lastInteractionTime = new Date().toISOString();
@@ -2601,11 +2431,7 @@ var ChatModule = (function() {
       }
     }
 
-    var diaryIntent = 'none';
-    var lower = lastText.toLowerCase();
-    if (/日记|diary/.test(lower) && !cmd) {
-      diaryIntent = await classifyDiaryIntent(lastText);
-    }
+    var diaryIntent = detectDiaryIntent(lastText);
 
     var typingArea2 = AppCore.$('chatTypingArea');
     if (diaryIntent !== 'none') {
@@ -2690,8 +2516,6 @@ var ChatModule = (function() {
       UIModule.toast('请先启用 API');
       return;
     }
-
-    checkTodoReminders();
 
     var chat = getActiveChatObj();
     if (!chat) {
@@ -2836,13 +2660,7 @@ var ChatModule = (function() {
       }
     }
 
-    var lower = text.toLowerCase();
-    var hasDiaryWord = /日记|diary/.test(lower);
-
-    var diaryIntent = 'none';
-    if (hasDiaryWord && !cmd) {
-      diaryIntent = await classifyDiaryIntent(text);
-    }
+    var diaryIntent = detectDiaryIntent(text);
 
     var typingArea2 = AppCore.$('chatTypingArea');
     if (diaryIntent !== 'none') {
@@ -2856,9 +2674,6 @@ var ChatModule = (function() {
     }
 
     var sendText = text;
-    if (proj && proj._userStatusChanged) {
-      sendText = text + '\n\n[她的状态有更新，戳一戳？]';
-    }
     if (proj && proj._aiStatusChanged) {
       proj._aiStatusChanged = false;
       AppCore.saveStore();
@@ -2973,8 +2788,6 @@ var ChatModule = (function() {
     // Commands
     detectCommand: detectCommand,
     executeCommand: executeCommand,
-    classifyDiaryIntent: classifyDiaryIntent,
-    genAIResponseForCommand: genAIResponseForCommand,
 
     // Context menu & project/chat management
     showContextMenu: showContextMenu,
@@ -3024,10 +2837,6 @@ var ChatModule = (function() {
     confirmBatchStar: confirmBatchStar,
     executeBatchStar: executeBatchStar,
     createUserStarredMemory: createUserStarredMemory,
-
-    // Memory repair
-    regenerateAEM: regenerateAEM,
-    regenerateUSM: regenerateUSM,
 
     // Bubble actions
     toggleBubbleActions: toggleBubbleActions,

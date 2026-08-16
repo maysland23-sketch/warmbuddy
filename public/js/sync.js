@@ -127,6 +127,13 @@ var SyncModule = (function() {
       aiName: getAIName(),
       systemPrompt: proj.preference || '',
       chatSummary: buildChatContextSummary(),
+      coreOverview: (function() {
+        if (typeof MemoryModule !== 'undefined' && MemoryModule.getCoreOverview) {
+          var co = MemoryModule.getCoreOverview(proj.id);
+          if (co && co.text) return co.text;
+        }
+        return (proj.coreOverview && proj.coreOverview.text) || '';
+      })(),
       timezoneOffset: -(new Date().getTimezoneOffset()),
       _windowSettings: {
         autoWeather: ais.autoWeather || false,
