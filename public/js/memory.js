@@ -1250,13 +1250,11 @@
       } else if (source === 'usm') {
         ms._usmSinceLastDerive = (ms._usmSinceLastDerive || 0) + 1;
       }
-      if (ms._aemSinceLastDerive >= 5 || ms._usmSinceLastDerive >= 3) {
-        MemoryModule.generateCoreOverview();
-      }
     },
 
     generateCoreOverview: async function() {
-      var cfg = AppCore.getActiveApiConfig(); if (!cfg.apiKey) return;
+      console.warn('[core-overview] async generation disabled; Core Overview is updated by the main chat marker only');
+      return;
       var ms = AppCore.getStore().memorySystem;
       var store = AppCore.getStore();
       var cml = MemoryModule.getCML(store.activeProject);
@@ -1399,7 +1397,7 @@
       fetch(AppCore.BACKEND_URL + '/api/memory/core-overview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: store.password, projectId: projectId, content: text, updatedBy: updatedBy || 'warmbuddy', metadata: { triggered_by: 'marker' } })
+        body: JSON.stringify({ password: store.password, projectId: projectId, content: text, updatedBy: updatedBy || 'warmbuddy', source: 'main_chat', metadata: { triggered_by: 'marker', source: 'main_chat' } })
       }).catch(function() {});
       if (typeof renderMemoryPanelBody === 'function') renderMemoryPanelBody();
       console.log('[core-overview] Local save (' + text.length + ' chars)');
@@ -1412,7 +1410,6 @@
         var res = await fetch(AppCore.BACKEND_URL + '/api/memory/core-overview/latest?projectId=' + encodeURIComponent(projectId), {
           method: 'GET',
           headers: { 'Content-Type': 'application/json', 'x-password': store.password },
-          body: JSON.stringify({ password: store.password })
         });
         if (res.ok) {
           var remote = await res.json();
@@ -1442,6 +1439,7 @@
           '<div class="core-overview-header">CORE OVERVIEW</div>' +
           '<div style="font-size:12px;color:var(--text-lighter);line-height:1.6;">no core overview yet.</div>' +
           '<div style="font-size:10px;color:var(--text-lighter);margin-top:4px;">generated when enough emotional memories accumulate</div>' +
+          '<div class="core-overview-footer"><span class="core-overview-hist-link" data-action="showCoreHistory" style="font-size:10px;color:var(--text-lighter);text-decoration:underline;cursor:pointer;">查看历史</span></div>' +
           '</div>';
       }
 
@@ -1478,15 +1476,25 @@
     showCoreHistoryModal: async function(projectId) {
       var store = AppCore.getStore();
       var history = [];
+      var requestError = null;
       try {
         var res = await fetch(AppCore.BACKEND_URL + '/api/memory/core-overview/history?projectId=' + encodeURIComponent(projectId), {
           method: 'GET',
           headers: { 'Content-Type': 'application/json', 'x-password': store.password },
-          body: JSON.stringify({ password: store.password })
         });
-        if (res.ok) history = await res.json();
+        if (res.ok) {
+          var payload = await res.json();
+          history = Array.isArray(payload) ? payload : [];
+        } else {
+          requestError = 'HTTP ' + res.status;
+        }
       } catch(e) {
         console.warn('[core-overview] history fetch failed:', e.message);
+        requestError = e.message || '网络错误';
+      }
+      if (requestError) {
+        UIModule.toast('历史版本加载失败：' + requestError);
+        return;
       }
       if (!history || history.length === 0) {
         UIModule.toast('暂无历史版本');

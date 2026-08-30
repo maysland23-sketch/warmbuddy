@@ -1267,7 +1267,9 @@ function bigramOverlap(a, b) { return MemoryModule.bigramOverlap(a, b); }
 // Trigger check: called after AEM, USM, or diary/litterbox additions
 function checkDeriveInsightsTrigger(source) { MemoryModule.checkDeriveInsightsTrigger(source); }
 
-async function deriveRelationalInsights() { MemoryModule.generateCoreOverview(); }
+async function deriveRelationalInsights() {
+  console.warn('[core-overview] async generation disabled; Core Overview is updated by the main chat marker only');
+}
 
 // ── Long-Term Memory Auto-Generation (every 10 messages) ──
 async function checkLongTermMemory(chat) { MemoryModule.checkLongTerm(chat); }

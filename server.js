@@ -4346,7 +4346,8 @@ app.delete('/api/labels', async (req, res) => {
  */
 app.post('/api/memory/core-overview', async (req, res) => {
   try {
-    const { projectId, content, updatedBy, metadata } = (req.body || {});
+    const { projectId, content, updatedBy, metadata, source } = (req.body || {});
+    if (source !== 'main_chat') return res.status(403).json({ error: 'Core Overview writes are restricted to the main chat' });
     if (!projectId || !content) return res.status(400).json({ error: 'Missing projectId or content' });
     if (!supabase) return res.status(503).json({ error: 'Supabase not configured' });
 

@@ -2050,12 +2050,6 @@ var ChatModule = (function() {
       if (mm && mm.setCoreOverviewLocal) {
         mm.setCoreOverviewLocal(overviewContent, aiName);
       }
-      // Then persist to Supabase in background
-      fetch(AppCore.BACKEND_URL + '/api/memory/core-overview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: store.password, projectId: store.activeProject, content: overviewContent, updatedBy: aiName, metadata: { triggered_by: 'user_request' } })
-      }).catch(function() {});
       chat.messages.push({ role: 'system', contentType: 'core_overview_update', text: '核心概述已更新', time: bubbleTime, id: AppCore.generateMsgId() });
     }
 
@@ -2207,7 +2201,6 @@ var ChatModule = (function() {
     (AppCore.getModule('litterbox')||{}).trigger(userText, fullResponse);
     (AppCore.getModule('diary')||{}).maybeComment(fullResponse);
     (AppCore.getModule('memory')||{}).applyForgettingCurve();
-    (AppCore.getModule('memory')||{}).checkLongTerm(chat);
 
     chat.lastInteractionTime = new Date().toISOString();
 
