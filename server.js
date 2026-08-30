@@ -2568,7 +2568,7 @@ app.get('/api/diary-entries', async (req, res) => {
   const { projectId, since } = req.query;
   if (!supabase) return res.json({ entries: [] });
   try {
-    let query = supabase.from('diary_entries').select('*');
+    let query = supabase.from('diary_entries').select('*').is('deleted_at', null);
     if (projectId) query = query.eq('project_id', projectId);
     if (since) query = query.gt('created_at', since);
     query = query.order('created_at', { ascending: false }).limit(50);
@@ -2585,11 +2585,132 @@ app.get('/api/diary-entries', async (req, res) => {
       mood: row.mood || 'calm',
       author: row.author || 'ai',
       proactive: row.proactive || false,
+      visibilityMode: row.visibility_mode || 'selected',
+      visibleChatIds: row.visible_chat_ids || [],
+      replies: row.replies || [],
       createdAt: row.created_at
     }));
     res.json({ entries });
   } catch (e) {
     console.error('[api] diary-entries error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Diary CRUD and one-shot delivery endpoints ──
+app.post('/api/diary-entries', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const e = req.body || {};
+    if (!e.id || !e.projectId || !e.content) return res.status(400).json({ error: 'id, projectId and content required' });
+    const now = new Date().toISOString();
+    const row = {
+      id: e.id, project_id: e.projectId, chat_id: e.chatId || '', date: e.date || now.slice(0, 10),
+      time: e.time || now, title: e.title || '', content: e.content, mood: e.mood || 'calm',
+      author: e.author || 'user', proactive: !!e.proactive, updated_at: now,
+      created_at: e.createdAt || now, visibility_mode: e.visibilityMode || 'selected',
+      visible_chat_ids: Array.isArray(e.visibleChatIds) ? e.visibleChatIds : [],
+      replies: Array.isArray(e.replies) ? e.replies : []
+    };
+    const { data, error } = await supabase.from('diary_entries').upsert(row, { onConflict: 'id' }).select('*').single();
+    if (error) throw error;
+    res.json({ ok: true, entry: data });
+  } catch (e) {
+    console.error('[api] diary upsert error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch('/api/diary-entries/:id', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const body = req.body || {};
+    const patch = { updated_at: new Date().toISOString() };
+    ['title', 'content', 'mood', 'visibility_mode', 'visible_chat_ids', 'replies'].forEach(k => {
+      if (body[k] !== undefined) patch[k] = body[k];
+    });
+    const { data, error } = await supabase.from('diary_entries').update(patch).eq('id', req.params.id).select('*').single();
+    if (error) throw error;
+    res.json({ ok: true, entry: data });
+  } catch (e) {
+    console.error('[api] diary patch error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/diary-entries/:id', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const { error } = await supabase.from('diary_entries').update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[api] diary delete error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/diary-deliveries', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const input = Array.isArray(req.body && req.body.deliveries) ? req.body.deliveries : [req.body || {}];
+    const now = new Date().toISOString();
+    const rows = input.map(d => ({
+      id: d.id, diary_id: d.diaryId || d.diary_id, target_project_id: d.targetProjectId || d.target_project_id,
+      target_chat_id: d.targetChatId || d.target_chat_id, delivery_type: d.deliveryType || d.delivery_type || 'share',
+      status: 'pending', created_at: d.createdAt || now
+    }));
+    if (rows.some(d => !d.id || !d.diary_id || !d.target_project_id || !d.target_chat_id)) return res.status(400).json({ error: 'invalid delivery' });
+    const { error } = await supabase.from('diary_deliveries').upsert(rows, { onConflict: 'id', ignoreDuplicates: true });
+    if (error) throw error;
+    res.json({ ok: true, count: rows.length });
+  } catch (e) {
+    console.error('[api] diary delivery create error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/diary-deliveries', async (req, res) => {
+  if (!supabase) return res.json({ deliveries: [] });
+  try {
+    const { targetProjectId, targetChatId } = req.query;
+    let query = supabase.from('diary_deliveries').select('*').eq('status', 'pending');
+    if (targetProjectId) query = query.eq('target_project_id', targetProjectId);
+    if (targetChatId) query = query.eq('target_chat_id', targetChatId);
+    const { data, error } = await query.order('created_at', { ascending: true }).limit(50);
+    if (error) throw error;
+    const diaryIds = (data || []).map(row => row.diary_id).filter(Boolean);
+    let diaryMap = {};
+    if (diaryIds.length) {
+      const diaries = await supabase.from('diary_entries').select('*').in('id', diaryIds).is('deleted_at', null);
+      if (diaries.error) throw diaries.error;
+      (diaries.data || []).forEach(row => { diaryMap[row.id] = row; });
+    }
+    res.json({ deliveries: (data || []).map(row => ({
+      id: row.id, diaryId: row.diary_id, targetProjectId: row.target_project_id, targetChatId: row.target_chat_id,
+      deliveryType: row.delivery_type, status: row.status, createdAt: row.created_at, consumedAt: row.consumed_at,
+      diary: diaryMap[row.diary_id] ? {
+        id: diaryMap[row.diary_id].id, projectId: diaryMap[row.diary_id].project_id, chatId: diaryMap[row.diary_id].chat_id,
+        date: diaryMap[row.diary_id].date, time: diaryMap[row.diary_id].time, title: diaryMap[row.diary_id].title,
+        content: diaryMap[row.diary_id].content, mood: diaryMap[row.diary_id].mood, author: diaryMap[row.diary_id].author,
+        visibilityMode: diaryMap[row.diary_id].visibility_mode, visibleChatIds: diaryMap[row.diary_id].visible_chat_ids || [],
+        replies: diaryMap[row.diary_id].replies || [], createdAt: diaryMap[row.diary_id].created_at
+      } : null
+    })) });
+  } catch (e) {
+    console.error('[api] diary delivery list error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/diary-deliveries/:id/consume', async (req, res) => {
+  if (!supabase) return res.status(503).json({ error: 'Supabase not connected' });
+  try {
+    const { data, error } = await supabase.from('diary_deliveries').update({ status: 'consumed', consumed_at: new Date().toISOString() }).eq('id', req.params.id).eq('status', 'pending').select('*').maybeSingle();
+    if (error) throw error;
+    res.json({ ok: true, consumed: !!data, delivery: data || null });
+  } catch (e) {
+    console.error('[api] diary delivery consume error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
