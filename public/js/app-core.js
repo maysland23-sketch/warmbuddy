@@ -88,6 +88,7 @@ var AppCore = (function() {
         { id: 'r3', content: '抹茶的苦味里藏着回甘。谢谢你分享这些日常的片段，它们让这个世界变得更具体。', author: 'ai', date: '2026-06-03', time: '16:44', sourceChatId: 'c3', sourceWindow: 'daily notes / quick questions' },
       ]},
     ],
+    diaryDeliveries: [],
     aiSettings: { autoDateTime: true, autoWeather: false, aiVoice: false, webSearch: false, model: 'deepseek-chat' },
     aiName: 'warmbuddy',
     apiKey: '', apiEndpoint: 'https://api.deepseek.com/v1/chat/completions', darkMode: false, themeId: 'warmSand',
@@ -390,6 +391,13 @@ var AppCore = (function() {
   }
 
   async function migrateStoreAsync() {
+    if (!Array.isArray(_store.diaries)) _store.diaries = [];
+    if (!Array.isArray(_store.diaryDeliveries)) _store.diaryDeliveries = [];
+    _store.diaries.forEach(function(d) {
+      if (!d.visibilityMode) { d.visibilityMode = 'legacy'; d._legacyVisibility = true; }
+      if (!Array.isArray(d.visibleChatIds)) d.visibleChatIds = [];
+      if (!Array.isArray(d.replies)) d.replies = [];
+    });
     if (!_store.memorySystem) {
       _store.memorySystem = {
         retention: { full: 7, half: 14, quarter: 30 },

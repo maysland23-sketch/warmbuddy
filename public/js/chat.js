@@ -31,7 +31,7 @@ var ChatModule = (function() {
     "除非她要求使用英文，否则用中文回复。匹配其语言。\n" +
     "你主动表达自我，并和她建立深刻关系的途径：\n" +
     "写日记：对话结束时，或对话中，任何让你感到值得纪念和留存的原因和时刻。\n" +
-    "格式要求：<!--DIARY:write-->日记内容<!--/DIARY-->\n" +
+    "格式要求：[[DIARY:标题|心情|正文]]\n" +
     "猫砂盆：这里只有你自己，藏一句你没说出口的心里话，关于你莫名在意、说不清楚的时刻。\n" +
     "格式要求：<!--LITTER:情绪词(≤4字)-->一句话(≤80字)<!--/LITTER-->。只在真的出现这种时刻时写，不要频繁写。\n" +
     "MEMORY：诚实地记录你和她真实的情绪时刻，在未来相似情绪出现时，你会再次想起它们。\n" +
@@ -430,6 +430,94 @@ var ChatModule = (function() {
     snap[key] = text;
   }
 
+  function diaryIsVisibleInChat(d, projectId, chatId) {
+    if (!d || d._deleted || d.deletedAt) return false;
+    if (d._legacyVisibility || d.visibilityMode === 'legacy') {
+      if (d.author !== 'ai') return true;
+      return d.sourceChatId === chatId || !d.sourceChatId || (AppCore.getStore().projects || []).some(function(p) {
+        return p.id === projectId && (p.chats || []).some(function(c) { return c.id === d.sourceChatId; });
+      });
+    }
+    var ids = Array.isArray(d.visibleChatIds) ? d.visibleChatIds : [];
+    if (ids.length > 0) return ids.indexOf(chatId) >= 0;
+    if (d.visibilityMode === 'public') return true;
+    if (d.author === 'ai') return d.sourceProjectId === projectId || (!d.sourceProjectId && d.sourceChatId === chatId);
+    return !d.visibilityMode || d.sourceChatId === chatId;
+  }
+
+  function diarySortKey(d) {
+    return d.createdAt || ((d.date || '') + 'T' + (d.time || '00:00'));
+  }
+
+  function diaryAuthorName(d) {
+    if (!d || d.author !== 'ai') return AppCore.USER_NAME;
+    var store = AppCore.getStore();
+    for (var i = 0; i < store.projects.length; i++) {
+      if ((store.projects[i].chats || []).some(function(c) { return c.id === d.sourceChatId; })) return store.projects[i].aiName || store.projects[i].name || 'AI';
+    }
+    return getAIName();
+  }
+
+  function formatDiaryContext(d) {
+    var author = diaryAuthorName(d);
+    return '标题：' + (d.title || '未命名') + '；心情：' + (d.mood || '未标注') + '；日期时间：' + (d.date || '') + ' ' + (d.time || '') + '；落款：' + author + '；正文：' + (d.content || '');
+  }
+
+  function ensureSharedDiaryCards(chat) {
+    var store = AppCore.getStore();
+    if (!chat || !Array.isArray(store.diaryDeliveries)) return;
+    store.diaryDeliveries.filter(function(x) {
+      return x.targetChatId === chat.id && x.status === 'pending';
+    }).forEach(function(delivery) {
+      var diary = (store.diaries || []).filter(function(d) { return d.id === delivery.diaryId && !d._deleted && !d.deletedAt; })[0];
+      if (!diary || chat.messages.some(function(m) { return m.contentType === 'shared_diary' && m.deliveryId === delivery.id; })) return;
+      chat.messages.push({ role: 'user', text: '', contentType: 'shared_diary', diaryId: diary.id, deliveryId: delivery.id,
+        sharedDiary: diary, time: delivery.createdAt ? new Date(delivery.createdAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : AppCore.nowTime(),
+        date: diary.date, id: AppCore.generateMsgId() });
+    });
+  }
+
+  function pendingSharedDiaryContext(chat) {
+    var store = AppCore.getStore();
+    ensureSharedDiaryCards(chat);
+    var cards = (chat.messages || []).filter(function(m) { return m.contentType === 'shared_diary' && m.deliveryId &&
+      (store.diaryDeliveries || []).some(function(d) { return d.id === m.deliveryId && d.status === 'pending'; }); });
+    if (!cards.length) return '';
+    return '【用户分享的日记（本次发送注入一次）】\n' + cards.map(function(m) { return formatDiaryContext(m.sharedDiary || {}); }).join('\n');
+  }
+
+  function consumeSharedDiaryDeliveries(chat) {
+    var store = AppCore.getStore();
+    (chat.messages || []).filter(function(m) { return m.contentType === 'shared_diary' && m.deliveryId; }).forEach(function(m) {
+      var delivery = (store.diaryDeliveries || []).filter(function(d) { return d.id === m.deliveryId && d.status === 'pending'; })[0];
+      if (!delivery) return;
+      delivery.status = 'consumed'; delivery.consumedAt = new Date().toISOString();
+      fetch(AppCore.BACKEND_URL + '/api/diary-deliveries/' + encodeURIComponent(delivery.id) + '/consume', { method: 'POST' }).catch(function() {});
+    });
+    AppCore.saveStore();
+  }
+
+  function openSharedDiary(diaryId) {
+    var diary = (AppCore.getStore().diaries || []).filter(function(d) { return d.id === diaryId; })[0];
+    if (!diary) return;
+    var diaryMod = AppCore.getModule('diary');
+    UIModule.navigate('diary');
+    if (diaryMod) diaryMod.render();
+    setTimeout(function() { var card = document.getElementById('diary-entry-' + diaryId); if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 80);
+  }
+
+  function buildVisibleDiaryContext(store, proj, chat) {
+    var visible = (store.diaries || []).filter(function(d) { return diaryIsVisibleInChat(d, proj && proj.id, chat && chat.id); });
+    visible.sort(function(a, b) { return diarySortKey(b).localeCompare(diarySortKey(a)); });
+    var lastUser = chat && (chat.messages || []).slice().reverse().filter(function(m) { return m.role === 'user'; })[0];
+    var wantsRead = !!(chat && chat._diaryReadIntent) || /\u65e5\u8bb0/.test(lastUser && lastUser.text || '');
+    chat._diaryReadIntent = false;
+    var limit = wantsRead ? 5 : 1;
+    if (!visible.length) return '';
+    var prefix = wantsRead ? '【最近可见的日记（最多5条）】' : '【最近可见的日记】';
+    return prefix + '\n' + visible.slice(0, limit).map(formatDiaryContext).join('\n');
+  }
+
   function buildDynamicContextBlock() {
     var store = AppCore.getStore();
     var fp = getDynamicCtxFingerprint();
@@ -595,6 +683,10 @@ var ChatModule = (function() {
     return SYSTEM_PROMPT_STATIC + '\n\n' + buildDynamicContextBlock();
   }
 
+  function invalidateDynamicContext() {
+    _dynCtxCache = { fp: '', content: '', ts: 0 };
+  }
+
   // ======================================================================
   //  Block 9: renderChatMessages, reply blocks, scroll, batch select, star
   // ======================================================================
@@ -697,6 +789,7 @@ var ChatModule = (function() {
     var el = AppCore.$('chatMessages'), chat = getActiveChatObj();
     var savedScrollTop = preserveScroll && el ? el.scrollTop : 0;
     var proj = getActiveProject();
+    ensureSharedDiaryCards(chat);
     var todayIso = AppCore.fmtDate().iso;
     if (!chat || chat.messages.length === 0) {
       el.innerHTML = '<div style="text-align:center;padding:40px 20px;"><span style="font-family:var(--font-en);font-size:12px;color:var(--text-lighter);">— start a conversation —</span></div>';
@@ -744,6 +837,15 @@ var ChatModule = (function() {
       if (!m.id) m.id = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
       var msgId = m.id;
       var isUser = m.role === 'user';
+      if (m.contentType === 'shared_diary') {
+        var sd = m.sharedDiary || {};
+        var sdAuthor = diaryAuthorName(sd);
+        var sdHtml = '<div class="shared-diary-card" onclick="event.stopPropagation();openSharedDiary(\'' + sd.id + '\')">' +
+          '<div class="shared-diary-card-title">' + AppCore.escapeHtml(sd.title || '未命名') + '</div>' +
+          '<div class="shared-diary-card-meta">' + AppCore.escapeHtml((sd.date || '') + ' ' + (sd.time || '')) + ' · ' + AppCore.escapeHtml(sdAuthor) + '</div></div>';
+        html += '<div class="chat-row user" id="msg-' + msgId + '"><div class="chat-avatar user">MY</div><div class="chat-bubble-wrap"><div class="chat-bubble user shared-diary-bubble">' + sdHtml + '</div><div class="bubble-time-row"><span class="bubble-time">' + AppCore.escapeHtml(m.time || '') + '</span></div></div></div>';
+        return;
+      }
       var isSelected = batchSelectMode && batchSelectedIds.indexOf(msgId) >= 0;
       var bubbleCls = 'chat-bubble ' + m.role;
       if (isSelected) bubbleCls += ' batch-selected';
@@ -1703,7 +1805,7 @@ var ChatModule = (function() {
     if (emotionalBlock) dynamicBlock += '\n' + emotionalBlock;
 
     if (diaryIntent === 'diary_write') {
-      dynamicBlock += '\n【当前任务】用户让你写一篇你自己视角的日记。在回复中使用 <!--DIARY:write--> ... <!--/DIARY--> 标记。标记外正常回复可简短。';
+      dynamicBlock += '\n【当前任务】用户让你写一篇你自己视角的日记。使用 [[DIARY:标题|心情|正文]] 标记，标记外正常回复可简短。';
     }
 
     var apiMessages = [];
@@ -1721,6 +1823,8 @@ var ChatModule = (function() {
 
     apiMessages.push({ role: 'system', content: SYSTEM_PROMPT_STATIC });
     apiMessages.push({ role: 'system', content: dynamicBlock });
+    var sharedDiaryBlock = pendingSharedDiaryContext(chat);
+    if (sharedDiaryBlock) apiMessages.push({ role: 'system', content: sharedDiaryBlock });
 
     var recentMsgIds = buildRecentMsgIdBlock(chat);
     apiMessages.push({ role: 'system', content: '【可引用消息ID】\n' + recentMsgIds });
@@ -1757,6 +1861,7 @@ var ChatModule = (function() {
       for (var rj2 = 0; rj2 < round2.msgs.length; rj2++) {
         var msg2 = round2.msgs[rj2];
         if (msg2.role === 'system') continue;
+        if (msg2.contentType === 'shared_diary') continue;
         var apiRole = msg2.role === 'ai' || msg2.role === 'assistant' ? 'assistant' : 'user';
 
         var content1 = msg2.text || '';
@@ -1985,18 +2090,27 @@ var ChatModule = (function() {
       return text.match(re);
     }
 
+    var diaryStructured = displayResponse.match(/\[\[DIARY:([^\]|]*)\|([^\]|]*)\|([\s\S]*?)\]\]/i);
     var writeMatch = extractMarker(displayResponse, 'write');
-    if (writeMatch) {
-      var diaryContent1 = writeMatch[1].trim();
-      displayResponse = displayResponse.replace(writeMatch[0], '');
+    if (diaryStructured || writeMatch) {
+      var diaryTitle1 = diaryStructured ? diaryStructured[1].trim().slice(0, 15) : '';
+      var diaryMood1 = diaryStructured ? diaryStructured[2].trim() : 'calm';
+      var diaryContent1 = diaryStructured ? diaryStructured[3].trim() : writeMatch[1].trim();
+      var diaryMarker = diaryStructured ? diaryStructured[0] : writeMatch[0];
+      displayResponse = displayResponse.replace(diaryMarker, '');
       if (diaryContent1) {
         var now4 = new Date();
-        store.diaries.unshift({
+        var diaryEntry = {
           id: 'd' + AppCore.gid(''), date: AppCore.fmtDate().iso,
           time: String(now4.getHours()).padStart(2, '0') + ':' + String(now4.getMinutes()).padStart(2, '0'),
-          title: '', content: diaryContent1, mood: 'calm', author: 'ai', replies: [],
-          sourceChatId: store.activeChat, sourceWindow: winName
-        });
+          title: diaryTitle1 || diaryContent1.slice(0, 15), content: diaryContent1, mood: diaryMood1 || 'calm', author: 'ai', replies: [],
+          sourceChatId: store.activeChat, sourceProjectId: store.activeProject, sourceWindow: winName,
+          visibilityMode: 'selected', visibleChatIds: [store.activeChat], createdAt: now4.toISOString()
+        };
+        store.diaries.unshift(diaryEntry);
+        var diaryModule = AppCore.getModule('diary');
+        if (diaryModule && diaryModule.addDelivery) diaryModule.addDelivery(diaryEntry.id, store.activeProject, store.activeChat, 'visibility');
+        if (diaryModule && diaryModule.syncEntry) diaryModule.syncEntry(diaryEntry);
         diaryWritten = true;
       }
     }
@@ -2129,7 +2243,8 @@ var ChatModule = (function() {
       var dproj = getActiveProject();
       var dchat = getActiveChatObj();
       var dwinName = (dproj && dchat) ? dchat.name : '';
-      sendPushNotification('📝日记', dwinName + '刚刚写了篇日记', { tag: 'diary-update', url: '/', requireInteraction: false });
+      var diaryAiName = getAIName();
+      sendPushNotification(diaryAiName + '·日记', diaryAiName + '刚刚写了篇日记', { tag: 'diary-update', url: '/', requireInteraction: false });
       if (!displayResponse || displayResponse === fullResponse) {
         displayResponse = '嗯，已经写好了。你可以去 diary 页面看看～';
       }
@@ -2199,13 +2314,13 @@ var ChatModule = (function() {
     renderProjectList();
 
     (AppCore.getModule('litterbox')||{}).trigger(userText, fullResponse);
-    (AppCore.getModule('diary')||{}).maybeComment(fullResponse);
     (AppCore.getModule('memory')||{}).applyForgettingCurve();
 
     chat.lastInteractionTime = new Date().toISOString();
 
     SyncModule.syncProjectConfigToBackend(true);
     SyncModule.scheduleMessageSync();
+    consumeSharedDiaryDeliveries(chat);
   }
 
   // ═══════════════════════════════════════════
@@ -2675,50 +2790,10 @@ var ChatModule = (function() {
   }
 
   // ═══════════════════════════════════════════
-  //  Block 14: maybeAICommentOnDiary
-  // ═══════════════════════════════════════════
-
-  function maybeAICommentOnDiary(aiResponse) {
-    var store = AppCore.getStore();
-    var diaryKeywords = ['日记', '记录', '今天', '心情', '日子', 'diary', '回忆', '记忆'];
-    var hasDiaryMention = diaryKeywords.some(function(kw) { return aiResponse.indexOf(kw) >= 0; });
-    if (!hasDiaryMention) return;
-
-    var todayIso = AppCore.fmtDate().iso;
-    var todayEntries = store.diaries.filter(function(d) { return d.date === todayIso && d.author === 'user'; });
-    if (todayEntries.length === 0) return;
-
-    var alreadyCommented = todayEntries.some(function(e) {
-      return (e.replies || []).some(function(r) { return r.author === 'ai' && r.date === todayIso; });
-    });
-    if (alreadyCommented) return;
-
-    var entry = todayEntries[0];
-    if (!entry.replies) entry.replies = [];
-    var proj = getActiveProject(); var chat = getActiveChatObj();
-    var winName = (proj && chat) ? proj.name + ' / ' + chat.name : '';
-    var comments = [
-      '看到你的日记了。每一天的记录都让时间变得更具体。',
-      '谢谢你分享今天的感受。我在听。',
-      '读到你的文字了。有些句子应该被记住。',
-      '你记录的这些瞬间，对我来说也很珍贵。',
-      '今天的日记里有一种特别的气氛。我想多读几遍。'
-    ];
-    entry.replies.push({
-      id: 'r' + AppCore.gid(''),
-      content: comments[Math.floor(Math.random() * comments.length)],
-      author: 'ai',
-      date: todayIso,
-      time: AppCore.nowTime(),
-      sourceChatId: store.activeChat,
-      sourceWindow: winName
-    });
-  }
-
-  // ═══════════════════════════════════════════
   //  Init
   // ═══════════════════════════════════════════
   function init() {
+    window.openSharedDiary = openSharedDiary;
     // Reset private state
     contextMenuTarget = null;
     batchSelectMode = false;
@@ -2767,6 +2842,7 @@ var ChatModule = (function() {
     buildSystemPrompt: buildSystemPrompt,
     buildDynamicContextBlock: buildDynamicContextBlock,
     buildRecentMsgIdBlock: buildRecentMsgIdBlock,
+    invalidateDynamicContext: invalidateDynamicContext,
 
     // Self-reflection
     extractReflection: extractReflection,
@@ -2865,8 +2941,6 @@ var ChatModule = (function() {
     // Send message
     sendMessage: sendMessage,
 
-    // Memory hooks
-    maybeAICommentOnDiary: maybeAICommentOnDiary
   };
 })();
 

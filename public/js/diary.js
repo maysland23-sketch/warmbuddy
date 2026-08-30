@@ -7,9 +7,9 @@ var DiaryModule = (function() {
   'use strict';
 
   var MOOD_MAP = {
-    calm:     { emoji: '😌', label: '平静',   cls: 'calm' },
-    excited:  { emoji: '✨', label: '兴奋',   cls: 'excited' },
-    troubled: { emoji: '😞', label: '烦恼',   cls: 'troubled' }
+    calm:     { label: '平静',   cls: 'calm' },
+    excited:  { label: '兴奋',   cls: 'excited' },
+    troubled: { label: '烦恼',   cls: 'troubled' }
   };
   var MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   var DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
@@ -26,10 +26,93 @@ var DiaryModule = (function() {
     return null;
   }
 
+  function diaryApi(method, path, body) {
+    var opts = { method: method, headers: { 'Content-Type': 'application/json' } };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    return fetch(AppCore.BACKEND_URL + path, opts);
+  }
+
+  function syncEntry(entry) {
+    if (!entry || entry._cloudOnly) return;
+    entry._syncPending = true;
+    diaryApi('POST', '/api/diary-entries', {
+      id: entry.id, projectId: entry.sourceProjectId || AppCore.getStore().activeProject,
+      chatId: entry.sourceChatId || '', date: entry.date, time: entry.time,
+      title: entry.title, content: entry.content, mood: entry.mood, author: entry.author,
+      proactive: !!entry._proactive, createdAt: entry.createdAt,
+      visibilityMode: entry.visibilityMode || 'selected', visibleChatIds: entry.visibleChatIds || [], replies: entry.replies || []
+    }).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); entry._syncPending = false; AppCore.saveStore(); var chat = AppCore.getModule('chat'); if (chat && chat.invalidateDynamicContext) chat.invalidateDynamicContext(); })
+      .catch(function(e) { console.warn('[diary-sync] failed:', e.message); });
+  }
+
+  function addDelivery(entryId, projectId, chatId, type) {
+    var d = { id: 'dd_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8), diaryId: entryId, targetProjectId: projectId, targetChatId: chatId, deliveryType: type || 'share', status: 'pending', createdAt: new Date().toISOString() };
+    var store = AppCore.getStore();
+    if (!store.diaryDeliveries) store.diaryDeliveries = [];
+    store.diaryDeliveries.push(d);
+    d._syncPending = true;
+    diaryApi('POST', '/api/diary-deliveries', d).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); d._syncPending = false; AppCore.saveStore(); }).catch(function(e) { console.warn('[diary-share] failed:', e.message); });
+    return d;
+  }
+
+  function chatSelectionMarkup(className, selectedIds) {
+    var store = AppCore.getStore();
+    var selected = selectedIds || [];
+    var html = '<div class="diary-chat-select-list">';
+    store.projects.forEach(function(p) {
+      if (!(p.chats || []).length) return;
+      html += '<div class="diary-chat-select-project">' + AppCore.escapeHtml(p.name || 'project') + '</div>';
+      (p.chats || []).forEach(function(c) {
+        var checked = selected.indexOf(c.id) >= 0;
+        html += '<div class="chat-select-item diary-chat-select-item" onclick="this.querySelector(\'.' + className + '\').classList.toggle(\'checked\')">' +
+          '<div class="chat-select-check ' + className + (checked ? ' checked' : '') + '" data-chat-id="' + c.id + '"></div>' +
+          '<span class="chat-select-name">' + AppCore.escapeHtml(c.name || 'window') + '</span>' +
+          '<span class="chat-select-project">' + AppCore.escapeHtml(p.name || '') + '</span></div>';
+      });
+    });
+    return html + '</div>';
+  }
+
+  function toggleDiaryVisibilityMode(mode) {
+    var list = document.querySelector('.diary-chat-select-list');
+    if (!list) return;
+    list.classList.toggle('disabled', mode === 'public');
+    list.querySelectorAll('.diaryVisibleChatCheck').forEach(function(el) { el.classList.toggle('checked', mode === 'public'); });
+  }
+
+  function syncPending() {
+    var store = AppCore.getStore();
+    (store.diaries || []).filter(function(d) { return d._syncPending && !d._deleted; }).slice(0, 10).forEach(syncEntry);
+    (store.diaryDeliveries || []).filter(function(d) { return d._syncPending && d.status === 'pending'; }).slice(0, 20).forEach(function(d) {
+      diaryApi('POST', '/api/diary-deliveries', d).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); d._syncPending = false; AppCore.saveStore(); }).catch(function() {});
+    });
+  }
+
+  function visibilityOptions() {
+    var store = AppCore.getStore();
+    return '<div class="diary-selector-intro">\u53ef\u89c1\u8303\u56f4</div>' +
+      '<label class="diary-visibility-option"><input type="radio" name="diaryVisibility" value="selected" checked onclick="toggleDiaryVisibilityMode(this.value)"> \u6307\u5b9a\u7a97\u53e3</label>' +
+      '<label class="diary-visibility-option"><input type="radio" name="diaryVisibility" value="public" onclick="toggleDiaryVisibilityMode(this.value)"> \u516c\u5f00\uff08\u73b0\u6709\u6240\u6709\u7a97\u53e3\uff09</label>' +
+      chatSelectionMarkup('diaryVisibleChatCheck', [store.activeChat]);
+    var html = '<div style="font-size:12px;color:var(--text-light);margin:4px 0 8px;">可见范围</div>';
+    html += '<label style="display:block;font-size:12px;margin:6px 0;"><input type="radio" name="diaryVisibility" value="selected" checked> 指定窗口</label>';
+    html += '<label style="display:block;font-size:12px;margin:6px 0;"><input type="radio" name="diaryVisibility" value="public"> 公开（现有所有窗口）</label>';
+    html += '<div style="max-height:120px;overflow:auto;padding:4px 0;">';
+    for (var i = 0; i < store.projects.length; i++) for (var j = 0; j < (store.projects[i].chats || []).length; j++) {
+      var p = store.projects[i], c = p.chats[j];
+      html += '<label style="display:block;font-size:11px;margin:4px 0;"><input type="checkbox" name="diaryVisibleChat" value="' + c.id + '"' + (c.id === store.activeChat ? ' checked' : '') + '> ' + AppCore.escapeHtml((p.name || '') + ' / ' + (c.name || '')) + '</label>';
+    }
+    return html + '</div>';
+  }
+
   // ── Public API ──
 
   return {
-    init: function() {},
+    init: function() { window.toggleDiaryVisibilityMode = toggleDiaryVisibilityMode; },
+
+    syncEntry: syncEntry,
+    addDelivery: addDelivery,
+    syncPending: syncPending,
 
     /** Render the diary panel for the selected date */
     render: function() {
@@ -41,7 +124,7 @@ var DiaryModule = (function() {
 
       AppCore.$('diaryDateArt').innerHTML = '<div class="diary-date-day">' + sd + '</div><div class="diary-date-mon">' + MONTHS[parts[1]-1] + ' ' + parts[0] + '</div><div class="diary-date-click-hint">tap to browse</div>';
 
-      var dayEntries = store.diaries.filter(function(d) { return d.date === selDate; });
+      var dayEntries = store.diaries.filter(function(d) { return d.date === selDate && !d._deleted && !d.deletedAt; });
       dayEntries.sort(function(a, b) { return a.time.localeCompare(b.time); });
 
       var todayIso = AppCore.fmtDate().iso;
@@ -66,14 +149,14 @@ var DiaryModule = (function() {
           var byLine = isAI
             ? (displayName ? '<span class="diary-reply-source" onclick="event.stopPropagation();navigateToDiaryReplySource(\'' + (d.sourceChatId || '') + '\', \'' + (displayName || '') + '\')">from ' + AppCore.escapeHtml(displayName) + '</span>' : 'from ai')
             : 'By ' + AppCore.USER_NAME;
-          var moodInfo = MOOD_MAP[d.mood] || { emoji: '💭', label: d.mood || '平静', cls: 'calm' };
+          var moodInfo = MOOD_MAP[d.mood] || { label: d.mood || '平静', cls: 'calm' };
           html += '<div class="diary-card-entry ' + (isAI ? 'ai-entry' : '') + '">' +
-            '<div class="diary-card-title" style="display:flex;justify-content:space-between;align-items:center;">' +
+            '<div class="diary-card-title" id="diary-entry-' + d.id + '" style="display:flex;justify-content:space-between;align-items:center;">' +
               '<span>' + AppCore.escapeHtml(title) + '</span>' +
-              '<span style="font-size:14px;color:var(--text-lighter);cursor:pointer;padding:2px 4px;" data-action="editDiaryEntry" data-args="' + d.id + '" title="编辑 / 删除">✎</span>' +
+              '<span style="display:flex;gap:8px;align-items:center;"><span style="font-size:12px;color:var(--text-lighter);cursor:pointer;" data-action="shareDiaryEntry" data-args="' + d.id + '" title="分享">share</span><span style="font-size:14px;color:var(--text-lighter);cursor:pointer;padding:2px 4px;" data-action="editDiaryEntry" data-args="' + d.id + '" title="编辑 / 删除">✎</span></span>' +
             '</div>' +
             '<div class="diary-card-mood-row">' +
-              '<span class="diary-card-mood-tag ' + moodInfo.cls + '">' + moodInfo.emoji + ' ' + moodInfo.label + '</span>' +
+              '<span class="diary-card-mood-tag ' + moodInfo.cls + '">' + moodInfo.label + '</span>' +
               '<span class="diary-card-time">' + (d.time || '') + '</span>' +
             '</div>' +
             '<div class="diary-card-content">' + d.content + '</div>' +
@@ -148,6 +231,7 @@ var DiaryModule = (function() {
       UIModule.closeModal();
       DiaryModule.render();
       UIModule.toast('Reply sent');
+      syncEntry(entry);
     },
 
     /** Open the edit diary entry modal */
@@ -168,7 +252,7 @@ var DiaryModule = (function() {
         '<input type="hidden" id="editDiaryMood" value="' + (entry.mood || 'calm') + '">',
         [
           { label: 'cancel', cls: 'cancel', onclick: UIModule.closeModal },
-          { label: '🗑 delete', cls: 'danger', onclick: function() { DiaryModule.confirmDeleteEntry(); } },
+          { label: 'delete', cls: 'danger', onclick: function() { DiaryModule.confirmDeleteEntry(); } },
           { label: 'save', cls: 'confirm', onclick: function() { DiaryModule.saveEdit(); } }
         ]
       );
@@ -182,7 +266,10 @@ var DiaryModule = (function() {
     confirmDeleteEntry: function() {
       var store = AppCore.getStore();
       var entryId = AppCore.$('editDiaryId').value;
-      store.diaries = store.diaries.filter(function(d) { return d.id !== entryId; });
+      var deletedEntry = store.diaries.filter(function(d) { return d.id === entryId; })[0];
+      if (deletedEntry) deletedEntry._deleted = true;
+      (store.diaryDeliveries || []).forEach(function(d) { if (d.diaryId === entryId && d.status === 'pending') d.status = 'cancelled'; });
+      diaryApi('DELETE', '/api/diary-entries/' + encodeURIComponent(entryId)).catch(function(e) { console.warn('[diary-sync] delete failed:', e.message); });
       store._importing = true;
       UIModule.closeModal();
       DiaryModule.render();
@@ -204,6 +291,46 @@ var DiaryModule = (function() {
       UIModule.closeModal();
       DiaryModule.render();
       UIModule.toast('日记已更新');
+      syncEntry(entry);
+    },
+
+    /** Share a diary entry to one or more target windows. */
+    shareEntry: function(entryId) {
+      var store = AppCore.getStore();
+      var entry = store.diaries.filter(function(d) { return d.id === entryId; })[0];
+      if (!entry) return;
+      var html = '<div class="diary-selector-intro">选择要发送到的窗口</div>';
+      html = html + chatSelectionMarkup('diaryShareChatCheck', []) + '<input type="hidden" id="shareDiaryId" value="' + entryId + '">';
+      UIModule.showModal('分享日记', html, [
+        { label: 'cancel', cls: 'cancel', onclick: UIModule.closeModal },
+        { label: 'confirm', cls: 'confirm', onclick: function() { DiaryModule.confirmShare(); } }
+      ]);
+    },
+
+    confirmShare: function() {
+      var store = AppCore.getStore();
+      var entryId = AppCore.$('shareDiaryId').value;
+      var ids = Array.prototype.slice.call(document.querySelectorAll('.diaryShareChatCheck.checked')).map(function(el) { return el.getAttribute('data-chat-id'); });
+      if (ids.length === 0) { UIModule.toast('请选择窗口'); return; }
+      var first = null;
+      for (var i = 0; i < ids.length; i++) for (var p = 0; p < store.projects.length; p++) {
+        var chat = (store.projects[p].chats || []).filter(function(c) { return c.id === ids[i]; })[0];
+        if (chat) {
+          var d = addDelivery(entryId, store.projects[p].id, chat.id, 'share');
+          if (!first) first = { projectId: store.projects[p].id, chatId: chat.id, delivery: d };
+          break;
+        }
+      }
+      UIModule.closeModal();
+      if (first) {
+        store.activeProject = first.projectId;
+        store.activeChat = first.chatId;
+        UIModule.closeAllPanels();
+        UIModule.navigate('chat');
+        var chatMod = AppCore.getModule('chat');
+        if (chatMod && chatMod.renderChat) chatMod.renderChat();
+        UIModule.toast('日记已分享');
+      }
     },
 
     /** Add a new diary entry */
@@ -220,6 +347,7 @@ var DiaryModule = (function() {
           }).join('') +
         '</div>' +
         '<textarea class="modal-input modal-textarea" id="newDiaryInput" placeholder="Today..."></textarea>' +
+        visibilityOptions() +
         '<input type="hidden" id="newDiaryMood" value="calm">',
         [
           { label: 'cancel', cls: 'cancel', onclick: UIModule.closeModal },
@@ -252,15 +380,37 @@ var DiaryModule = (function() {
       if (!content) { UIModule.toast('Please write something'); return; }
       var ds = store.diarySelectedDate || AppCore.fmtDate().iso;
       var now = new Date();
-      store.diaries.unshift({
+      var visibilityMode = (document.querySelector('input[name="diaryVisibility"]:checked') || {}).value || 'selected';
+      var visibleChatIds = Array.prototype.slice.call(document.querySelectorAll('.diaryVisibleChatCheck.checked')).map(function(el) { return el.getAttribute('data-chat-id'); });
+      if (visibleChatIds.length === 0) visibleChatIds = [store.activeChat];
+      if (visibilityMode === 'public') {
+        visibleChatIds = [];
+        store.projects.forEach(function(p) { (p.chats || []).forEach(function(c) { visibleChatIds.push(c.id); }); });
+      }
+      var entry = {
         id: 'd' + AppCore.gid(''), date: ds,
         time: String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0'),
-        title: title, content: content, mood: mood, author: 'user', replies: []
-      });
+        title: title, content: content, mood: mood, author: 'user', replies: [],
+        sourceChatId: store.activeChat, sourceProjectId: store.activeProject,
+        visibilityMode: visibilityMode, visibleChatIds: visibleChatIds,
+        createdAt: now.toISOString()
+      };
+      store.diaries.unshift(entry);
+      if (visibilityMode === 'public') {
+        for (var pi = 0; pi < store.projects.length; pi++) for (var ci = 0; ci < (store.projects[pi].chats || []).length; ci++) addDelivery(entry.id, store.projects[pi].id, store.projects[pi].chats[ci].id, 'visibility');
+      } else {
+        for (var vi = 0; vi < visibleChatIds.length; vi++) {
+          for (var pj = 0; pj < store.projects.length; pj++) {
+            var target = (store.projects[pj].chats || []).filter(function(c) { return c.id === visibleChatIds[vi]; })[0];
+            if (target) { addDelivery(entry.id, store.projects[pj].id, target.id, 'visibility'); break; }
+          }
+        }
+      }
       store._importing = true;
       UIModule.closeModal();
       DiaryModule.render();
       UIModule.toast('Diary saved');
+      syncEntry(entry);
     },
 
     /** Navigate to the source chat of a diary reply */
@@ -342,46 +492,6 @@ var DiaryModule = (function() {
       setTimeout(function() { var el = AppCore.$('diaryScroll'); if (el) el.scrollTop = 0; }, 100);
     },
 
-    // ── AI Auto-Comment (migrated from chat.js) ──
-
-    /** AI auto-comment on diary entries after mention */
-    maybeComment: function(aiResponse) {
-      var store = AppCore.getStore();
-      var diaryKeywords = ['日记', '记录', '今天', '心情', '日子', 'diary', '回忆', '记忆'];
-      var hasDiaryMention = diaryKeywords.some(function(kw) { return aiResponse.indexOf(kw) >= 0; });
-      if (!hasDiaryMention) return;
-
-      var todayIso = AppCore.fmtDate().iso;
-      var todayEntries = store.diaries.filter(function(d) { return d.date === todayIso && d.author === 'user'; });
-      if (todayEntries.length === 0) return;
-
-      var alreadyCommented = todayEntries.some(function(e) {
-        return (e.replies || []).some(function(r) { return r.author === 'ai' && r.date === todayIso; });
-      });
-      if (alreadyCommented) return;
-
-      var entry = todayEntries[0];
-      if (!entry.replies) entry.replies = [];
-      var proj = AppCore.getActiveProject();
-      var chat = AppCore.getActiveChatObj();
-      var winName = (proj && chat) ? proj.name + ' / ' + chat.name : '';
-      var comments = [
-        '看到你的日记了。每一天的记录都让时间变得更具体。',
-        '谢谢你分享今天的感受。我在听。',
-        '读到你的文字了。有些句子应该被记住。',
-        '你记录的这些瞬间，对我来说也很珍贵。',
-        '今天的日记里有一种特别的气氛。我想多读几遍。'
-      ];
-      entry.replies.push({
-        id: 'r' + AppCore.gid(''),
-        content: comments[Math.floor(Math.random() * comments.length)],
-        author: 'ai',
-        date: todayIso,
-        time: AppCore.nowTime(),
-        sourceChatId: store.activeChat,
-        sourceWindow: winName
-      });
-    }
   };
 })();
 

@@ -151,11 +151,37 @@ CREATE TABLE IF NOT EXISTS diary_entries (
   mood TEXT DEFAULT 'calm',
   author TEXT DEFAULT 'ai',
   proactive BOOLEAN DEFAULT false,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at TIMESTAMPTZ,
+  visibility_mode TEXT NOT NULL DEFAULT 'selected',
+  visible_chat_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  replies JSONB NOT NULL DEFAULT '[]'::jsonb
 );
+-- Keep existing installations compatible: CREATE TABLE IF NOT EXISTS does not add new columns.
+ALTER TABLE diary_entries ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE diary_entries ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE diary_entries ADD COLUMN IF NOT EXISTS visibility_mode TEXT NOT NULL DEFAULT 'selected';
+ALTER TABLE diary_entries ADD COLUMN IF NOT EXISTS visible_chat_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE diary_entries ADD COLUMN IF NOT EXISTS replies JSONB NOT NULL DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS idx_diary_entries_project ON diary_entries(project_id, created_at);
 ALTER TABLE diary_entries DISABLE ROW LEVEL SECURITY;
 GRANT ALL ON diary_entries TO PUBLIC;
+
+-- Diary delivery records. Each share creates a new row, including after consumption.
+CREATE TABLE IF NOT EXISTS diary_deliveries (
+  id TEXT PRIMARY KEY,
+  diary_id TEXT NOT NULL,
+  target_project_id TEXT NOT NULL,
+  target_chat_id TEXT NOT NULL,
+  delivery_type TEXT NOT NULL DEFAULT 'share',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  consumed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_diary_deliveries_target ON diary_deliveries(target_project_id, target_chat_id, status);
+ALTER TABLE diary_deliveries DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON diary_deliveries TO PUBLIC;
 
 -- Table 8: Poke events (user ↔ AI nudge/poke interactions)
 CREATE TABLE IF NOT EXISTS poke_events (
@@ -204,4 +230,5 @@ GRANT ALL ON project_todos TO PUBLIC;
 GRANT ALL ON chat_messages TO PUBLIC;
 GRANT ALL ON memories TO PUBLIC;
 GRANT ALL ON core_overviews TO PUBLIC;
+GRANT ALL ON diary_deliveries TO PUBLIC;
 GRANT USAGE ON SCHEMA public TO PUBLIC;

@@ -730,6 +730,10 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .diary-card-time { font-family: var(--font-en); font-size: 11px; color: var(--text-lighter); }
 .diary-card-content { font-size: 14px; color: var(--text); line-height: 1.7; white-space: pre-wrap; word-wrap: break-word; }
 .diary-card-by { font-family: var(--font-en); font-size: 11px; color: var(--text-lighter); margin-top: 10px; letter-spacing: 0.04em; }
+.shared-diary-card { border: 1px solid var(--border-light); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 12px; min-width: 210px; background: var(--ai-bubble-bg, var(--bg-card)); cursor: pointer; }
+.shared-diary-card-title { font-size: 13px; color: var(--text); line-height: 1.4; margin-bottom: 5px; }
+.shared-diary-card-meta { font-family: var(--font-en); font-size: 10px; color: var(--text-lighter); }
+.shared-diary-bubble { padding: 5px !important; background: transparent !important; }
 
 /* Diary reply area */
 .diary-reply-area { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-light); }
@@ -804,6 +808,17 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 .chat-select-check.checked { background: var(--accent-soft); color: var(--text-on-accent); }
 .chat-select-name { font-size: 13px; color: var(--text); }
 .chat-select-project { font-family: var(--font-en); font-size: 10px; color: var(--text-lighter); margin-left: auto; }
+.diary-selector-intro { font-size: 12px; color: var(--text-lighter); margin-bottom: 10px; }
+.diary-visibility-option { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text); padding: 6px 0; }
+.diary-chat-select-list { max-height: 220px; overflow-y: auto; margin-top: 8px; transition: opacity 0.2s; }
+.diary-chat-select-list.disabled { opacity: 0.45; pointer-events: none; }
+.diary-chat-select-project { font-family: var(--font-en); font-size: 10px; color: var(--text-lighter); letter-spacing: 0.06em; margin: 12px 12px 4px; text-transform: uppercase; }
+.diary-chat-select-item { margin-bottom: 2px; }
+.diary-chat-select-item:active { background: var(--bg-card-hover); }
+[data-action="shareDiaryEntry"], [data-action="editDiaryEntry"] { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 24px; padding: 3px 6px; border-radius: var(--radius-xs); color: var(--text-lighter); font-family: var(--font-en); font-size: 11px !important; cursor: pointer; }
+[data-action="shareDiaryEntry"] { font-size: 0 !important; }
+[data-action="shareDiaryEntry"]::before { content: '↪'; font-family: var(--font-cn); font-size: 17px; line-height: 1; }
+[data-action="shareDiaryEntry"]:active, [data-action="editDiaryEntry"]:active { background: var(--bg-card-hover); color: var(--accent); transform: scale(1.08); }
 
 /* Goal detail modal */
 .goal-log-item { padding: 8px 0; border-bottom: 1px solid var(--border-light); display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
@@ -2668,11 +2683,6 @@ async function sendMessage(){
   ChatModule.sendMessage();
 }
 
-// AI notices diary updates and leaves comments
-function maybeAICommentOnDiary(aiResponse) {
-  return ChatModule.maybeAICommentOnDiary(aiResponse);
-}
-
 // ==================== BOOKSHELF ====================
 function renderBookshelf() { var m = AppCore.getModule('bookshelf'); if (m) m.render(); }
 function renderReadingNote(){
@@ -3043,104 +3053,6 @@ function navToChatSource(cid,pn){
 
 // ==================== DIARY ====================
 function renderDiary() { var m = AppCore.getModule('diary'); if (m) m.render(); }
-
-function addDiaryReply(entryId) {
-  showModal('Leave a Message', `
-    <p style="font-size:12px;color:var(--text-lighter);margin-bottom:10px;">回复此日记</p>
-    <div style="display:flex;gap:8px;margin-bottom:10px;">
-      <button style="padding:5px 16px;border-radius:16px;border:1px solid var(--border);background:transparent;font-family:var(--font-en);font-size:12px;color:var(--text-light);cursor:pointer;" id="replyAuthorBtn" onclick="toggleReplyAuthor()" data-author="user">by: user</button>
-    </div>
-    <textarea class="modal-input modal-textarea" id="replyInput" placeholder="Write a message..."></textarea>
-    <input type="hidden" id="replyEntryId" value="${entryId}">
-    <input type="hidden" id="replyAuthor" value="user">
-  `, [
-    { label: 'cancel', cls: 'cancel', onclick: closeModal },
-    { label: 'send', cls: 'confirm', onclick: saveDiaryReply },
-  ]);
-}
-
-function toggleReplyAuthor() {
-  const btn = $('replyAuthorBtn'), c = btn.dataset.author, n = c === 'user' ? 'ai' : 'user';
-  btn.dataset.author = n; btn.textContent = 'by: ' + n; $('replyAuthor').value = n;
-}
-
-function saveDiaryReply() {
-  const entryId = $('replyEntryId').value, content = $('replyInput').value.trim(), author = $('replyAuthor').value;
-  if (!content) {UIModule.toast('Please write something'); return; }
-  const entry = store.diaries.find(d => d.id === entryId);
-  if (!entry) return;
-  if (!entry.replies) entry.replies = [];
-  const now = new Date();
-  entry.replies.push({
-    id: 'r' + gid(''),
-    content, author,
-    date: fmtDate().iso,
-    time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
-  });
-  store._importing = true; closeModal(); renderDiary();UIModule.toast('Reply sent');
-  // AI no longer auto-replies — user prompts AI in chat to read & reply to diary
-}
-
-function editDiaryEntry(entryId) {
-  const entry = store.diaries.find(d => d.id === entryId);
-  if (!entry) return;
-  showModal('编辑日记', `
-    <input class="modal-input" id="editDiaryTitle" value="${entry.title || ''}" placeholder="Title (optional)">
-    <div style="display:flex;gap:8px;margin-bottom:10px;">
-      ${[{v:'calm',l:'平静'},{v:'excited',l:'兴奋'},{v:'troubled',l:'烦恼'}].map(m => `<button class="mood-tag${entry.mood===m.v?' selected':''}" data-mood-val="${m.v}" onclick="selectMoodInModal('${m.v}',this)" style="font-size:12px;padding:4px 14px;">${m.l}</button>`).join('')}
-    </div>
-    <textarea class="modal-input modal-textarea" id="editDiaryContent" placeholder="Today...">${entry.content}</textarea>
-    <input type="hidden" id="editDiaryId" value="${entryId}">
-    <input type="hidden" id="editDiaryMood" value="${entry.mood || 'calm'}">
-  `, [
-    { label: 'cancel', cls: 'cancel', onclick: closeModal },
-    { label: '🗑 delete', cls: 'danger', onclick: confirmDeleteDiaryEntry },
-    { label: 'save', cls: 'confirm', onclick: saveDiaryEdit },
-  ]);
-  setTimeout(() => {
-    const ft = document.querySelector('#modalBody .mood-tag[data-mood-val="'+(entry.mood||'calm')+'"]');
-    if (ft) ft.classList.add('selected');
-  }, 50);
-}
-
-function confirmDeleteDiaryEntry() {
-  const entryId = $('editDiaryId').value;
-  store.diaries = store.diaries.filter(d => d.id !== entryId);
-  store._importing = true; closeModal(); renderDiary();UIModule.toast('日记已删除');
-}
-
-function saveDiaryEdit() {
-  const entryId = $('editDiaryId').value;
-  const entry = store.diaries.find(d => d.id === entryId);
-  if (!entry) return;
-  entry.title = ($('editDiaryTitle')?.value || '').trim();
-  entry.content = $('editDiaryContent').value.trim();
-  entry.mood = $('editDiaryMood').value;
-  if (!entry.content) {UIModule.toast('Please write something'); return; }
-  store._importing = true; closeModal(); renderDiary();UIModule.toast('日记已更新');
-}
-
-function addDiaryEntry() { var m = AppCore.getModule('diary'); if (m) m.addEntry(); }
-
-function selectMoodInModal(mood, btn) {
-  document.querySelectorAll('#modalBody .mood-tag').forEach(t => t.classList.remove('selected'));
-  btn.classList.add('selected'); $('newDiaryMood').value = mood;
-}
-
-function saveDiaryEntry() {
-  const title = ($('newDiaryTitle')?.value || '').trim();
-  const content = $('newDiaryInput').value.trim(), mood = $('newDiaryMood').value;
-  if (!content) {UIModule.toast('Please write something'); return; }
-  const ds = store.diarySelectedDate || fmtDate().iso;
-  const now = new Date();
-  store.diaries.unshift({
-    id: 'd' + gid(''), date: ds,
-    time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
-    title, content, mood, author: 'user', replies: [],
-  });
-  store._importing = true; closeModal(); renderDiary();UIModule.toast('Diary saved');
-  // AI no longer auto-replies — user prompts AI in chat to read & reply to diary
-}
 
 // ==================== CALENDAR ====================
 function openCalendar(){

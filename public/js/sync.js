@@ -293,6 +293,8 @@ var SyncModule = (function() {
   //  Cloud polling
   // ═══════════════════════════════════════════
   function pollCloudData(projectId) {
+    var diaryModule = AppCore.getModule('diary');
+    if (diaryModule && diaryModule.syncPending) diaryModule.syncPending();
     if (!projectId) return;
     var store = AppCore.getStore();
     // Litter thoughts
@@ -327,13 +329,40 @@ var SyncModule = (function() {
               store.diaries.unshift({
                 id: e.id, date: e.date, time: e.time, title: e.title,
                 content: e.content, mood: e.mood, author: e.author,
-                replies: [], _proactive: e.proactive
+                replies: e.replies || [], sourceChatId: e.chatId || '', sourceProjectId: e.projectId || projectId,
+                visibilityMode: e.visibilityMode || 'selected', visibleChatIds: e.visibleChatIds || [],
+                _proactive: e.proactive, createdAt: e.createdAt
               });
               merged2 = true;
             }
           }
           if (merged2) { store.diaries.sort(function(a, b) { return (b.date || '').localeCompare(a.date || ''); }); AppCore.saveStore(); }
         }
+      }).catch(function() {});
+    pullDiaryDeliveries(projectId, store.activeChat);
+  }
+
+  function pullDiaryDeliveries(projectId, chatId) {
+    if (!projectId || !chatId) return Promise.resolve();
+    var store = AppCore.getStore();
+    if (!Array.isArray(store.diaryDeliveries)) store.diaryDeliveries = [];
+    return fetch(AppCore.BACKEND_URL + '/api/diary-deliveries?targetProjectId=' + encodeURIComponent(projectId) + '&targetChatId=' + encodeURIComponent(chatId))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        (data.deliveries || []).forEach(function(raw) {
+          var d = { id: raw.id, diaryId: raw.diaryId || raw.diary_id, targetProjectId: raw.targetProjectId || raw.target_project_id, targetChatId: raw.targetChatId || raw.target_chat_id,
+            deliveryType: raw.deliveryType || raw.delivery_type, status: raw.status, createdAt: raw.createdAt || raw.created_at, consumedAt: raw.consumedAt || raw.consumed_at };
+          if (raw.diary && !store.diaries.some(function(x) { return x.id === raw.diary.id; })) {
+            store.diaries.unshift({ id: raw.diary.id, date: raw.diary.date, time: raw.diary.time, title: raw.diary.title,
+              content: raw.diary.content, mood: raw.diary.mood, author: raw.diary.author, sourceChatId: raw.diary.chatId || '', sourceProjectId: raw.diary.projectId || '',
+              visibilityMode: raw.diary.visibilityMode || 'selected', visibleChatIds: raw.diary.visibleChatIds || [], replies: raw.diary.replies || [], createdAt: raw.diary.createdAt });
+          }
+          var old = store.diaryDeliveries.filter(function(x) { return x.id === d.id; })[0];
+          if (old) { old.status = d.status; old.consumedAt = d.consumedAt; }
+          else store.diaryDeliveries.push({ id: d.id, diaryId: d.diaryId, targetProjectId: d.targetProjectId, targetChatId: d.targetChatId,
+            deliveryType: d.deliveryType, status: d.status, createdAt: d.createdAt, consumedAt: d.consumedAt });
+        });
+        AppCore.saveStore();
       }).catch(function() {});
   }
 
@@ -431,12 +460,6 @@ var SyncModule = (function() {
           }
         } else if (evt.type === 'diary') {
           chat.messages.push({ role: 'system', contentType: 'diary_notification', text: '📝 在日记里写了点什么', time: timeLabel });
-          if (evt.content) {
-            var diaryText = evt.content.replace(/^DIARY:\s*/i, '').trim();
-            if (diaryText) {
-              store.diaries.unshift({ id: 'd' + AppCore.gid(''), date: evt.timestamp.slice(0, 10), time: evtTime, title: '', content: diaryText, mood: 'calm', author: 'ai', replies: [], _proactive: true });
-            }
-          }
         } else if (evt.type === 'todo_wake') {
           var wakeText = evt.content || '';
           if (wakeText) {
@@ -514,6 +537,7 @@ var SyncModule = (function() {
     pullAllProjectEnabledStates: pullAllProjectEnabledStates,
     reconcileFromBackend: reconcileFromBackend,
     pollCloudData: pollCloudData,
+    pullDiaryDeliveries: pullDiaryDeliveries,
     syncDesireStateToBackend: syncDesireStateToBackend,
     pollSystemEvents: pollSystemEvents
   };

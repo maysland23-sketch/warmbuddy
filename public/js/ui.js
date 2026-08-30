@@ -304,6 +304,10 @@ var UIModule = (function() {
           var diaryMod3 = AppCore.getModule('diary');
           if (diaryMod3 && diaryMod3.editEntry) diaryMod3.editEntry(args);
           break;
+        case 'shareDiaryEntry':
+          var diaryModShare = AppCore.getModule('diary');
+          if (diaryModShare && diaryModShare.shareEntry) diaryModShare.shareEntry(args);
+          break;
         case 'toggleReplyAuthor':
           var diaryMod4 = AppCore.getModule('diary');
           if (diaryMod4 && diaryMod4.toggleReplyAuthor) diaryMod4.toggleReplyAuthor();
