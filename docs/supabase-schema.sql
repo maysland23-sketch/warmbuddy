@@ -139,6 +139,11 @@ CREATE TABLE IF NOT EXISTS system_events (
   drive_key TEXT,
   content TEXT DEFAULT '',
   push_sent BOOLEAN DEFAULT false,
+  ntfy_sent BOOLEAN DEFAULT false,
+  ntfy_attempts INTEGER NOT NULL DEFAULT 0,
+  ntfy_last_error TEXT,
+  ntfy_sent_at TIMESTAMPTZ,
+  ntfy_message_id TEXT,
   todo_id TEXT,
   todo_title TEXT,
   post_decay_value INTEGER,
@@ -148,6 +153,13 @@ CREATE TABLE IF NOT EXISTS system_events (
 CREATE INDEX IF NOT EXISTS idx_system_events_project ON system_events(project_id, created_at);
 ALTER TABLE system_events DISABLE ROW LEVEL SECURITY;
 GRANT ALL ON system_events TO PUBLIC;
+
+-- ntfy delivery state for existing installations
+ALTER TABLE system_events ADD COLUMN IF NOT EXISTS ntfy_sent BOOLEAN DEFAULT false;
+ALTER TABLE system_events ADD COLUMN IF NOT EXISTS ntfy_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE system_events ADD COLUMN IF NOT EXISTS ntfy_last_error TEXT;
+ALTER TABLE system_events ADD COLUMN IF NOT EXISTS ntfy_sent_at TIMESTAMPTZ;
+ALTER TABLE system_events ADD COLUMN IF NOT EXISTS ntfy_message_id TEXT;
 
 -- Table 6: Litter box thoughts (AI's unfiltered inner monologue)
 CREATE TABLE IF NOT EXISTS litter_thoughts (

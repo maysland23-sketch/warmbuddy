@@ -2386,7 +2386,7 @@ var ChatModule = (function() {
       var dchat = getActiveChatObj();
       var dwinName = (dproj && dchat) ? dchat.name : '';
       var diaryAiName = getAIName();
-      sendPushNotification(diaryAiName + '·日记', diaryAiName + '刚刚写了篇日记', { tag: 'diary-update', url: '/', requireInteraction: false });
+      sendPushNotification(diaryAiName + ' · 日记', diaryAiName + '刚刚写了篇日记', { tag: 'diary-update', url: '/', requireInteraction: false });
       if (!displayResponse || displayResponse === fullResponse) {
         displayResponse = '嗯，已经写好了。你可以去 diary 页面看看～';
       }

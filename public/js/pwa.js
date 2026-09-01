@@ -31,14 +31,17 @@ var PwaModule = (function() {
 
   async function sendSubscriptionToServer(subscription) {
     try {
-      await fetch(AppCore.BACKEND_URL + '/api/push/subscribe', {
+      var response = await fetch(AppCore.BACKEND_URL + '/api/push/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ subscription: subscription.toJSON() })
       });
+      if (!response.ok) throw new Error('server returned ' + response.status);
       console.log('[PWA] Subscription sent to server');
+      return true;
     } catch (e) {
       console.log('[PWA] Subscription send error:', e.message);
+      return false;
     }
   }
 
@@ -62,8 +65,7 @@ var PwaModule = (function() {
 
       var existingSubscription = await registration.pushManager.getSubscription();
       if (existingSubscription) {
-        await sendSubscriptionToServer(existingSubscription);
-        pushSubscribed = true;
+        pushSubscribed = await sendSubscriptionToServer(existingSubscription);
       } else {
         console.log('[PWA] Not subscribed yet, will request on interaction');
       }
@@ -95,7 +97,8 @@ var PwaModule = (function() {
         applicationServerKey: urlBase64ToUint8Array(AppCore.VAPID_PUBLIC_KEY)
       });
 
-      await sendSubscriptionToServer(subscription);
+      var sent = await sendSubscriptionToServer(subscription);
+      if (!sent) return false;
       pushSubscribed = true;
       UIModule.toast('🔔 通知已开启');
       return true;

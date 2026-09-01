@@ -184,7 +184,8 @@ var LitterBoxModule = (function() {
 
       // Push notification (will use pwa module when available)
       if (typeof sendPushNotification === 'function') {
-        sendPushNotification('🐾 猫砂盆', '猫砂盆好像需要铲一铲', { tag: 'litter-box', url: '/', requireInteraction: false });
+        var aiName = (proj && proj.aiName) ? proj.aiName : 'warmbuddy';
+        sendPushNotification(aiName + ' · 🐾 猫砂盆', '猫砂盆好像需要铲一铲', { tag: 'litter-box', url: '/', requireInteraction: false });
       }
       syncToDiaryLitterboxLayer('litterbox', result.content);
     },
