@@ -1699,17 +1699,138 @@ var ChatModule = (function() {
     createUserStarredMemory([msg.id]);
   }
 
+  var BUBBLE_LIST_ITEM_RE = /^\s*(?:(?:\d+|[一二三四五六七八九十百]+)[.)、](?=\s|[^\d]|$)|[①-⑳](?=\s|[^\d]|$)|[-*•](?=\s|$))/;
+  var BUBBLE_CLOSING_CHARS = '”’"\'」』）》）】〕〉》］]}';
+  var BUBBLE_ABBREVIATIONS = {
+    'mr': true, 'mrs': true, 'ms': true, 'dr': true, 'prof': true,
+    'sr': true, 'jr': true, 'etc': true, 'vs': true, 'e.g': true, 'i.e': true
+  };
+  var BUBBLE_FALLBACK_RE = /^[\s\S]+$/;
+
+  function isBubbleWhitespace(ch) {
+    return !!ch && /\s/.test(ch);
+  }
+
+  function isBubbleSentencePunctuation(ch) {
+    return ch === '。' || ch === '！' || ch === '？' || ch === '!' || ch === '?';
+  }
+
+  function isBubbleClosingChar(ch) {
+    return BUBBLE_CLOSING_CHARS.indexOf(ch) >= 0;
+  }
+
+  function getBubbleLineStart(text, index) {
+    var lineStart = index;
+    while (lineStart > 0 && text.charAt(lineStart - 1) !== '\n') lineStart--;
+    return lineStart;
+  }
+
+  function isBubbleListItemStart(text, index) {
+    return BUBBLE_LIST_ITEM_RE.test(text.slice(getBubbleLineStart(text, index)));
+  }
+
+  function isBubbleListMarkerDot(text, index) {
+    if (text.charAt(index) !== '.') return false;
+    if (index + 1 < text.length && /\d/.test(text.charAt(index + 1))) return false;
+    var lineStart = getBubbleLineStart(text, index);
+    return /^\s*\d+\.$/.test(text.slice(lineStart, index + 1));
+  }
+
+  function isBubbleUrlPunctuation(text, index) {
+    var ch = text.charAt(index);
+    if (ch !== '.' && ch !== '!' && ch !== '?') return false;
+    var prefix = text.slice(0, index);
+    var urlMatch = prefix.match(/(?:https?:\/\/|www\.)\S*$/i);
+    if (!urlMatch) return false;
+    var next = text.charAt(index + 1);
+    return !!next && !isBubbleWhitespace(next) && /[A-Za-z0-9/#?&=._~%+\-]/.test(next);
+  }
+
+  function isBubbleDomainOrEmailDot(text, index) {
+    if (text.charAt(index) !== '.') return false;
+    var allowed = /[A-Za-z0-9@._%+\-]/;
+    var start = index;
+    var end = index + 1;
+    while (start > 0 && allowed.test(text.charAt(start - 1))) start--;
+    while (end < text.length && allowed.test(text.charAt(end))) end++;
+    var token = text.slice(start, end);
+    return token.indexOf('@') >= 0 || /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(token);
+  }
+
+  function isBubbleAbbreviationPeriod(text, index) {
+    if (text.charAt(index) !== '.') return false;
+    var next = index + 1;
+    while (next < text.length && isBubbleWhitespace(text.charAt(next))) next++;
+    if (next >= text.length || !/[A-Za-z]/.test(text.charAt(next))) return false;
+    var prefix = text.slice(0, index + 1);
+    var match = prefix.match(/(?:^|[^A-Za-z0-9_])([A-Za-z](?:\.[A-Za-z])?|[A-Za-z]{2,})\.$/);
+    return !!(match && BUBBLE_ABBREVIATIONS[match[1].toLowerCase()]);
+  }
+
+  function isBubblePeriodBoundary(text, index) {
+    if (isBubbleListMarkerDot(text, index)) return false;
+    if (isBubbleUrlPunctuation(text, index)) return false;
+    if (isBubbleDomainOrEmailDot(text, index)) return false;
+    if (isBubbleAbbreviationPeriod(text, index)) return false;
+    if (/\d/.test(text.charAt(index - 1)) && /\d/.test(text.charAt(index + 1))) return false;
+    return true;
+  }
+
   function splitSentences(text) {
     if (!text || !text.trim()) return [];
-    var re = /[^。！？\.!\?\n]+[。！？\.!\?\n]+|[^。！？\.!\?\n]+$/g;
+
+    var source = text.trim();
     var sentences = [];
-    var match;
-    while ((match = re.exec(text)) !== null) {
-      var s = match[0].trim();
-      if (s) sentences.push(s);
+    var start = 0;
+
+    function pushPart(end) {
+      var part = source.slice(start, end).trim();
+      if (part) sentences.push(part);
     }
-    if (sentences.length === 0 && text.trim()) {
-      sentences.push(text.trim());
+
+    for (var i = 0; i < source.length;) {
+      var ch = source.charAt(i);
+
+      // A plain newline is soft whitespace. It only creates a boundary when
+      // the following line starts a new list item.
+      if (ch === '\n') {
+        var next = i + 1;
+        while (next < source.length && /[ \t\r]/.test(source.charAt(next))) next++;
+        if (next < source.length && isBubbleListItemStart(source, next) && source.slice(start, i).trim()) {
+          pushPart(i);
+          start = next;
+          i = next;
+          continue;
+        }
+        i++;
+        continue;
+      }
+
+      var isBoundary = (isBubbleSentencePunctuation(ch) && !isBubbleUrlPunctuation(source, i)) ||
+        (ch === '.' && isBubblePeriodBoundary(source, i));
+      if (!isBoundary) {
+        i++;
+        continue;
+      }
+
+      var boundaryEnd = i + 1;
+      while (boundaryEnd < source.length && isBubbleSentencePunctuation(source.charAt(boundaryEnd))) boundaryEnd++;
+      while (boundaryEnd < source.length && isBubbleClosingChar(source.charAt(boundaryEnd))) boundaryEnd++;
+
+      if (source.slice(start, boundaryEnd).trim()) {
+        pushPart(boundaryEnd);
+        start = boundaryEnd;
+      }
+      i = boundaryEnd;
+    }
+
+    pushPart(source.length);
+
+    // Conservative fallback: keep the entire payload rather than applying a
+    // broad period/newline regex that can manufacture orphan bubbles.
+    if (sentences.length === 0) {
+      var fallbackMatch = source.match(BUBBLE_FALLBACK_RE);
+      if (fallbackMatch) sentences.push(fallbackMatch[0].trim());
     }
     return sentences;
   }
