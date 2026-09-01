@@ -766,14 +766,18 @@
       var userPrompt = '【最近的对话】\n' + recentDialogue + '\n' + usmContext + aemContext + '【要概括的星标对话】\n' + starText;
 
       try {
+        var interactionId = 'int_' + AppCore.gid('');
         var resp = await fetch(AppCore.BACKEND_URL + '/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
+          body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject, windowId: store.activeChat, interactionId: interactionId,
+            tokenContext: { actionType: 'usm', interactionId: interactionId },
             messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] })
         });
         if (!resp.ok) throw new Error('API ' + resp.status);
         var data = await resp.json();
-        if (data.usage) {
+        if (data.usageEvents && data.usageEvents.length) {
+          data.usageEvents.forEach(function(event) { AppCore.recordTokenEvent(event); });
+        } else if (data.usage) {
           AppCore.logTokenCall(store.activeChat, 'usm',
             data.usage.input_tokens || data.usage.prompt_tokens || 0,
             data.usage.output_tokens || data.usage.completion_tokens || 0,
@@ -863,21 +867,15 @@
       var userPrompt = '【最近的对话】\n' + recentDialogue + '\n' + usmCtx + aemCtx + ltmCtx;
 
       try {
+        var interactionId = 'int_' + AppCore.gid('');
         var resp = await fetch(AppCore.BACKEND_URL + '/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
+          body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject, windowId: store.activeChat, interactionId: interactionId,
+            tokenContext: { actionType: 'ltm', interactionId: interactionId, skipPersistence: true },
             messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] })
         });
         if (!resp.ok) return;
         var data = await resp.json();
-        if (data.usage) {
-          AppCore.logTokenCall(store.activeChat, 'ltm',
-            data.usage.input_tokens || data.usage.prompt_tokens || 0,
-            data.usage.output_tokens || data.usage.completion_tokens || 0,
-            data.usage.cache_read_input_tokens || 0,
-            data.usage.cache_creation_input_tokens || 0,
-            cfg.model);
-        }
         var content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
         if (!content) return;
         var memMatch = content.match(/记忆[：:]\s*(.+)/);
@@ -1214,12 +1212,15 @@
         }
       }
       var systemPrompt = '用中文概括以下对话（主题+关键点+情绪基调）。2-3句话，不超过80字。只返回概括内容。';
+      var interactionId = 'int_' + AppCore.gid('');
       try {
         var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: AppCore.getStore().activeProject,
+            windowId: chat.id, interactionId: interactionId,
+            tokenContext: { actionType: 'round_compress', interactionId: interactionId },
             messages: [
               { role: 'system', content: systemPrompt },
               { role: 'user', content: dialogue }
@@ -1228,6 +1229,9 @@
         });
         if (!response.ok) return;
         var data = await response.json();
+        if (data.usageEvents && data.usageEvents.length) {
+          data.usageEvents.forEach(function(event) { AppCore.recordTokenEvent(event); });
+        }
         var summary = (data.reply && data.reply.content) ? data.reply.content.trim().slice(0, 80) : '';
         if (!summary) return;
         chat._roundSummaries.push({

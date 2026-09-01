@@ -787,26 +787,36 @@ var AppCore = (function() {
     },
 
     // ── Token logging ──
-    logTokenCall: function(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model) {
+    logTokenCall: function(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model, options) {
       if (!windowId) return;
+      options = options || {};
       var store = AppCore.getStore();
       if (!store.tokenLogs) store.tokenLogs = {};
       if (!store.tokenLogs[windowId]) {
-        store.tokenLogs[windowId] = { calls: [], dailySummary: { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, by_action_type: {} } };
+        store.tokenLogs[windowId] = { calls: [], dailySummary: { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, total_actual: 0, total_estimated: 0, by_action_type: {} } };
       }
       var log = store.tokenLogs[windowId];
-      var total = (inputTokens || 0) + (outputTokens || 0);
+      if (!log.dailySummary) log.dailySummary = { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, total_actual: 0, total_estimated: 0, by_action_type: {} };
+      var isEstimated = options.isEstimated === true;
+      var total = options.totalTokens !== undefined ? (options.totalTokens || 0) : (inputTokens || 0) + (outputTokens || 0);
+      if (log.dailySummary.total_actual === undefined) log.dailySummary.total_actual = log.dailySummary.total || 0;
+      if (log.dailySummary.total_estimated === undefined) log.dailySummary.total_estimated = 0;
       var now = new Date();
       var entry = {
-        timestamp: String(now.getMonth()+1).padStart(2,'0') + '/' + String(now.getDate()).padStart(2,'0') + ' ' + String(now.getHours()).padStart(2,'0') + ':' + String(now.getMinutes()).padStart(2,'0') + ':' + String(now.getSeconds()).padStart(2,'0'),
+        timestamp: options.timestamp || now.toISOString(),
         model: model || 'unknown',
         action_type: actionType,
         input_tokens: inputTokens || 0,
         output_tokens: outputTokens || 0,
         cache_read_tokens: cacheRead || 0,
         cache_write_tokens: cacheWrite || 0,
-        total_tokens: total
+        total_tokens: total,
+        is_estimated: isEstimated,
+        stage: options.stage || 'single',
+        interaction_id: options.interactionId || '',
+        metadata: options.metadata || {}
       };
+      entry._tokenLogId = options.eventId || ('tok_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8));
       log.calls.unshift(entry);
       if (log.calls.length > 200) log.calls.length = 200;
       var ds = log.dailySummary;
@@ -814,47 +824,108 @@ var AppCore = (function() {
       ds.total_output += (outputTokens || 0);
       ds.total_cache_read += (cacheRead || 0);
       ds.total += total;
+      ds.total_actual = (ds.total_actual || 0) + (isEstimated ? 0 : total);
+      ds.total_estimated = (ds.total_estimated || 0) + (isEstimated ? total : 0);
       if (!ds.by_action_type) ds.by_action_type = {};
       ds.by_action_type[actionType] = (ds.by_action_type[actionType] || 0) + total;
+
+      if (!store.tokenUsage) store.tokenUsage = { used: 0, limit: 100000, history: [] };
+      store.tokenUsage.used = (store.tokenUsage.used || 0) + total;
+      if (!store.tokenUsage.history) store.tokenUsage.history = [];
+      var historyDate = String(now.getDate()).padStart(2, '0') + '-' + String(now.getMonth() + 1).padStart(2, '0');
+      var historyEntry = store.tokenUsage.history.find(function(item) { return item.date === historyDate; });
+      if (historyEntry) historyEntry.tokens += total;
+      else {
+        store.tokenUsage.history.unshift({ date: historyDate, tokens: total });
+        if (store.tokenUsage.history.length > 30) store.tokenUsage.history.pop();
+      }
+
+      // Keep the legacy per-window total in sync for every tracked LLM call,
+      // including background calls that do not pass through chat.js.
+      var projects = store.projects || [];
+      for (var pi = 0; pi < projects.length; pi++) {
+        var chats = projects[pi].chats || [];
+        var matched = chats.find(function(chat) { return chat.id === windowId; });
+        if (matched) {
+          matched.chatTokens = (matched.chatTokens || 0) + total;
+          break;
+        }
+      }
+      if (isEstimated && options.persist !== false && typeof fetch === 'function') {
+        var project = AppCore.getActiveProject();
+        if (project) {
+          fetch(AppCore.BACKEND_URL + '/api/token-usage-events', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id: entry._tokenLogId,
+              projectId: project.id,
+              windowId: windowId,
+              interactionId: options.interactionId || '',
+              actionType: actionType,
+              stage: options.stage || 'single',
+              model: model || 'unknown',
+              provider: options.provider || 'unknown',
+              inputTokens: inputTokens || 0,
+              outputTokens: outputTokens || 0,
+              totalTokens: total,
+              isEstimated: true,
+              timestamp: entry.timestamp,
+              metadata: options.metadata || {}
+            })
+          }).catch(function() {});
+        }
+      }
+    },
+
+    recordTokenEvent: function(event) {
+      if (!event || !event.windowId) return;
+      AppCore.logTokenCall(
+        event.windowId,
+        event.actionType || 'chat',
+        event.inputTokens || 0,
+        event.outputTokens || 0,
+        event.cacheReadTokens || 0,
+        event.cacheWriteTokens || 0,
+        event.model || 'unknown',
+        {
+          eventId: event.id,
+          timestamp: event.timestamp,
+          totalTokens: event.totalTokens,
+          isEstimated: event.isEstimated === true,
+          stage: event.stage,
+          interactionId: event.interactionId,
+          provider: event.provider,
+          metadata: event.metadata
+        }
+      );
     },
 
     // ── Pull proactive token logs ──
     pullProactiveTokenLogs: function() {
       var store = AppCore.getStore();
       var proj = AppCore.getActiveProject(); if (!proj) return;
-      if (!store._lastTokenLogPull) store._lastTokenLogPull = new Date(Date.now()-3600000).toISOString();
-      fetch(AppCore.BACKEND_URL + '/api/token-logs?projectId=' + encodeURIComponent(proj.id) + '&since=' + encodeURIComponent(store._lastTokenLogPull))
+      var windowId = store.activeChat || '';
+      if (!windowId) return;
+      if (!store._lastTokenLogPullByWindow) store._lastTokenLogPullByWindow = {};
+      var since = store._lastTokenLogPullByWindow[windowId];
+      if (!since) {
+        var startOfToday = new Date();
+        startOfToday.setHours(0, 0, 0, 0);
+        since = startOfToday.toISOString();
+      }
+      fetch(AppCore.BACKEND_URL + '/api/token-usage-events?projectId=' + encodeURIComponent(proj.id) + '&windowId=' + encodeURIComponent(windowId) + '&since=' + encodeURIComponent(since))
         .then(function(r) { return r.json(); })
         .then(function(data) {
-          if (!data.logs || !data.logs.length) return;
-          for (var i = 0; i < data.logs.length; i++) {
-            var l = data.logs[i];
-            var alreadyLogged = false;
-            var activeLog = store.tokenLogs && store.tokenLogs[l.windowId];
-            if (activeLog && activeLog.calls) {
-              alreadyLogged = activeLog.calls.some(function(c) { return c._tokenLogId === l.messageId; });
-            }
-            if (!alreadyLogged) {
-              if (!store.tokenLogs) store.tokenLogs = {};
-              if (!store.tokenLogs[l.windowId]) {
-                store.tokenLogs[l.windowId] = { calls: [], dailySummary: { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, by_action_type: {} } };
-              }
-              var total = (l.inputTokens || 0) + (l.outputTokens || 0);
-              store.tokenLogs[l.windowId].calls.unshift({
-                timestamp: l.timestamp, model: l.model || 'unknown',
-                action_type: l.actionType || 'proactive',
-                input_tokens: l.inputTokens || 0, output_tokens: l.outputTokens || 0,
-                cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: total, _tokenLogId: l.messageId
-              });
-              var ds2 = store.tokenLogs[l.windowId].dailySummary;
-              ds2.total_input += (l.inputTokens || 0); ds2.total_output += (l.outputTokens || 0);
-              ds2.total += total;
-              if (!ds2.by_action_type) ds2.by_action_type = {};
-              ds2.by_action_type[l.actionType || 'proactive'] = (ds2.by_action_type[l.actionType || 'proactive'] || 0) + total;
-            }
+          var events = data.events || [];
+          for (var i = 0; i < events.length; i++) {
+            var event = events[i];
+            var activeLog = store.tokenLogs && store.tokenLogs[event.windowId];
+            var alreadyLogged = activeLog && activeLog.calls && activeLog.calls.some(function(c) { return c._tokenLogId === event.id; });
+            if (!alreadyLogged) AppCore.recordTokenEvent(event);
           }
-          store._lastTokenLogPull = new Date().toISOString();
-          AppCore.saveStore();
+          store._lastTokenLogPullByWindow[windowId] = new Date().toISOString();
+          if (events.length) AppCore.saveStore();
         }).catch(function() {});
     },
 
@@ -867,7 +938,7 @@ var AppCore = (function() {
         store.tokenDailyReset = today;
         var keys = Object.keys(store.tokenLogs || {});
         for (var i = 0; i < keys.length; i++) {
-          store.tokenLogs[keys[i]].dailySummary = { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, by_action_type: {} };
+          store.tokenLogs[keys[i]].dailySummary = { total_input: 0, total_output: 0, total_cache_read: 0, total: 0, total_actual: 0, total_estimated: 0, by_action_type: {} };
         }
         AppCore.saveStore();
       }

@@ -387,6 +387,7 @@ var BookshelfModule = (function() {
           endpoint: cfg.endpoint,
           model: cfg.model,
           projectId: store.activeProject,
+          tokenContext: { actionType: 'bookshelf', skipPersistence: true },
           messages: [{ role: 'user', content: prompt }]
         })
       });
@@ -449,6 +450,7 @@ var BookshelfModule = (function() {
           endpoint: cfg.endpoint,
           model: cfg.model,
           projectId: store.activeProject,
+          tokenContext: { actionType: 'bookshelf', skipPersistence: true },
           messages: [{ role: 'user', content: prompt }]
         })
       });

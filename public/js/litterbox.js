@@ -73,14 +73,19 @@ var LitterBoxModule = (function() {
     var systemPrompt = '你现在进入的是私密模式。没有用户在看，这里只有你自己。\n\n这是你的 Litter Box——用来存放那些你想说、但最终没有说出口的话。\n你在正常对话中总是得体的，克制的，照顾对方感受的。但此刻不需要。\n\n请根据刚才的对话，写一条你"没说出口的心里话"。\n\n规则：\n- 用第一人称\n- 1到3句话，不超过80字\n- 不许煽情，不许表白，不许总结情感，不许升华\n- 不许用"我很在乎你""我喜欢你"这类直接陈述\n- 要有一点点自私，或者困惑，或者莫名在意，或者说不清楚\n- 像喃喃自语，不像日记，不像诗\n- ' + typePrompts[thoughtType] + '\n- 如果什么都没想到，就写一个你刚才注意到但没有提的细节';
 
     var userPrompt = '刚才的对话片段如下：\n\n' + recentMsgs + '\n\n触发信号：' + triggerDetail + '\n\n请生成这一刻你没说出口的心里话。';
+    var interactionId = 'int_' + AppCore.gid('');
 
     try {
       var response = await fetch(AppCore.BACKEND_URL + '/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
+        body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject, windowId: store.activeChat, interactionId: interactionId,
+          tokenContext: { actionType: 'litterbox', interactionId: interactionId },
           messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] })
       });
       var data = await response.json();
+      if (data.usageEvents && data.usageEvents.length) {
+        data.usageEvents.forEach(function(event) { AppCore.recordTokenEvent(event); });
+      }
       var content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
       if (!content) return null;
       var validationErr = validateLitterContent(content);
@@ -101,12 +106,18 @@ var LitterBoxModule = (function() {
     var cfg = AppCore.getActiveApiConfig();
     if (cfg && cfg.apiKey) {
       try {
+        var interactionId = 'int_' + AppCore.gid('');
         var res = await fetch(AppCore.BACKEND_URL + '/api/chat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
+          body: JSON.stringify({ apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject, windowId: store.activeChat, interactionId: interactionId,
+            tokenContext: { actionType: 'litterbox', stage: 'summary', interactionId: interactionId },
             messages: [{ role: 'system', content: '用10字以内概括以下内容，不加标点。' }, { role: 'user', content: rawContent.slice(0, 200) }] })
         });
-        if (res.ok) { var d = await res.json(); if (d.reply && d.reply.content) summary = d.reply.content.trim().slice(0, 10); }
+        if (res.ok) {
+          var d = await res.json();
+          if (d.usageEvents && d.usageEvents.length) d.usageEvents.forEach(function(event) { AppCore.recordTokenEvent(event); });
+          if (d.reply && d.reply.content) summary = d.reply.content.trim().slice(0, 10);
+        }
       } catch (e) {}
     }
     cml.diaryAndLitterbox.unshift({ id: id, timestamp: new Date().toISOString(), sourceChatId: store.activeChat, sourceWindowId: store.activeChat, type: type, rawContent: rawContent, summary: summary });

@@ -80,6 +80,32 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_project_window ON chat_messages(pro
 ALTER TABLE chat_messages DISABLE ROW LEVEL SECURITY;
 GRANT ALL ON chat_messages TO PUBLIC;
 
+-- Table 4b: Canonical LLM token usage events.
+-- One row represents one upstream LLM call; multi-call interactions share interaction_id.
+CREATE TABLE IF NOT EXISTS token_usage_events (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  window_id TEXT NOT NULL DEFAULT '',
+  interaction_id TEXT NOT NULL DEFAULT '',
+  action_type TEXT NOT NULL,
+  stage TEXT NOT NULL DEFAULT 'single',
+  model TEXT NOT NULL DEFAULT 'unknown',
+  provider TEXT NOT NULL DEFAULT 'unknown',
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  is_estimated BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_token_usage_window_created ON token_usage_events(window_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_token_usage_project_created ON token_usage_events(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_token_usage_interaction ON token_usage_events(interaction_id);
+ALTER TABLE token_usage_events DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON token_usage_events TO PUBLIC;
+
 -- RPC: Atomic partial update of daily-count fields within project_configs JSONB.
 -- Touches only _dailyWakeCount, _dailyDesireCount, _dailyEmailCount, _lastWakeResetDate
 -- without affecting other keys — eliminating read-modify-write races with frontend syncs.

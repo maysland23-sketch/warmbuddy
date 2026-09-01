@@ -8,6 +8,7 @@ const path = require('path');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { createClient } = require('@supabase/supabase-js');
 const { createProactiveChatMessage } = require('./proactive-message-utils');
+const { createTokenUsageEvent, estimateUsage } = require('./token-usage-utils');
 
 // Proxy for outbound API calls (set HTTPS_PROXY in .env, e.g. http://127.0.0.1:7897)
 const OUTBOUND_PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
@@ -479,9 +480,9 @@ function extractResponseContent(provider, data) {
     case 'deepseek':
     case 'openai':
     default: {
-      if (data.choices && data.choices[0]?.message?.content != null) {
+      if (data.choices && data.choices[0]?.message) {
         return {
-          content: data.choices[0].message.content,
+          content: data.choices[0].message.content || '',
           usage: data.usage || null
         };
       }
@@ -1694,6 +1695,88 @@ function injectToolsIntoBody(requestBody, llmTools, provider) {
   }
 }
 
+// ==================== TOKEN USAGE EVENTS ====================
+function tokenEventToClient(event) {
+  return {
+    id: event.id,
+    projectId: event.project_id,
+    windowId: event.window_id,
+    interactionId: event.interaction_id,
+    actionType: event.action_type,
+    stage: event.stage,
+    model: event.model,
+    provider: event.provider,
+    inputTokens: event.input_tokens,
+    outputTokens: event.output_tokens,
+    cacheReadTokens: event.cache_read_tokens,
+    cacheWriteTokens: event.cache_write_tokens,
+    totalTokens: event.total_tokens,
+    isEstimated: event.is_estimated,
+    timestamp: event.created_at,
+    metadata: event.metadata || {}
+  };
+}
+
+async function persistTokenUsageEvent(event) {
+  if (!supabase) return false;
+  try {
+    const { error } = await supabase.from('token_usage_events').upsert(event, { onConflict: 'id' });
+    if (error) throw error;
+    return true;
+  } catch (e) {
+    console.error('[token-event] Persist error:', e.message);
+    return false;
+  }
+}
+
+function makeTokenUsageEvent(options) {
+  return createTokenUsageEvent(options);
+}
+
+function estimateMessageTokens(messages) {
+  const text = (messages || []).map(function(message) {
+    return typeof message.content === 'string' ? message.content : JSON.stringify(message.content || '');
+  }).join('\n');
+  return Math.max(1, Math.ceil(text.length / 1.5));
+}
+
+function detectEmbeddedMarkerTypes(text) {
+  const source = String(text || '');
+  const markerTypes = [];
+  const patterns = {
+    diary: /\[\[DIARY:|<!--\s*DIARY/i,
+    reflection: /<!--\s*REFLECT/i,
+    memory_write: /<!--\s*MEMORY/i,
+    litterbox: /<!--\s*LITTER|\[\[LITTER:/i,
+    todo: /\[\[TODO:/i,
+    email: /\[\[EMAIL:/i,
+    poke: /\[\[POKE/i,
+    status: /\[\[STATUS:/i
+  };
+  Object.keys(patterns).forEach(function(type) {
+    if (patterns[type].test(source)) markerTypes.push(type);
+  });
+  return markerTypes;
+}
+
+function mergeUsageSnapshots(current, next) {
+  if (!current) return next || null;
+  if (!next) return current;
+  const merged = Object.assign({}, current);
+  Object.keys(next).forEach(function(key) {
+    if (next[key] === undefined || next[key] === null) return;
+    if (typeof next[key] === 'number' && typeof merged[key] === 'number') {
+      // Provider stream usage is normally cumulative. Taking the maximum keeps
+      // OpenAI's final total while retaining Anthropic's message_start input
+      // counts when message_delta only contains output counts.
+      merged[key] = Math.max(merged[key], next[key]);
+    } else {
+      merged[key] = next[key];
+    }
+  });
+  return merged;
+}
+
 // ==================== CHAT ENDPOINTS ====================
 app.post('/api/chat/stream', async (req, res) => {
   try {
@@ -1719,6 +1802,33 @@ app.post('/api/chat/stream', async (req, res) => {
     const windowId = body.windowId;
     const enabledToolIds = body.enabledToolIds || [];
     const enabledToolDefs = body.enabledToolDefs || null;
+    const tokenContext = body.tokenContext || {};
+    const interactionId = body.interactionId || tokenContext.interactionId || ('int_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+    const usageEvents = [];
+    let usageProvider = tokenContext.provider || 'unknown';
+    const captureUsage = async function(usage, actionType, stage, metadata, estimated) {
+      if (!usage && !estimated) return null;
+      const isEstimated = !usage;
+      const usageCounts = usage || estimated;
+      const event = makeTokenUsageEvent({
+        id: 'tok_' + interactionId + '_' + stage,
+        projectId: projectId,
+        windowId: windowId || '',
+        interactionId: interactionId,
+        actionType: actionType || tokenContext.actionType || 'chat',
+        stage: stage || 'single',
+        model: model || 'unknown',
+        provider: usageProvider,
+        usage: isEstimated ? null : usage,
+        inputTokens: usageCounts.inputTokens,
+        outputTokens: usageCounts.outputTokens,
+        isEstimated: isEstimated,
+        metadata: Object.assign({}, tokenContext.metadata || {}, metadata || {})
+      });
+      usageEvents.push(event);
+      if (!tokenContext.skipPersistence) await persistTokenUsageEvent(event);
+      return event;
+    };
     console.log('[mcp-debug] /api/chat/stream received — windowId:', windowId, 'enabledToolIds:', enabledToolIds, 'clientDefs count:', enabledToolDefs ? enabledToolDefs.length : 0);
     if (windowId && projectId) {
       const enabledDefs = await getEnabledToolDefsForWindow(projectId, windowId, enabledToolIds, enabledToolDefs);
@@ -1731,6 +1841,7 @@ app.post('/api/chat/stream', async (req, res) => {
           const provider = resolved.provider;
           const format = resolved.format;
           const fetchUrl = resolved.endpoint;
+          usageProvider = provider;
           const reqHeaders = getAuthHeaders(provider, resolved.endpoint, apiKey);
 
           // Load and list MCP tools
@@ -1775,9 +1886,12 @@ app.post('/api/chat/stream', async (req, res) => {
 
           const toolCalls = llmTools.length > 0 ? extractToolCalls(provider, data) : [];
           console.log('[mcp-debug] /stream LLM response — tool_calls count:', toolCalls.length, toolCalls.length > 0 ? 'names: ' + toolCalls.map(function(tc){return tc.name;}).join(', ') : '(no tool calls)');
-
           if (toolCalls.length > 0) {
             console.log('[chat/stream] LLM requested', toolCalls.length, 'tool call(s)');
+            const firstUsage = extractResponseContent(format, data).usage;
+            await captureUsage(firstUsage, 'mcp', 'initial', {
+              toolCount: toolCalls.length
+            }, estimateUsage(estimateMessageTokens(messages), 1));
 
             let assistantMsg;
             if (provider === 'anthropic') {
@@ -1814,6 +1928,11 @@ app.post('/api/chat/stream', async (req, res) => {
               res.end();
               return;
             }
+            await captureUsage(result2.usage, 'mcp', 'followup', {
+              toolCount: toolCalls.length,
+              toolNames: toolCalls.map(function(tc) { return tc.name; }),
+              markerTypes: detectEmbeddedMarkerTypes(result2.content)
+            }, estimateUsage(estimateMessageTokens(followUpMessages), Math.max(1, Math.ceil((result2.content || '').length / 1.5))));
 
             // Return final result as single SSE chunk + [DONE]
             res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -1822,6 +1941,9 @@ app.post('/api/chat/stream', async (req, res) => {
             const toolCallsMeta = toolCalls.map(function(tc, idx) {
               var tr = toolResults[idx];
               return { name: tc.name, args: tc.args, result: tr ? (tr.content || tr.error || '').slice(0, 2000) : '' };
+            });
+            usageEvents.forEach(function(event) {
+              res.write(`data: ${JSON.stringify({ usageEvent: tokenEventToClient(event) })}\n\n`);
             });
             res.write(`data: ${JSON.stringify({ text: finalText, _toolCalls: toolCallsMeta })}\n\n`);
             res.write(`data: [DONE]\n\n`);
@@ -1839,7 +1961,14 @@ app.post('/api/chat/stream', async (req, res) => {
           res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
           res.flushHeaders();
           const text = result.content || '';
+          await captureUsage(result.usage, tokenContext.actionType || 'chat', tokenContext.stage || 'single', {
+            toolCount: 0,
+            markerTypes: detectEmbeddedMarkerTypes(text)
+          }, estimateUsage(estimateMessageTokens(messages), Math.max(1, Math.ceil(text.length / 1.5))));
           res.write(`data: ${JSON.stringify({ text: text })}\n\n`);
+          usageEvents.forEach(function(event) {
+            res.write(`data: ${JSON.stringify({ usageEvent: tokenEventToClient(event) })}\n\n`);
+          });
           res.write(`data: [DONE]\n\n`);
           res.end();
           return;
@@ -1857,6 +1986,7 @@ app.post('/api/chat/stream', async (req, res) => {
     const resolved = resolveModel(model, endpoint);
     const format = resolved.format;
     const fetchUrl = resolved.endpoint;
+    usageProvider = resolved.provider;
 
     console.log(`[chat/stream] model=${model} format=${format} provider=${resolved.provider} endpoint=${fetchUrl}`);
 
@@ -1899,6 +2029,8 @@ app.post('/api/chat/stream', async (req, res) => {
     let chunkCount = 0;
     let totalLines = 0;
     let skippedLines = 0;
+    let streamUsage = null;
+    let streamText = '';
     const DEBUG_STREAM = process.env.DEBUG_STREAM === 'true';
 
     // Save raw stream for debugging
@@ -1923,7 +2055,8 @@ app.post('/api/chat/stream', async (req, res) => {
 
         if (trimmed === '[DONE]' || trimmed === 'data: [DONE]') {
           if (DEBUG_STREAM) console.log(`[chat/stream] [DONE] marker found`);
-          res.write(`data: [DONE]\n\n`);
+          // The client must receive our usageEvent before the final [DONE].
+          // Do not forward the upstream terminator here.
           continue;
         }
 
@@ -1940,6 +2073,8 @@ app.post('/api/chat/stream', async (req, res) => {
         const parsed = parseStreamChunk(format, data);
         if (parsed) {
           chunkCount++;
+          if (parsed.usage) streamUsage = mergeUsageSnapshots(streamUsage, parsed.usage);
+          if (parsed.text) streamText += parsed.text;
           if (DEBUG_STREAM) console.log(`[chat/stream] chunk #${chunkCount}:`, JSON.stringify(parsed).slice(0, 120));
           res.write(`data: ${JSON.stringify(parsed)}\n\n`);
         } else if (DEBUG_STREAM) {
@@ -1957,6 +2092,8 @@ app.post('/api/chat/stream', async (req, res) => {
         const parsed = parseStreamChunk(format, data);
         if (parsed) {
           chunkCount++;
+          if (parsed.usage) streamUsage = mergeUsageSnapshots(streamUsage, parsed.usage);
+          if (parsed.text) streamText += parsed.text;
           if (DEBUG_STREAM) console.log(`[chat/stream] chunk #${chunkCount} (buffer):`, JSON.stringify(parsed).slice(0, 120));
           res.write(`data: ${JSON.stringify(parsed)}\n\n`);
         } else if (DEBUG_STREAM) {
@@ -1982,6 +2119,8 @@ app.post('/api/chat/stream', async (req, res) => {
           if (result.error) {
             res.write(`data: ${JSON.stringify({ error: result.error })}\n\n`);
           } else if (result.content) {
+            streamUsage = mergeUsageSnapshots(streamUsage, result.usage);
+            streamText += result.content;
             res.write(`data: ${JSON.stringify({ text: result.content })}\n\n`);
             if (result.usage) {
               res.write(`data: ${JSON.stringify({ usage: result.usage })}\n\n`);
@@ -1989,9 +2128,9 @@ app.post('/api/chat/stream', async (req, res) => {
             chunkCount++;
             console.log(`[chat/stream] Non-SSE fallback extracted content (${result.content.length} chars)`);
           }
-        } catch (e) {
-          console.log(`[chat/stream] Non-SSE parse failed: ${e.message}`);
-        }
+      } catch (e) {
+        console.log(`[chat/stream] Non-SSE parse failed: ${e.message}`);
+      }
       }
     }
 
@@ -2017,6 +2156,8 @@ app.post('/api/chat/stream', async (req, res) => {
           if (result.error) {
             res.write(`data: ${JSON.stringify({ error: result.error })}\n\n`);
           } else if (result.content) {
+            streamUsage = mergeUsageSnapshots(streamUsage, result.usage);
+            streamText += result.content;
             res.write(`data: ${JSON.stringify({ text: result.content })}\n\n`);
             if (result.usage) {
               res.write(`data: ${JSON.stringify({ usage: result.usage })}\n\n`);
@@ -2035,6 +2176,14 @@ app.post('/api/chat/stream', async (req, res) => {
       }
     }
 
+    const streamActionType = /\[\[SEARCH:/i.test(streamText) ? 'web_search' : (tokenContext.actionType || 'chat');
+    const capturedStreamEvent = await captureUsage(streamUsage, streamActionType, tokenContext.stage || 'single', Object.assign({}, tokenContext.metadata || {}, {
+      containsSearchMarker: /\[\[SEARCH:/i.test(streamText),
+      markerTypes: detectEmbeddedMarkerTypes(streamText)
+    }), estimateUsage(estimateMessageTokens(messages), Math.max(1, Math.ceil(streamText.length / 1.5))));
+    if (capturedStreamEvent) {
+      res.write(`data: ${JSON.stringify({ usageEvent: tokenEventToClient(capturedStreamEvent) })}\n\n`);
+    }
     res.write(`data: [DONE]\n\n`);
     res.end();
   } catch (err) {
@@ -2064,6 +2213,9 @@ app.post('/api/chat', async (req, res) => {
   try {
     const body = req.body || {};
     const { apiKey, endpoint, model, messages, projectId, windowId, enabledToolIds, enabledToolDefs } = body;
+    const tokenContext = body.tokenContext || {};
+    const interactionId = body.interactionId || tokenContext.interactionId || ('int_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
+    const usageEvents = [];
     console.log('[mcp-debug] /api/chat received — windowId:', windowId, 'enabledToolIds:', enabledToolIds, 'clientDefs count:', enabledToolDefs ? enabledToolDefs.length : 0);
 
     if (!messages || !Array.isArray(messages)) {
@@ -2082,6 +2234,29 @@ app.post('/api/chat', async (req, res) => {
     const provider = resolved.provider;
     const format = resolved.format;
     const fetchUrl = resolved.endpoint;
+    const captureUsage = async function(usage, actionType, stage, metadata, estimated) {
+      if (!usage && !estimated) return null;
+      const isEstimated = !usage;
+      const usageCounts = usage || estimated;
+      const event = makeTokenUsageEvent({
+        id: 'tok_' + interactionId + '_' + (stage || 'single'),
+        projectId: projectId,
+        windowId: windowId || '',
+        interactionId: interactionId,
+        actionType: actionType || tokenContext.actionType || 'chat',
+        stage: stage || 'single',
+        model: model || 'unknown',
+        provider: provider,
+        usage: isEstimated ? null : usage,
+        inputTokens: usageCounts.inputTokens,
+        outputTokens: usageCounts.outputTokens,
+        isEstimated: isEstimated,
+        metadata: Object.assign({}, tokenContext.metadata || {}, metadata || {})
+      });
+      usageEvents.push(event);
+      if (!tokenContext.skipPersistence) await persistTokenUsageEvent(event);
+      return event;
+    };
 
     // ═══ Load MCP tools if window has enabled tools ═══
     let llmTools = [];
@@ -2156,6 +2331,7 @@ app.post('/api/chat', async (req, res) => {
         assistantMsg = { role: 'assistant', content: data.choices[0].message.content || null, tool_calls: data.choices[0].message.tool_calls };
       }
       usage = extractResponseContent(format, data).usage;
+      await captureUsage(usage, 'mcp', 'initial', { toolCount: toolCalls.length }, estimateUsage(estimateMessageTokens(messages), 1));
 
       // Execute each tool call
       const toolResults = [];
@@ -2208,11 +2384,17 @@ app.post('/api/chat', async (req, res) => {
       if (result2.error) {
         return res.status(502).json({ error: result2.error });
       }
+      await captureUsage(result2.usage, 'mcp', 'followup', {
+        toolCount: toolCalls.length,
+        toolNames: toolCalls.map(function(tc) { return tc.name; }),
+        markerTypes: detectEmbeddedMarkerTypes(result2.content)
+      }, estimateUsage(estimateMessageTokens(followUpMessages), Math.max(1, Math.ceil((result2.content || '').length / 1.5))));
 
       // Return final response with tool call metadata
       res.json({
         reply: { role: 'assistant', content: result2.content },
         usage: result2.usage,
+        usageEvents: usageEvents.map(tokenEventToClient),
         _toolCalls: toolCalls.map(function(tc, idx) {
           var tr = toolResults[idx];
           return { name: tc.name, args: tc.args, result: tr ? (tr.content || tr.error || '').slice(0, 2000) : '' };
@@ -2224,9 +2406,14 @@ app.post('/api/chat', async (req, res) => {
       if (result.error) {
         return res.status(502).json({ error: result.error });
       }
+      await captureUsage(result.usage, tokenContext.actionType || 'chat', tokenContext.stage || 'single', Object.assign({}, tokenContext.metadata || {}, {
+        markerTypes: detectEmbeddedMarkerTypes(result.content)
+      }),
+        estimateUsage(estimateMessageTokens(messages), Math.max(1, Math.ceil((result.content || '').length / 1.5))));
       res.json({
         reply: { role: 'assistant', content: result.content },
-        usage: result.usage
+        usage: result.usage,
+        usageEvents: usageEvents.map(tokenEventToClient)
       });
     }
   } catch (err) {
@@ -2943,11 +3130,36 @@ app.get('/api/user-status', async (req, res) => {
 // Called by the backend cron after LLM calls for desire-driven actions.
 // Stores a lightweight log so the frontend token panel can display proactive usage.
 app.post('/api/log-token-call', async (req, res) => {
-  const { projectId, windowId, actionType, inputTokens, outputTokens, model } = req.body || {};
+  const { projectId, windowId, actionType, inputTokens, outputTokens, model, interactionId, stage, timestamp, metadata } = req.body || {};
   if (!projectId || !windowId) return res.json({ ok: false });
   if (!supabase) return res.json({ ok: false, note: 'supabase unavailable' });
   try {
-    const msgId = 'proactive_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+    const msgId = interactionId
+      ? 'tok_' + interactionId + '_' + (stage || 'single')
+      : 'proactive_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+    const event = createTokenUsageEvent({
+      id: msgId,
+      projectId,
+      windowId,
+      interactionId: interactionId || msgId,
+      actionType: actionType || 'proactive_message',
+      stage: stage || 'single',
+      model: model || 'unknown',
+      provider: (metadata && metadata.provider) || 'unknown',
+      usage: req.body && req.body.isEstimated ? null : {
+        input_tokens: inputTokens || 0,
+        output_tokens: outputTokens || 0,
+        total_tokens: req.body.totalTokens,
+        cache_read_input_tokens: req.body.cacheReadTokens || 0,
+        cache_creation_input_tokens: req.body.cacheWriteTokens || 0
+      },
+      inputTokens: inputTokens || 0,
+      outputTokens: outputTokens || 0,
+      isEstimated: req.body && req.body.isEstimated === true,
+      createdAt: timestamp,
+      metadata: metadata || {}
+    });
+    await persistTokenUsageEvent(event);
     const { error } = await supabase.from('chat_messages').upsert({
       project_id: projectId,
       window_id: windowId,
@@ -2964,6 +3176,58 @@ app.post('/api/log-token-call', async (req, res) => {
   } catch (e) {
     console.error('[token-log] Error:', e.message);
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Pull canonical token usage events for the frontend panel ──
+app.post('/api/token-usage-events', async (req, res) => {
+  const event = req.body || {};
+  if (!event.projectId || !event.windowId) return res.status(400).json({ ok: false, error: 'Missing projectId or windowId' });
+  if (!supabase) return res.json({ ok: false, note: 'supabase unavailable' });
+  try {
+    const row = createTokenUsageEvent({
+      id: event.id,
+      projectId: event.projectId,
+      windowId: event.windowId,
+      interactionId: event.interactionId,
+      actionType: event.actionType,
+      stage: event.stage,
+      model: event.model,
+      provider: event.provider,
+      usage: event.isEstimated ? null : {
+        input_tokens: event.inputTokens,
+        output_tokens: event.outputTokens,
+        total_tokens: event.totalTokens,
+        cache_read_input_tokens: event.cacheReadTokens,
+        cache_creation_input_tokens: event.cacheWriteTokens
+      },
+      inputTokens: event.inputTokens,
+      outputTokens: event.outputTokens,
+      createdAt: event.timestamp,
+      metadata: event.metadata || {}
+    });
+    await persistTokenUsageEvent(row);
+    res.json({ ok: true, event: tokenEventToClient(row) });
+  } catch (e) {
+    console.error('[token-events] Client event error:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/token-usage-events', async (req, res) => {
+  const { projectId, windowId, since } = req.query;
+  if (!supabase) return res.json({ events: [] });
+  try {
+    let query = supabase.from('token_usage_events').select('*').order('created_at', { ascending: false }).limit(500);
+    if (projectId) query = query.eq('project_id', projectId);
+    if (windowId) query = query.eq('window_id', windowId);
+    if (since) query = query.gt('created_at', since);
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ events: (data || []).map(tokenEventToClient) });
+  } catch (e) {
+    console.error('[token-events] Error:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -3137,7 +3401,7 @@ app.post('/api/todos/sync', async (req, res) => {
 });
 
 // ==================== CRON: PROACTIVE CHECKS ====================
-cron.schedule('* * * * *', async () => {
+if (process.env.NODE_ENV !== 'test') cron.schedule('* * * * *', async () => {
   console.log('[cron] Checking proactive triggers...');
   // Sync any fallback events to Supabase
   syncFallbackEventsToSupabase().catch(function(){});
@@ -3211,7 +3475,7 @@ function resetDailyCountsIfNewDay(cfg) {
 }
 
 // ── TODO wake-up cron (every 2 min, offset 30s from desire cron) ──
-cron.schedule('30 */2 * * * *', async () => {
+if (process.env.NODE_ENV !== 'test') cron.schedule('30 */2 * * * *', async () => {
   if (_todoWakeLocked) return;
   _todoWakeLocked = true;
   try {
@@ -3379,6 +3643,7 @@ async function fetchRecentMessages(projectId, windowId, limit, aroundTime) {
 
 async function buildTodoWakeMessage(todo, cfg) {
   const windowId = todo.chat_id || cfg._chatId || '';
+  const interactionId = 'todo_wake_' + String(todo.id || Date.now());
   const dynamicBlock = await buildDynamicContextBlock(cfg, {
     projectId: todo.project_id,
     windowId,
@@ -3406,6 +3671,9 @@ ${dynamicBlock}
       body: JSON.stringify({
         apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model || 'deepseek-chat',
         projectId: todo.project_id,
+        windowId,
+        interactionId,
+        tokenContext: { actionType: 'todo_wake', interactionId },
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: shadowContent }
@@ -4016,6 +4284,7 @@ async function checkProjectDesires(pid, cfg) {
 
   try {
     const triggeredAt = new Date().toISOString();
+    const interactionId = 'proactive_' + pid + '_' + Date.now().toString(36);
     // Call our own /api/chat (non-streaming) to reuse model format resolution, proxy, error handling.
     // Uses shadow messages so the AI shares the same personality and context as window chats.
     const llmResp = await fetch(`http://localhost:${PORT}/api/chat`, {
@@ -4026,37 +4295,53 @@ async function checkProjectDesires(pid, cfg) {
         endpoint: cfg.endpoint,
         model: cfg.model || 'deepseek-chat',
         projectId: pid,
+        windowId: cfg._chatId || '',
+        interactionId,
+        tokenContext: { actionType: 'proactive', interactionId, skipPersistence: true },
         messages: await buildShadowMessages(cfg, driveKey, driveValue, pid)
       })
     });
     const data = await llmResp.json();
+
+    // The internal call deliberately skips the generic persistence path so the
+    // proactive label can be assigned here. Persist exact usage when available,
+    // otherwise preserve the backend estimate as an explicitly estimated row.
+    const usageEvent = data.usageEvents && data.usageEvents[0];
     const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
+    const parsed = parseProactiveReply(content);
+    if (usageEvent || data.usage) {
+      const usage = usageEvent || data.usage || {};
+      const inTokens = usage.inputTokens !== undefined ? usage.inputTokens : (usage.prompt_tokens || usage.input_tokens || 0);
+      const outTokens = usage.outputTokens !== undefined ? usage.outputTokens : (usage.completion_tokens || usage.output_tokens || 0);
+      const proactiveType = 'proactive_' + (parsed.actionType || 'message');
+      const wId = cfg._chatId || '';
+      fetch(`http://localhost:${PORT}/api/log-token-call`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: pid, windowId: wId,
+          interactionId,
+          stage: 'single',
+          timestamp: triggeredAt,
+          actionType: proactiveType,
+          inputTokens: inTokens, outputTokens: outTokens,
+          cacheReadTokens: usage.cacheReadTokens || usage.cache_read_input_tokens || 0,
+          cacheWriteTokens: usage.cacheWriteTokens || usage.cache_creation_input_tokens || 0,
+          totalTokens: usage.totalTokens,
+          isEstimated: usage.isEstimated === true,
+          model: cfg.model || 'unknown',
+          metadata: { provider: usage.provider || data.provider || 'unknown', driveKey: driveKey }
+        })
+      }).catch(function(e) { console.error('[token-log] Failed to report:', e.message); });
+    }
+
     if (!content) {
       console.error(`[cron] ${pid}: LLM returned empty content for ${driveKey}=${driveValue}`);
       return;
     }
 
     // ── Parse LLM reply: extract markers, separate message text ──
-    const parsed = parseProactiveReply(content);
     const { message: cleanMessage, actionType, actions } = parsed;
 
-    // ── Log token usage for proactive behavior ──
-    if (data.usage) {
-      const usage = data.usage;
-      const inTokens = usage.prompt_tokens || usage.input_tokens || 0;
-      const outTokens = usage.completion_tokens || usage.output_tokens || 0;
-      const proactiveType = 'proactive_' + (actionType || 'message');
-      const wId = cfg._chatId || '';
-      fetch(`http://localhost:${PORT}/api/log-token-call`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectId: pid, windowId: wId,
-          actionType: proactiveType,
-          inputTokens: inTokens, outputTokens: outTokens,
-          model: cfg.model || 'unknown'
-        })
-      }).catch(function(e) { console.error('[token-log] Failed to report:', e.message); });
-    }
 
     // Compute post-decay value so frontend can sync desire state immediately
     const postDecayValue = Math.floor(driveValue * 0.2);

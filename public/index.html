@@ -1342,6 +1342,7 @@ function daysBetween(d1,d2) { return AppCore.daysBetween(d1,d2); }
  */
 function toLocalDisplayTime(isoString) {
   if (!isoString) return '';
+  if (/^\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/.test(isoString)) return isoString.slice(0, 5) + ' ' + isoString.slice(6, 11);
   var d = new Date(isoString);
   if (isNaN(d.getTime())) return isoString.slice(0, 16).replace('T', ' '); // fallback
   var y = d.getFullYear();
@@ -1429,16 +1430,10 @@ function renderMemoryPanelBody(){
   const b=$('memoryPanelBody');
   if(currentMemoryTab==='tokens'){
     const pct=Math.round((store.tokenUsage.used/store.tokenUsage.limit)*100);
-    // Per-window token collection
-    const windowTokens = [];
-    for (const p of store.projects) {
-      for (const c of p.chats) {
-        if (c.chatTokens && c.chatTokens > 0) {
-          windowTokens.push({ project: p.name, chat: c.name, tokens: c.chatTokens });
-        }
-      }
-    }
-    windowTokens.sort((a,b) => b.tokens - a.tokens);
+    // The token panel is scoped to the currently selected chat window.
+    const activeProject = store.projects.find(p => p.id === store.activeProject);
+    const activeChat = activeProject && activeProject.chats.find(c => c.id === store.activeChat);
+    const currentWindowTokens = activeChat ? (activeChat.chatTokens || 0) : 0;
 
     // Phase 3: Get call history from tokenLogs
     const activeLog = store.tokenLogs && store.tokenLogs[store.activeChat];
@@ -1451,6 +1446,8 @@ function renderMemoryPanelBody(){
     // Action type distribution
     const actionTypes = dailySummary && dailySummary.by_action_type ? Object.entries(dailySummary.by_action_type).sort((a,b) => b[1] - a[1]) : [];
     const dailyTotal = dailySummary ? dailySummary.total : 0;
+    const actualTotal = dailySummary ? (dailySummary.total_actual !== undefined ? dailySummary.total_actual : (dailySummary.total || 0)) : 0;
+    const estimatedTotal = dailySummary ? (dailySummary.total_estimated || 0) : 0;
 
     b.innerHTML=`<div style="padding:4px;">
       <div style="background:var(--bg);border-radius:var(--radius-sm);padding:16px;margin-bottom:8px;">
@@ -1459,6 +1456,7 @@ function renderMemoryPanelBody(){
           <div style="font-size:9px;color:var(--text-lighter);">limit ${store.tokenUsage.limit.toLocaleString()}</div>
         </div>
         <div style="font-family:var(--font-en);font-size:24px;color:var(--text);">${dailyTotal.toLocaleString()} tok</div>
+        <div style="font-size:10px;color:var(--text-lighter);margin-top:4px;">真实 ${actualTotal.toLocaleString()} · 估算 ${estimatedTotal.toLocaleString()}</div>
         ${actionTypes.length > 0 ? `
           <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px;">
             ${actionTypes.map(([type, val]) => {
@@ -1468,24 +1466,19 @@ function renderMemoryPanelBody(){
           </div>
         ` : ''}
       </div>
-      <!-- Per-window token collection -->
-      ${windowTokens.length > 0 ? `
-        <div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:8px;">PER WINDOW</div>
-        ${windowTokens.map(w => {
-          const wpct = Math.round((w.tokens / store.tokenUsage.used) * 100) || 0;
-          return `<div class="token-per-window">
-            <div class="token-per-window-name">
-              <span style="font-size:12px;">${w.project} / ${w.chat}</span>
-              <span style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);">${w.tokens.toLocaleString()} tok</span>
-            </div>
-            <div class="token-per-window-bar"><div class="token-per-window-fill" style="width:${Math.max(wpct, 2)}%"></div></div>
-          </div>`;
-        }).join('')}
-      ` : '<div class="empty-state">no window token data yet.</div>'}
+      <!-- Current chat window token collection -->
+      <div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin-bottom:8px;">CURRENT WINDOW</div>
+      ${activeChat ? `<div class="token-per-window">
+        <div class="token-per-window-name">
+          <span style="font-size:12px;">${activeProject ? activeProject.name : ''} / ${activeChat.name}</span>
+          <span style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);">${currentWindowTokens.toLocaleString()} tok</span>
+        </div>
+        <div class="token-per-window-bar"><div class="token-per-window-fill" style="width:${Math.max(Math.round((currentWindowTokens / Math.max(store.tokenUsage.used, 1)) * 100), currentWindowTokens ? 2 : 0)}%"></div></div>
+      </div>` : '<div class="empty-state">no active chat window.</div>'}
       <!-- Filter buttons -->
       <div style="font-family:var(--font-en);font-size:11px;color:var(--text-lighter);letter-spacing:0.04em;margin:12px 0 8px;">CALL HISTORY</div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;">
-        ${['all','chat','proactive_message','proactive_litter','proactive_diary','proactive_todo','diary','litterbox','reflection','memory_write','web_search'].map(f => {
+        ${['all','chat','mcp','web_search','usm','litterbox','round_compress','todo_wake','proactive_message','proactive_litter','proactive_diary','proactive_todo','proactive_email','proactive_poke','proactive_status'].map(f => {
           return `<button class="todo-tab ${filterType===f?'active':''}" onclick="currentTokenFilter='${f}';renderMemoryPanelBody();" style="font-size:9px;padding:3px 10px;">${f}</button>`;
         }).join('')}
       </div>
@@ -1497,7 +1490,7 @@ function renderMemoryPanelBody(){
               <span style="font-size:12px;color:var(--text);">${c.action_type}</span>
               <span style="font-size:9px;color:var(--text-lighter);">${c.model}</span>
             </div>
-            <div style="font-family:var(--font-en);font-size:9px;color:var(--text-lighter);margin-top:2px;">${toLocalDisplayTime(c.timestamp)}</div>
+            <div style="font-family:var(--font-en);font-size:9px;color:var(--text-lighter);margin-top:2px;">${toLocalDisplayTime(c.timestamp)}${c.is_estimated ? ' · 估算' : ''}${c.stage && c.stage !== 'single' ? ' · ' + c.stage : ''}${c.metadata && c.metadata.markerTypes && c.metadata.markerTypes.length ? ' · 内嵌:' + c.metadata.markerTypes.join(',') : ''}</div>
           </div>
           <div style="text-align:right;">
             <div style="font-family:var(--font-en);font-size:11px;color:var(--text);">${(c.total_tokens || 0).toLocaleString()} tok</div>
@@ -2245,10 +2238,13 @@ ${recentMsgs}
 请生成这一刻你没说出口的心里话。`;
 
   try {
+    const interactionId = 'int_' + AppCore.gid('');
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
+        windowId: store.activeChat, interactionId: interactionId,
+        tokenContext: { actionType: 'litterbox', interactionId: interactionId },
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
@@ -2256,6 +2252,7 @@ ${recentMsgs}
       })
     });
     const data = await response.json();
+    if (data.usageEvents && data.usageEvents.length) data.usageEvents.forEach(function(event) { AppCore.recordTokenEvent(event); });
     const content = (data.reply && data.reply.content) ? data.reply.content.trim() : '';
     if (!content) return null;
 
@@ -2333,11 +2330,14 @@ async function syncToDiaryLitterboxLayer(type, rawContent) {
   let summary = (rawContent || '').slice(0, 10);
   const cfg = getActiveApiConfig(); if (cfg.apiKey) {
     try {
+      const interactionId = 'int_' + AppCore.gid('');
       const res = await fetch(BACKEND_URL + '/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           apiKey: cfg.apiKey, endpoint: cfg.endpoint, model: cfg.model, projectId: store.activeProject,
+          windowId: store.activeChat, interactionId: interactionId,
+          tokenContext: { actionType: 'litterbox', stage: 'summary', interactionId: interactionId },
           messages: [
             { role: 'system', content: '用10字以内概括以下内容，不加标点。' },
             { role: 'user', content: rawContent.slice(0, 200) }
@@ -2346,6 +2346,7 @@ async function syncToDiaryLitterboxLayer(type, rawContent) {
       });
       if (res.ok) {
         const data = await res.json();
+        if (data.usageEvents && data.usageEvents.length) data.usageEvents.forEach(function(event) { AppCore.recordTokenEvent(event); });
         if (data.reply && data.reply.content) summary = data.reply.content.trim().slice(0, 10);
       }
     } catch {}
@@ -2999,7 +3000,7 @@ async function doSubmitAskAI(){
     const response = await fetch(BACKEND_URL + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: cfg2.apiKey, endpoint: cfg2.endpoint, model: cfg2.model, projectId: store.activeProject, messages: [{ role: 'user', content: prompt }] })
+      body: JSON.stringify({ apiKey: cfg2.apiKey, endpoint: cfg2.endpoint, model: cfg2.model, projectId: store.activeProject, tokenContext: { actionType: 'bookshelf', skipPersistence: true }, messages: [{ role: 'user', content: prompt }] })
     });
     const data = await response.json();
     const aiText = (data.reply && data.reply.content) ? data.reply.content : '这个段落值得反复品味。';
@@ -3029,6 +3030,7 @@ async function submitAskAI(){
         endpoint: cfg3.endpoint,
         model: cfg3.model,
         projectId: store.activeProject,
+        tokenContext: { actionType: 'bookshelf', skipPersistence: true },
         messages: [{ role: 'user', content: prompt }]
       })
     });
@@ -3226,7 +3228,7 @@ init();
 function checkWeeklyMemoryWrite() { AppCore.checkWeeklyMemoryWrite(); }
 function resetDailyTokensIfNeeded() { AppCore.resetDailyTokensIfNeeded(); }
 function pullProactiveTokenLogs() { AppCore.pullProactiveTokenLogs(); }
-function logTokenCall(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model) { AppCore.logTokenCall(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model); }
+function logTokenCall(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model, options) { AppCore.logTokenCall(windowId, actionType, inputTokens, outputTokens, cacheRead, cacheWrite, model, options); }
 
 // Request push permission on first user interaction (to avoid auto-block)
 let _pushPermissionRequested = false;

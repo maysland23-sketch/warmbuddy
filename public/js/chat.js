@@ -151,6 +151,7 @@ var ChatModule = (function() {
       SyncModule.syncProjectConfigToBackend();
       SyncModule.pullChatMessages(pid);
     }
+    AppCore.pullProactiveTokenLogs();
   }
 
   function selectChat(pid, cid) {
@@ -165,6 +166,7 @@ var ChatModule = (function() {
       SyncModule.syncProjectConfigToBackend();
       SyncModule.pullChatMessages(pid);
     }
+    AppCore.pullProactiveTokenLogs();
   }
 
   function addChat(pid) {
@@ -1789,6 +1791,8 @@ var ChatModule = (function() {
     var typingArea = AppCore.$('chatTypingArea');
     var cfg = getActiveApiConfig();
     var pendingToolCalls = null;
+    var interactionId = 'int_' + AppCore.gid('');
+    var tokenUsageEvents = [];
 
     // ═══ Build enabled tool definitions for this window ═══
     var enabledToolDefs = null;
@@ -1924,6 +1928,8 @@ var ChatModule = (function() {
           model: cfg.model,
           projectId: store.activeProject,
           windowId: chat.id,
+          interactionId: interactionId,
+          tokenContext: { actionType: (chat.enabledTools && chat.enabledTools.length > 0) ? 'mcp' : 'chat', interactionId: interactionId },
           enabledToolIds: chat.enabledTools || [],
           enabledToolDefs: enabledToolDefs,
           messages: apiMessages
@@ -1960,6 +1966,7 @@ var ChatModule = (function() {
             var parsed = JSON.parse(data);
             if (parsed.error) { fullResponse = parsed.error; break; }
             if (parsed._toolCalls) { pendingToolCalls = parsed._toolCalls; }
+            if (parsed.usageEvent) { tokenUsageEvents.push(parsed.usageEvent); }
             if (parsed.text) {
               fullResponse += parsed.text;
               if (typingArea && typingArea.innerHTML) {
@@ -2034,6 +2041,8 @@ var ChatModule = (function() {
               model: cfg.model,
               projectId: store.activeProject,
               windowId: chat.id,
+              interactionId: interactionId,
+              tokenContext: { actionType: 'web_search', stage: 'followup', interactionId: interactionId },
               enabledToolIds: chat.enabledTools || [],
               enabledToolDefs: enabledToolDefs,
               messages: apiMessages2
@@ -2059,6 +2068,7 @@ var ChatModule = (function() {
                   var parsed2 = JSON.parse(data2);
                   if (parsed2.error) { fullResponse = parsed2.error; break; }
                   if (parsed2._toolCalls) { pendingToolCalls = parsed2._toolCalls; }
+                  if (parsed2.usageEvent) { tokenUsageEvents.push(parsed2.usageEvent); }
                   if (parsed2.text) {
                     fullResponse += parsed2.text;
                     if (typingArea && typingArea.innerHTML) {
@@ -2296,29 +2306,36 @@ var ChatModule = (function() {
       renderChatMessages();
     }
 
-    var inputTokens = tokenUsage
-      ? (tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0)
-      : estimateTokens(userText);
-    var outputTokens = tokenUsage
-      ? (tokenUsage.output_tokens || tokenUsage.completion_tokens || 0)
-      : Math.ceil(fullResponse.length / 1.5);
-    var estimatedTokens = inputTokens + outputTokens;
-
-    logTokenCall(store.activeChat, 'chat', inputTokens, outputTokens,
-      tokenUsage ? (tokenUsage.cache_read_input_tokens || 0) : 0,
-      tokenUsage ? (tokenUsage.cache_creation_input_tokens || 0) : 0,
-      cfg.model);
-
-    if (!chat.chatTokens) chat.chatTokens = 0;
-    chat.chatTokens += estimatedTokens;
-
-    store.tokenUsage.used += estimatedTokens;
-    var today = String(new Date().getDate()).padStart(2, '0') + '-' + String(new Date().getMonth() + 1).padStart(2, '0');
-    var te = store.tokenUsage.history.find(function(h) { return h.date === today; });
-    if (te) te.tokens += estimatedTokens;
-    else {
-      store.tokenUsage.history.unshift({ date: today, tokens: estimatedTokens });
-      if (store.tokenUsage.history.length > 30) store.tokenUsage.history.pop();
+    var inputTokens = 0;
+    var outputTokens = 0;
+    var estimatedTokens = 0;
+    if (tokenUsageEvents.length > 0) {
+      for (var tei = 0; tei < tokenUsageEvents.length; tei++) {
+        var tokenEvent = tokenUsageEvents[tei];
+        AppCore.recordTokenEvent(tokenEvent);
+        inputTokens += tokenEvent.inputTokens || 0;
+        outputTokens += tokenEvent.outputTokens || 0;
+        estimatedTokens += tokenEvent.totalTokens || 0;
+      }
+    } else {
+      inputTokens = tokenUsage
+        ? (tokenUsage.input_tokens || tokenUsage.prompt_tokens || 0)
+        : estimateTokens(userText);
+      outputTokens = tokenUsage
+        ? (tokenUsage.output_tokens || tokenUsage.completion_tokens || 0)
+        : Math.ceil(fullResponse.length / 1.5);
+      estimatedTokens = tokenUsage && tokenUsage.total_tokens !== undefined
+        ? tokenUsage.total_tokens
+        : inputTokens + outputTokens;
+      AppCore.logTokenCall(store.activeChat, 'chat', inputTokens, outputTokens,
+        tokenUsage ? (tokenUsage.cache_read_input_tokens || 0) : 0,
+        tokenUsage ? (tokenUsage.cache_creation_input_tokens || 0) : 0,
+        cfg.model, {
+          totalTokens: estimatedTokens,
+          isEstimated: !tokenUsage,
+          interactionId: interactionId,
+          stage: 'single'
+        });
     }
 
     renderChatMessages();
