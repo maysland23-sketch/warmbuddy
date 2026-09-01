@@ -116,6 +116,7 @@ var SyncModule = (function() {
   function syncProjectConfigToBackend(updateChatTime) {
     var store = AppCore.getStore();
     var proj = getActiveProject(); if (!proj) return;
+    var chat = getActiveChatObj();
     var cfg = getActiveApiConfig();
     var apiKey = cfg.apiKey || store.apiKey || '';
     var endpoint = cfg.endpoint || store.apiEndpoint || 'https://api.deepseek.com/v1/chat/completions';
@@ -125,6 +126,7 @@ var SyncModule = (function() {
       apiKey: apiKey, endpoint: endpoint, model: cfg.model || 'deepseek-chat',
       enabled: enabledVal,
       aiName: getAIName(),
+      _chatId: chat ? chat.id : '',
       systemPrompt: proj.preference || '',
       chatSummary: buildChatContextSummary(),
       coreOverview: (function() {
@@ -174,7 +176,7 @@ var SyncModule = (function() {
         role: m.role === 'ai' ? 'assistant' : 'user',
         content: m.text || '',
         token_usage: m._tokenUsage || 0,
-        created_at: new Date().toISOString(),
+        created_at: m.createdAt || new Date().toISOString(),
         metadata: { contentType: m.contentType || '' }
       });
     }
@@ -214,6 +216,124 @@ var SyncModule = (function() {
   function scheduleMessageSync() {
     if (_syncMessagesTimer) clearTimeout(_syncMessagesTimer);
     _syncMessagesTimer = setTimeout(syncMessagesToBackend, 2000);
+  }
+
+  function getLocalTimestampParts(isoString) {
+    var d = new Date(isoString);
+    if (isNaN(d.getTime())) return { date: '', time: '' };
+    return {
+      date: d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'),
+      time: String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+    };
+  }
+
+  function cloudMessageToLocal(row) {
+    var metadata = row.metadata || {};
+    var parts = getLocalTimestampParts(row.createdAt);
+    var role = row.role === 'assistant' ? 'ai' : (row.role || 'system');
+    return {
+      id: row.messageId,
+      role: role,
+      text: row.content || '',
+      date: parts.date,
+      time: parts.time,
+      createdAt: row.createdAt,
+      _proactive: !!metadata.proactive,
+      _todoWake: metadata.action_type === 'todo_wake',
+      _desireType: metadata.drive_key || '',
+      contentType: metadata.content_type || metadata.contentType || '',
+      _synced: true,
+      _proactiveMessageId: row.messageId
+    };
+  }
+
+  function findExistingCloudMessage(chat, localMessage) {
+    var exact = chat.messages.find(function(m) { return m.id === localMessage.id; });
+    if (exact) return exact;
+    // Reconcile bubbles created by older builds, whose IDs were generated during polling.
+    return chat.messages.find(function(m) {
+      var legacySystemNotice = m.role === 'system' && localMessage.role === 'system';
+      return (m._proactive || legacySystemNotice) && m.role === localMessage.role &&
+        (m.text || '') === localMessage.text &&
+        (!localMessage.time || (m.time || '').indexOf(localMessage.time) >= 0);
+    }) || null;
+  }
+
+  function mergeCloudMessages(proj, rows) {
+    var store = AppCore.getStore();
+    var changed = false;
+    (rows || []).forEach(function(row) {
+      var localMessage = cloudMessageToLocal(row);
+      var chat = proj.chats.find(function(c) { return c.id === row.windowId; });
+      if (!chat) chat = proj.chats[proj.chats.length - 1];
+      if (!chat || !localMessage.id) return;
+      var existing = findExistingCloudMessage(chat, localMessage);
+      if (existing) {
+        var needsUpdate = existing.id !== localMessage.id || existing.role !== localMessage.role ||
+          existing.text !== localMessage.text || existing.createdAt !== localMessage.createdAt ||
+          existing._synced !== true;
+        if (needsUpdate) {
+          Object.assign(existing, localMessage);
+          changed = true;
+        }
+      } else {
+        chat.messages.push(localMessage);
+        changed = true;
+      }
+    });
+    if (changed) {
+      function sortTime(message) {
+        if (message.createdAt) return message.createdAt;
+        var date = message.date;
+        var timeMatch = (message.time || '').match(/(\d{2}:\d{2})/);
+        if (!date) {
+          var dateMatch = (message.time || '').match(/(\d{4}-\d{2}-\d{2})/);
+          date = dateMatch && dateMatch[1];
+        }
+        return date && timeMatch ? date + 'T' + timeMatch[1] : '';
+      }
+      proj.chats.forEach(function(chat) {
+        chat.messages.sort(function(a, b) {
+          var aTime = sortTime(a);
+          var bTime = sortTime(b);
+          if (!aTime || !bTime) return 0;
+          return aTime.localeCompare(bTime);
+        });
+      });
+      AppCore.saveStore();
+      if (proj.id === store.activeProject && typeof renderChatMessages === 'function') renderChatMessages(true);
+    }
+    return changed;
+  }
+
+  function pullChatMessages(projectId) {
+    if (!projectId) return Promise.resolve();
+    var store = AppCore.getStore();
+    var proj = store.projects.find(function(p) { return p.id === projectId; });
+    if (!proj) return Promise.resolve();
+    var targetChatId = projectId === store.activeProject
+      ? store.activeChat
+      : (proj._lastActiveChat || (proj.chats.length ? proj.chats[proj.chats.length - 1].id : ''));
+    var since = proj._lastChatMessagePoll || '';
+    var querySince = since;
+    if (since) {
+      var sinceDate = new Date(since);
+      if (!isNaN(sinceDate.getTime())) querySince = new Date(sinceDate.getTime() - 1000).toISOString();
+    }
+    var url = AppCore.BACKEND_URL + '/api/chat-messages?projectId=' + encodeURIComponent(projectId);
+    if (targetChatId) url += '&targetWindowId=' + encodeURIComponent(targetChatId);
+    if (querySince) url += '&since=' + encodeURIComponent(querySince);
+    return fetch(url).then(function(r) { return r.json(); }).then(function(data) {
+      var rows = data.messages || [];
+      mergeCloudMessages(proj, rows);
+      var maxCreatedAt = rows.reduce(function(max, row) {
+        return row.createdAt && row.createdAt > max ? row.createdAt : max;
+      }, since || '');
+      if (maxCreatedAt) proj._lastChatMessagePoll = maxCreatedAt;
+      if (rows.length) AppCore.saveStore();
+    }).catch(function(e) {
+      console.warn('[pull-chat-messages] Failed:', e.message);
+    });
   }
 
   // ═══════════════════════════════════════════
@@ -282,6 +402,7 @@ var SyncModule = (function() {
         proj._aiStatus = data.config._aiStatus;
       }
       pollSystemEvents();
+      store.projects.forEach(function(project) { pullChatMessages(project.id); });
       pollCloudData(proj.id);
       fetchTodosFromBackend(proj.id);
     } catch (e) {
@@ -297,6 +418,7 @@ var SyncModule = (function() {
     if (diaryModule && diaryModule.syncPending) diaryModule.syncPending();
     if (!projectId) return;
     var store = AppCore.getStore();
+    pullChatMessages(projectId);
     // Litter thoughts
     fetch(AppCore.BACKEND_URL + '/api/litter-thoughts?projectId=' + encodeURIComponent(projectId))
       .then(function(r) { return r.json(); })
@@ -415,28 +537,22 @@ var SyncModule = (function() {
     if (!store.projects.length) return;
     var activeProj = getActiveProject();
     var activeChanged = false;
-    var pending = store.projects.length;
-    var driveLabels = { resonance: '共鸣欲', exploration: '探索欲', possession: '占有欲', guardianship: '守护欲', intimacy: '亲近欲', confirmation: '确认欲', devotion: '献祭欲', todo: '待办提醒' };
+    var projects = store.projects.filter(function(proj) { return !proj._eventPollInFlight; });
+    var pending = projects.length;
+    if (!pending) return;
 
     function processEvents(proj, events) {
+      if (!Array.isArray(proj._processedEventIds)) proj._processedEventIds = [];
       for (var i = 0; i < events.length; i++) {
         var evt = events[i];
-        var evtTime = (typeof toLocalDisplayTime === 'function' ? toLocalDisplayTime(evt.timestamp) : evt.timestamp);
-        var driveLabel = evt.driveKey ? (driveLabels[evt.driveKey] || evt.driveKey) : '';
-        var timeLabel = evtTime + (driveLabel ? ' · ' + driveLabel : '');
+        if (evt.id && proj._processedEventIds.indexOf(String(evt.id)) >= 0) continue;
+        if (evt.id) {
+          proj._processedEventIds.push(String(evt.id));
+          if (proj._processedEventIds.length > 500) proj._processedEventIds.shift();
+        }
         var chat = proj.chats.find(function(c) { return c.id === evt.chatId; });
         if (!chat) chat = proj.chats[proj.chats.length - 1];
-        if (!chat) continue;
-        var hasAiMessage = evt.content && evt.type !== 'todo_wake' && evt.type !== 'poke';
-        if (hasAiMessage) {
-          chat.messages.push({ role: 'ai', text: evt.content, time: timeLabel, id: AppCore.generateMsgId(), _proactive: true, _desireType: evt.driveKey });
-        }
-        if (evt.type === 'message') {
-          chat.messages.push({ role: 'system', contentType: 'proactive_notification', text: '💬 ' + (driveLabel || '') + '提醒', time: timeLabel });
-        } else if (evt.type === 'email') {
-          chat.messages.push({ role: 'system', contentType: 'email_notification', text: '📧 邮件已发送', time: timeLabel });
-        } else if (evt.type === 'todo') {
-          chat.messages.push({ role: 'system', contentType: 'todo_notification', text: '📋 有了新的ToDo', time: timeLabel });
+        if (evt.type === 'todo') {
           if (evt.todoTitle && evt.todoId) {
             if (!store.todos.find(function(t) { return t.id === evt.todoId; })) {
               store.todos.unshift({ id: evt.todoId, text: evt.todoTitle, done: false, time: evt.timestamp, type: 'short', creator: 'ai', chatId: evt.chatId || '', createdAt: evt.timestamp, projectId: proj.id });
@@ -451,21 +567,16 @@ var SyncModule = (function() {
             }
           }
         } else if (evt.type === 'litter') {
-          chat.messages.push({ role: 'system', contentType: 'litter_notification', text: '🐾 猫砂盆好像需要铲一铲', time: timeLabel });
           if (evt.content) {
             var litterText = evt.content.replace(/^LITTER:\s*/i, '').trim();
             if (litterText) {
-              store.litterThoughts.unshift({ id: 'lt' + AppCore.gid(''), content: litterText, date: evt.timestamp.slice(0, 10), time: evtTime, sourceChatId: evt.chatId || '', sourceWindow: chat.name || '', _proactive: true });
+              if (!store.litterThoughts.some(function(lt) { return lt._eventId === evt.id; })) {
+                store.litterThoughts.unshift({ id: 'lt' + AppCore.gid(''), content: litterText, date: evt.timestamp.slice(0, 10), time: toLocalDisplayTime(evt.timestamp), sourceChatId: evt.chatId || '', sourceWindow: chat ? chat.name || '' : '', _proactive: true, _eventId: evt.id });
+              }
             }
           }
         } else if (evt.type === 'diary') {
-          chat.messages.push({ role: 'system', contentType: 'diary_notification', text: '📝 在日记里写了点什么', time: timeLabel });
         } else if (evt.type === 'todo_wake') {
-          var wakeText = evt.content || '';
-          if (wakeText) {
-            chat.messages.push({ role: 'ai', text: wakeText, time: timeLabel, id: AppCore.generateMsgId(), _proactive: true, _todoWake: true, _desireType: 'todo' });
-          }
-          chat.messages.push({ role: 'system', contentType: 'todo_notification', text: '⏰ 自我唤醒', time: timeLabel });
           if (evt.todoId) {
             var todo = store.todos.find(function(t2) { return t2.id === evt.todoId; });
             if (todo) { todo.triggered = true; AppCore.saveStore(); }
@@ -476,12 +587,6 @@ var SyncModule = (function() {
             proj._aiStatusChanged = true;
             AppCore.saveStore();
           }
-          chat.messages.push({ role: 'system', contentType: 'status_notification', text: '戳一戳更新了', time: timeLabel });
-        } else if (evt.type === 'poke') {
-          var aiName = getAIName();
-          var userStatus = evt.content || '';
-          var pokeText = aiName + ' 戳了戳 mays，' + (userStatus ? '她' + userStatus : '她什么也没发生。');
-          chat.messages.push({ role: 'system', contentType: 'poke_notification', text: pokeText, time: timeLabel });
         }
         if (evt.driveKey && evt.postDecayValue !== undefined && evt.postDecayValue !== null && proj.desireSystem && proj.desireSystem.drives) {
           proj.desireSystem.drives[evt.driveKey] = evt.postDecayValue;
@@ -490,19 +595,32 @@ var SyncModule = (function() {
       }
     }
 
-    for (var pi = 0; pi < store.projects.length; pi++) {
+    for (var pi = 0; pi < projects.length; pi++) {
       (function(proj) {
+        proj._eventPollInFlight = true;
         if (!proj._lastEventPoll) {
           proj._lastEventPoll = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
         }
         var since = proj._lastEventPoll;
+        var fetchedEvents = [];
+        var pollSucceeded = false;
         fetch(AppCore.BACKEND_URL + '/api/system-events?projectId=' + encodeURIComponent(proj.id) + '&since=' + encodeURIComponent(since))
           .then(function(r) { return r.json(); })
           .then(function(data) {
-            if (data.events && data.events.length) processEvents(proj, data.events);
+            pollSucceeded = true;
+            fetchedEvents = data.events || [];
+            if (fetchedEvents.length) processEvents(proj, fetchedEvents);
+            pullChatMessages(proj.id);
           }).catch(function() {})
           .finally(function() {
-            proj._lastEventPoll = new Date().toISOString();
+            proj._eventPollInFlight = false;
+            if (pollSucceeded) {
+              var maxTimestamp = fetchedEvents.reduce(function(max, evt) {
+                return evt.timestamp && evt.timestamp > max ? evt.timestamp : max;
+              }, '');
+              var cursorTime = maxTimestamp ? new Date(maxTimestamp).getTime() : Date.now();
+              proj._lastEventPoll = new Date(cursorTime - 1000).toISOString();
+            }
             pending--;
             if (pending === 0) {
               AppCore.saveStore();
@@ -534,6 +652,7 @@ var SyncModule = (function() {
     syncProjectConfigToBackend: syncProjectConfigToBackend,
     syncMessagesToBackend: syncMessagesToBackend,
     scheduleMessageSync: scheduleMessageSync,
+    pullChatMessages: pullChatMessages,
     pullAllProjectEnabledStates: pullAllProjectEnabledStates,
     reconcileFromBackend: reconcileFromBackend,
     pollCloudData: pollCloudData,

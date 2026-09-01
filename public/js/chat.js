@@ -144,16 +144,27 @@ var ChatModule = (function() {
     store.activeProject = pid;
     var p = store.projects.find(function(x) { return x.id === pid; });
     if (p && p.chats.length > 0) store.activeChat = p.chats[0].id;
+    if (p) p._lastActiveChat = store.activeChat || '';
     renderProjectList(); updateCurrentProjectLabel(); renderChatMessages();
     toggleProjectSidebar(); updateChatInputEnabledState();
+    if (typeof SyncModule !== 'undefined') {
+      SyncModule.syncProjectConfigToBackend();
+      SyncModule.pullChatMessages(pid);
+    }
   }
 
   function selectChat(pid, cid) {
     var store = AppCore.getStore();
     store.activeProject = pid;
     store.activeChat = cid;
+    var project = store.projects.find(function(x) { return x.id === pid; });
+    if (project) project._lastActiveChat = cid;
     renderProjectList(); updateCurrentProjectLabel(); renderChatMessages();
     toggleProjectSidebar(); updateChatInputEnabledState();
+    if (typeof SyncModule !== 'undefined') {
+      SyncModule.syncProjectConfigToBackend();
+      SyncModule.pullChatMessages(pid);
+    }
   }
 
   function addChat(pid) {

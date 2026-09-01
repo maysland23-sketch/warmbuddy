@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { createClient } = require('@supabase/supabase-js');
+const { createProactiveChatMessage } = require('./proactive-message-utils');
 
 // Proxy for outbound API calls (set HTTPS_PROXY in .env, e.g. http://127.0.0.1:7897)
 const OUTBOUND_PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
@@ -863,6 +864,113 @@ async function markEventPushSent(eventId) {
   try {
     await supabase.from('system_events').update({ push_sent: true }).eq('id', eventId);
   } catch (e) { console.error('[supabase] markEventPushSent error:', e.message); }
+}
+
+function proactiveNoticeText(event, aiName) {
+  const driveLabels = { resonance: '共鸣欲', exploration: '探索欲', possession: '占有欲', guardianship: '守护欲', intimacy: '亲近欲', confirmation: '确认欲', devotion: '献祭欲', todo: '待办提醒' };
+  const driveLabel = event.driveKey ? (driveLabels[event.driveKey] || event.driveKey) : '';
+  switch (event.type) {
+    case 'message': return '💬 ' + (driveLabel || '') + '提醒';
+    case 'email': return '📧 邮件已发送';
+    case 'todo': return '📋 有了新的ToDo';
+    case 'todo_wake': return '⏰ 自我唤醒';
+    case 'litter': return '🐾 猫砂盆好像需要铲一铲';
+    case 'diary': return '📝 在日记里写了点什么';
+    case 'ai_status_change': return '戳一戳更新了';
+    case 'poke': {
+      const userStatus = event.content || '';
+      return (aiName || '暖伴') + ' 戳了戳 mays，' + (userStatus ? '她' + userStatus : '她什么也没发生。');
+    }
+    default: return '';
+  }
+}
+
+function proactiveMessageBaseId(eventId, chatId) {
+  return 'proactive_evt_' + String(eventId) + '_' + String(chatId).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+/**
+ * Persist every chat-visible part of one proactive event.
+ * The event ID is used as the stable identity, so retries are safe.
+ */
+async function saveProactiveChatMessages(event, aiName) {
+  if (!supabase || !event || !event.projectId || !event.chatId || !event.id) return { saved: 0 };
+  const baseId = proactiveMessageBaseId(event.id, event.chatId);
+  const rows = [];
+  const content = String(event.content || '').trim();
+  const hasAssistantContent = content && event.type !== 'poke' && event.type !== 'ai_status_change';
+  if (hasAssistantContent) {
+    rows.push(createProactiveChatMessage({
+      projectId: event.projectId,
+      windowId: event.chatId,
+      messageId: baseId,
+      role: 'assistant',
+      content,
+      createdAt: event.timestamp,
+      actionType: event.type,
+      driveKey: event.driveKey,
+      eventId: event.id
+    }));
+  }
+  const notice = proactiveNoticeText(event, aiName);
+  if (notice) {
+    rows.push(createProactiveChatMessage({
+      projectId: event.projectId,
+      windowId: event.chatId,
+      messageId: baseId + '_notice',
+      role: 'system',
+      content: notice,
+      createdAt: event.timestamp,
+      actionType: event.type,
+      driveKey: event.driveKey,
+      eventId: event.id,
+      metadata: { content_type: event.type === 'message' ? 'proactive_notification' : event.type + '_notification' }
+    }));
+  }
+  if (rows.length === 0) return { saved: 0 };
+
+  const { error } = await supabase.from('chat_messages').upsert(rows, { onConflict: 'message_id' });
+  if (error) throw error;
+  console.log('[proactive-msg] Saved', rows.length, 'chat rows for event', event.id, 'window:', event.chatId);
+  return { saved: rows.length };
+}
+
+async function backfillProactiveChatMessages(projectId, windowId) {
+  if (!supabase || !projectId || !windowId) return 0;
+  try {
+    const { data: events, error } = await supabase.from('system_events')
+      .select('*').eq('project_id', projectId).order('created_at', { ascending: true }).limit(500);
+    if (error) throw error;
+    if (!events || events.length === 0) return 0;
+    const { data: existingRows, error: existingError } = await supabase.from('chat_messages')
+      .select('message_id').eq('project_id', projectId).contains('metadata', { proactive: true }).limit(2000);
+    if (existingError) throw existingError;
+    const existingIds = new Set((existingRows || []).map(row => row.message_id));
+    const cfg = await loadProjectConfig(projectId);
+    let saved = 0;
+    for (const row of events) {
+      const event = {
+        id: row.id,
+        projectId: row.project_id,
+        chatId: row.chat_id || windowId,
+        type: row.type,
+        driveKey: row.drive_key || null,
+        content: row.content || '',
+        timestamp: row.created_at,
+        todoId: row.todo_id || null,
+        todoTitle: row.todo_title || null
+      };
+      const baseId = proactiveMessageBaseId(event.id, event.chatId);
+      const notice = proactiveNoticeText(event, cfg && cfg.aiName);
+      const hasAssistantContent = String(event.content || '').trim() && event.type !== 'poke' && event.type !== 'ai_status_change';
+      if ((!hasAssistantContent || existingIds.has(baseId)) && (!notice || existingIds.has(baseId + '_notice'))) continue;
+      saved += (await saveProactiveChatMessages(event, cfg && cfg.aiName)).saved;
+    }
+    return saved;
+  } catch (e) {
+    console.error('[proactive-msg] Backfill error:', e.message);
+    return 0;
+  }
 }
 
 // ==================== API ENDPOINTS ====================
@@ -2528,10 +2636,44 @@ app.post('/api/sync-messages', async (req, res) => {
   }
 });
 
+// ── Chat message read path (Supabase → frontend) ──
+app.get('/api/chat-messages', async (req, res) => {
+  const { projectId, windowId, targetWindowId, since } = req.query;
+  if (!supabase) return res.json({ messages: [] });
+  if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
+  try {
+    // Repair missing legacy proactive rows on every pull; the helper only upserts IDs that are absent.
+    if (targetWindowId) await backfillProactiveChatMessages(projectId, targetWindowId);
+    let query = supabase.from('chat_messages')
+      .select('project_id, window_id, message_id, role, content, token_usage, created_at, metadata')
+      .eq('project_id', projectId)
+      .contains('metadata', { proactive: true })
+      .order('created_at', { ascending: true })
+      .limit(500);
+    if (windowId) query = query.eq('window_id', windowId);
+    if (since) query = query.gt('created_at', since);
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ messages: (data || []).map(row => ({
+      projectId: row.project_id,
+      windowId: row.window_id,
+      messageId: row.message_id,
+      role: row.role,
+      content: row.content || '',
+      tokenUsage: row.token_usage || 0,
+      createdAt: row.created_at,
+      metadata: row.metadata || {}
+    })) });
+  } catch (e) {
+    console.error('[api] GET /api/chat-messages error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/system-events', async (req, res) => {
   const { projectId, since } = req.query;
   const events = await loadSystemEvents(projectId, since);
-  res.json({ events: events.slice(0, 20) });
+  res.json({ events: events.slice(0, 100) });
 });
 
 // ── Litter thoughts endpoint (cloud-synced cat litter box) ──
@@ -3119,10 +3261,11 @@ async function checkTodoWakeUps() {
     await saveDailyCounts(todo.project_id, cfg);  // persist daily counts atomically
 
     // Build wake-up message via LLM
+    const triggeredAt = now.toISOString();
     const wakeContent = await buildTodoWakeMessage(todo, cfg);
 
     // Store system event in Supabase
-    await saveSystemEvent({
+    const savedWakeEvent = await saveSystemEvent({
       projectId: todo.project_id,
       chatId: todo.chat_id || cfg._chatId || '',
       type: 'todo_wake',
@@ -3130,10 +3273,25 @@ async function checkTodoWakeUps() {
       todoTitle: todo.title,
       driveKey: 'todo',
       content: wakeContent,
-      timestamp: now.toISOString(),
+      timestamp: triggeredAt,
       pushSent: false,
       _hasContext: true
     });
+    if (savedWakeEvent && (todo.chat_id || cfg._chatId)) {
+      try {
+        await saveProactiveChatMessages({
+          id: savedWakeEvent.id,
+          projectId: todo.project_id,
+          chatId: todo.chat_id || cfg._chatId,
+          type: 'todo_wake',
+          driveKey: 'todo',
+          content: wakeContent,
+          timestamp: triggeredAt
+        }, cfg.aiName);
+      } catch (e) {
+        console.error('[todo-wake] chat_messages upsert error:', e.message);
+      }
+    }
 
     // Mark todo as triggered
     await supabase.from('project_todos').update({ triggered: true }).eq('id', todo.id);
@@ -3857,6 +4015,7 @@ async function checkProjectDesires(pid, cfg) {
   const driveLabel = labels[driveKey] || driveKey;
 
   try {
+    const triggeredAt = new Date().toISOString();
     // Call our own /api/chat (non-streaming) to reuse model format resolution, proxy, error handling.
     // Uses shadow messages so the AI shares the same personality and context as window chats.
     const llmResp = await fetch(`http://localhost:${PORT}/api/chat`, {
@@ -3903,33 +4062,13 @@ async function checkProjectDesires(pid, cfg) {
     const postDecayValue = Math.floor(driveValue * 0.2);
     const decayedValue = postDecayValue;  // alias for Step 6
     const chatId = cfg._chatId || '';
-    const nowISO = new Date().toISOString();
+    const nowISO = triggeredAt;
 
     // ── Step A: Write to business tables by action type ──
     let _capturedTodoId = null;
     let _capturedTodoTitle = null;
     if (supabase) {
       try {
-        // A1: If there's a clean message, store in chat_messages
-        if (cleanMessage && chatId) {
-          const proactiveMsgId = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
-          const { error: msgErr } = await supabase.from('chat_messages').upsert({
-            project_id: pid,
-            window_id: chatId,
-            message_id: proactiveMsgId,
-            role: 'assistant',
-            content: cleanMessage,
-            token_usage: 0,
-            created_at: nowISO,
-            metadata: { proactive: true, drive_key: driveKey, post_decay_value: postDecayValue }
-          }, { onConflict: 'message_id' });
-          if (msgErr) {
-            console.error('[cron] chat_messages upsert error:', msgErr.message, msgErr.code, msgErr.details);
-          } else {
-            console.log('[cron] Proactive message saved to chat_messages:', proactiveMsgId);
-          }
-        }
-
         // Warn if LLM produced multiple actions — only the primary one will execute
         const actionKeys = Object.keys(actions);
         if (actionKeys.length > 1) {
@@ -4039,13 +4178,14 @@ async function checkProjectDesires(pid, cfg) {
     }
 
     // ── Step B: Store system event (unified audit log + frontend polling source) ──
+    const eventContent = cleanMessage || (actions.litter || (actions.diary && actions.diary.body) || (actions.todo) || (actions.status) || (cfg._userStatus || '') || '');
     const savedEvent = await saveSystemEvent({
       projectId: pid,
       chatId: chatId,
       type: actionType,
       driveKey: driveKey,
       postDecayValue: postDecayValue,
-      content: cleanMessage || (actions.litter || (actions.diary && actions.diary.body) || (actions.todo) || (actions.status) || (cfg._userStatus || '') || ''),
+      content: eventContent,
       todoId: _capturedTodoId || null,
       todoTitle: _capturedTodoTitle || null,
       timestamp: nowISO,
@@ -4055,6 +4195,20 @@ async function checkProjectDesires(pid, cfg) {
     if (!savedEvent || !savedEvent.id) {
       console.error('[cron] saveSystemEvent FAILED for project', pid, 'drive', driveKey,
         '— event may still be accessible via business table');
+    } else if (chatId) {
+      try {
+        await saveProactiveChatMessages({
+          id: savedEvent.id,
+          projectId: pid,
+          chatId,
+          type: actionType,
+          driveKey,
+          content: eventContent,
+          timestamp: nowISO
+        }, cfg.aiName);
+      } catch (e) {
+        console.error('[cron] chat_messages proactive upsert error:', e.message);
+      }
     }
 
     // ── Step C: Send push notification ──
