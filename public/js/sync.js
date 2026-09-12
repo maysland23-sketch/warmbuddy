@@ -116,6 +116,7 @@ var SyncModule = (function() {
   function syncProjectConfigToBackend(updateChatTime) {
     var store = AppCore.getStore();
     var proj = getActiveProject(); if (!proj) return;
+    if (proj.id === 'claude-code-test' || proj.runtime === 'agent-gateway') return;
     var chat = getActiveChatObj();
     var cfg = getActiveApiConfig();
     var apiKey = cfg.apiKey || store.apiKey || '';

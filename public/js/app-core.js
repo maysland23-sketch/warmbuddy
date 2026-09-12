@@ -18,6 +18,8 @@ var AppCore = (function() {
     : 'https://warmbuddy.onrender.com';
   var VAPID_PUBLIC_KEY = 'BMxMi0X5umwzfA8ZZHJPuiGCKpH-nY53Eo3IaljnnML1F1oUXdB7kftY_e5oCIIMxMWKujGTdBp5VhS6BQjyKR4';
   var USER_NAME = 'mays';
+  var CLAUDE_CODE_TEST_PROJECT_ID = 'claude-code-test';
+  var AGENT_GATEWAY_RUNTIME = 'agent-gateway';
 
   // ═══════════════════════════════════════════
   //  Private state
@@ -312,6 +314,54 @@ var AppCore = (function() {
       aiVoice: _store.aiSettings && _store.aiSettings.aiVoice !== undefined ? _store.aiSettings.aiVoice : false,
       webSearch: _store.aiSettings && _store.aiSettings.webSearch !== undefined ? _store.aiSettings.webSearch : false
     };
+  }
+
+  function ensureClaudeCodeTestProject() {
+    var project = _store.projects.find(function(p) { return p.id === CLAUDE_CODE_TEST_PROJECT_ID; });
+    var changed = false;
+    if (!project) {
+      project = {
+        id: CLAUDE_CODE_TEST_PROJECT_ID,
+        name: 'Claude Code Test',
+        runtime: AGENT_GATEWAY_RUNTIME,
+        preference: '',
+        aiName: 'warmbuddy',
+        apiConfig: { apiKey: '', endpoint: '', model: '', enabled: true },
+        memories: [],
+        chats: []
+      };
+      _store.projects.push(project);
+      changed = true;
+    }
+    if (project.runtime !== AGENT_GATEWAY_RUNTIME) { project.runtime = AGENT_GATEWAY_RUNTIME; changed = true; }
+    if (!Array.isArray(project.memories)) { project.memories = []; changed = true; }
+    if (!Array.isArray(project.chats)) { project.chats = []; changed = true; }
+    if (!project.apiConfig) { project.apiConfig = { apiKey: '', endpoint: '', model: '', enabled: true }; changed = true; }
+    if (project.apiConfig.enabled !== true) { project.apiConfig.enabled = true; changed = true; }
+    if (project.chats.length === 0) {
+      project.chats.push({
+        id: 'claude-code-test-chat',
+        name: 'reading',
+        aiSettings: { autoDateTime: true, autoWeather: false, aiVoice: false, webSearch: false },
+        emailEnabled: false,
+        enabledTools: [],
+        sharedMemoryIds: [],
+        weeklyExports: [],
+        artifacts: [],
+        messages: [],
+        chatTokens: 0,
+        lastConversationDate: null,
+        lastActiveDate: null,
+        lastInteractionTime: null,
+        _messageCount: 0,
+        _lastSummaryIdx: 0,
+        _sharedMemoryLoaded: true,
+        _sharedMemoryLoadedAt: new Date().toISOString()
+      });
+      changed = true;
+    }
+    if (changed) saveStore();
+    return project;
   }
 
   // ═══════════════════════════════════════════
@@ -713,6 +763,7 @@ var AppCore = (function() {
         proj6.memories.splice(j5, 1);
       }
     }
+    ensureClaudeCodeTestProject();
   }
 
   // ═══════════════════════════════════════════
@@ -724,6 +775,8 @@ var AppCore = (function() {
     BACKEND_URL: BACKEND_URL,
     VAPID_PUBLIC_KEY: VAPID_PUBLIC_KEY,
     USER_NAME: USER_NAME,
+    CLAUDE_CODE_TEST_PROJECT_ID: CLAUDE_CODE_TEST_PROJECT_ID,
+    AGENT_GATEWAY_RUNTIME: AGENT_GATEWAY_RUNTIME,
 
     // Utilities
     gid: gid,
@@ -752,6 +805,7 @@ var AppCore = (function() {
     getActiveApiConfig: getActiveApiConfig,
     getActiveChatObj: getActiveChatObj,
     getActiveChatAiSettings: getActiveChatAiSettings,
+    ensureClaudeCodeTestProject: ensureClaudeCodeTestProject,
 
     // Module registry
     register: register,

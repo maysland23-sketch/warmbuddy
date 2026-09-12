@@ -55,6 +55,9 @@ var ChatModule = (function() {
   function getProjectById(pid) { return AppCore.getProjectById(pid); }
   function getActiveApiConfig() { return AppCore.getActiveApiConfig(); }
   function getActiveChatObj() { return AppCore.getActiveChatObj(); }
+  function isAgentGatewayProject(project) {
+    return !!project && project.id === 'claude-code-test';
+  }
 
   function getActiveChatObjForProject(pid) {
     var store = AppCore.getStore();
@@ -69,6 +72,7 @@ var ChatModule = (function() {
     var store = AppCore.getStore();
     var proj = getActiveProject();
     if (!proj) return;
+    if (isAgentGatewayProject(proj)) return;
     if (!proj.apiConfig) proj.apiConfig = {};
     proj.apiConfig.model = modelId;
     AppCore.saveStore();
@@ -2040,10 +2044,16 @@ var ChatModule = (function() {
     var bubbleTime = AppCore.nowTime();
 
     try {
-      var response = await fetch(AppCore.BACKEND_URL + '/api/chat/stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      var agentGatewayProject = isAgentGatewayProject(getActiveProject());
+      var requestUrl = AppCore.BACKEND_URL + (agentGatewayProject ? '/api/agent/stream' : '/api/chat/stream');
+      var requestBody = agentGatewayProject
+        ? {
+          projectId: 'claude-code-test',
+          windowId: chat.id,
+          interactionId: interactionId,
+          messages: apiMessages
+        }
+        : {
           apiKey: cfg.apiKey,
           endpoint: cfg.endpoint,
           model: cfg.model,
@@ -2054,7 +2064,11 @@ var ChatModule = (function() {
           enabledToolIds: chat.enabledTools || [],
           enabledToolDefs: enabledToolDefs,
           messages: apiMessages
-        })
+        };
+      var response = await fetch(requestUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
       });
 
       if (!response.ok) {
