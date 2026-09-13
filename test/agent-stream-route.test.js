@@ -22,8 +22,9 @@ function stopApi(server) {
 test('agent stream forwards canonical context and streams Gateway deltas to WarmBuddy SSE', async () => {
   const calls = [];
   app.locals.agentGatewayClient = {
-    run: async ({ onEvent, ...request }) => {
+    run: async ({ onEvent, onHeartbeat, ...request }) => {
       calls.push(request);
+      onHeartbeat();
       onEvent({ type: 'delta', text: 'Gateway ' });
       onEvent({ type: 'delta', text: 'reply' });
       onEvent({ type: 'result', text: 'Gateway reply' });
@@ -50,12 +51,19 @@ test('agent stream forwards canonical context and streams Gateway deltas to Warm
     const text = await response.text();
 
     assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /^text\/event-stream/);
+    assert.equal(response.headers.get('cache-control'), 'no-cache, no-transform');
+    assert.equal(response.headers.get('content-length'), null);
+    assert.equal(response.headers.get('x-accel-buffering'), 'no');
     assert.equal(calls.length, 1);
     assert.equal(calls[0].conversationId, 'chat-1');
     assert.match(calls[0].prompt, /CURRENT USER MESSAGE:/);
     assert.match(calls[0].prompt, /reading_import_book/);
     assert.match(calls[0].prompt, /~\/neverland\/books\//);
     assert.match(calls[0].prompt, /hello/);
+    assert.match(text, /^: connected\n\n/);
+    assert.match(text, /: heartbeat\n\n/);
+    assert.doesNotMatch(text, /data: {"text":"heartbeat"}/);
     assert.match(text, /data: {"text":"Gateway "}/);
     assert.match(text, /data: {"text":"reply"}/);
     assert.equal((text.match(/data: {"text":"Gateway reply"}/g) || []).length, 0);
@@ -97,6 +105,8 @@ test('agent stream writes the first Gateway delta before run resolves', async ()
       responsePromise,
       new Promise((_, reject) => setTimeout(() => reject(new Error('stream did not start')), 100))
     ]);
+    assert.equal(response.headers.get('content-length'), null);
+    assert.match(response.headers.get('content-type'), /^text\/event-stream/);
     release();
     const text = await response.text();
     assert.match(text, /data: {"text":"first"}/);

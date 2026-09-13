@@ -62,7 +62,7 @@ function gatewayEventError(payload) {
   };
 }
 
-async function consumeGatewaySse(body, onEvent) {
+async function consumeGatewaySse(body, onEvent, onHeartbeat) {
   if (!body || typeof body.getReader !== 'function') {
     throw new AgentGatewayError('Agent Gateway returned no SSE body', {
       status: 502,
@@ -122,7 +122,10 @@ async function consumeGatewaySse(body, onEvent) {
   };
 
   const processLine = line => {
-    if (line.startsWith(':')) return;
+    if (line.startsWith(':')) {
+      if (line.slice(1).trim() === 'heartbeat') onHeartbeat?.();
+      return;
+    }
     if (!line) {
       dispatch();
       return;
@@ -195,7 +198,7 @@ function createAgentGatewayClient({
   const timeout = Math.max(1, Number(timeoutMs) || DEFAULT_AGENT_GATEWAY_TIMEOUT_MS);
 
   return {
-    async run({ conversationId, prompt, signal, onEvent }) {
+    async run({ conversationId, prompt, signal, onEvent, onHeartbeat }) {
       if (!String(conversationId || '').trim()) {
         throw new AgentGatewayError('Missing Gateway conversation id', {
           status: 400,
@@ -257,7 +260,7 @@ function createAgentGatewayClient({
           );
         }
 
-        const result = await consumeGatewaySse(response.body, onEvent);
+        const result = await consumeGatewaySse(response.body, onEvent, onHeartbeat);
         if (!result.content) {
           throw new AgentGatewayError('Agent Gateway returned no assistant content', {
             status: 502,

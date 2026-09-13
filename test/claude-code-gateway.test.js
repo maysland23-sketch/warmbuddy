@@ -20,6 +20,7 @@ function sseResponse(chunks) {
 test('run posts the fixed project and parses the Gateway SSE stream', async () => {
   let request;
   const events = [];
+  let heartbeatCount = 0;
   const client = createAgentGatewayClient({
     baseUrl: 'https://gateway.test/',
     token: 'secret',
@@ -39,7 +40,8 @@ test('run posts the fixed project and parses the Gateway SSE stream', async () =
   const result = await client.run({
     conversationId: 'c1',
     prompt: 'hello',
-    onEvent: event => events.push(event)
+    onEvent: event => events.push(event),
+    onHeartbeat: () => { heartbeatCount += 1; }
   });
 
   assert.equal(result.content, 'Hello');
@@ -53,6 +55,7 @@ test('run posts the fixed project and parses the Gateway SSE stream', async () =
   });
   assert.deepEqual(events.map(event => event.type), ['start', 'delta', 'delta', 'result', 'done']);
   assert.deepEqual(events.filter(event => event.text).map(event => event.text), ['Hel', 'lo', 'Hello']);
+  assert.equal(heartbeatCount, 1);
 });
 
 test('run converts an upstream error event into a typed error', async () => {

@@ -81,6 +81,10 @@ function writeAgentGatewaySse(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+function writeAgentGatewayComment(res, comment) {
+  res.write(`: ${comment}\n\n`);
+}
+
 function agentGatewayErrorStatus(error) {
   if (error?.code === 'AGENT_GATEWAY_TIMEOUT') return 504;
   if (error?.code === 'AGENT_GATEWAY_NOT_CONFIGURED') return 503;
@@ -1944,7 +1948,10 @@ app.post('/api/agent/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.removeHeader('Content-Length');
   res.flushHeaders();
+  writeAgentGatewayComment(res, 'connected');
 
   let streamedText = '';
   let finished = false;
@@ -1983,7 +1990,10 @@ app.post('/api/agent/stream', async (req, res) => {
       conversationId: String(windowId),
       prompt: serializeAgentGatewayPrompt(messages),
       signal: disconnectController.signal,
-      onEvent: handleGatewayEvent
+      onEvent: handleGatewayEvent,
+      onHeartbeat: () => {
+        if (!disconnected && !res.destroyed) writeAgentGatewayComment(res, 'heartbeat');
+      }
     });
     if (disconnected || res.destroyed) return;
 
