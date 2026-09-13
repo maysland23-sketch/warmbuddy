@@ -59,6 +59,9 @@ test('run posts the fixed project and parses the Gateway SSE stream', async () =
 });
 
 test('run converts an upstream error event into a typed error', async () => {
+  const logs = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => logs.push(args);
   const client = createAgentGatewayClient({
     baseUrl: 'http://gateway.test',
     token: 'secret',
@@ -67,13 +70,25 @@ test('run converts an upstream error event into a typed error', async () => {
     ])
   });
 
-  await assert.rejects(() => client.run({ conversationId: 'c1', prompt: 'hello' }), error => {
-    assert.equal(error.name, 'AgentGatewayError');
-    assert.equal(error.status, 502);
-    assert.equal(error.code, 'PROJECT_NOT_ALLOWED');
-    assert.equal(error.message, 'Gateway rejected');
-    return true;
-  });
+  try {
+    await assert.rejects(() => client.run({ conversationId: 'c1', prompt: 'hello' }), error => {
+      assert.equal(error.name, 'AgentGatewayError');
+      assert.equal(error.status, 502);
+      assert.equal(error.code, 'PROJECT_NOT_ALLOWED');
+      assert.equal(error.message, 'Gateway rejected');
+      return true;
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0][0], '[agent-gateway] upstream SSE error');
+  assert.equal(logs[0][1].status, 200);
+  assert.equal(logs[0][1].body.error, 'Gateway rejected');
+  assert.equal(logs[0][1].body.code, 'PROJECT_NOT_ALLOWED');
+  assert.equal(logs[0][1].AGENT_GATEWAY_URL, 'http://gateway.test');
+  assert.equal(logs[0][1].projectId, 'warmbuddy-test');
+  assert.doesNotMatch(JSON.stringify(logs), /Authorization|Bearer|secret|AGENT_GATEWAY_TOKEN/);
 });
 
 test('run converts Gateway failure and timeout into typed errors', async () => {

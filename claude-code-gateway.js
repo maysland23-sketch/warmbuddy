@@ -62,7 +62,7 @@ function gatewayEventError(payload) {
   };
 }
 
-async function consumeGatewaySse(body, onEvent, onHeartbeat) {
+async function consumeGatewaySse(body, onEvent, onHeartbeat, onError) {
   if (!body || typeof body.getReader !== 'function') {
     throw new AgentGatewayError('Agent Gateway returned no SSE body', {
       status: 502,
@@ -107,6 +107,7 @@ async function consumeGatewaySse(body, onEvent, onHeartbeat) {
         resultPayload = payload;
       }
     } else if (eventName === 'error') {
+      onError?.(payload);
       const upstreamError = gatewayEventError(payload);
       throw new AgentGatewayError(upstreamError.message || 'Agent Gateway upstream failure', {
         status: 502,
@@ -264,7 +265,15 @@ function createAgentGatewayClient({
           );
         }
 
-        const result = await consumeGatewaySse(response.body, onEvent, onHeartbeat);
+        const result = await consumeGatewaySse(response.body, onEvent, onHeartbeat, payload => {
+          console.error('[agent-gateway] upstream SSE error', {
+            status: response.status,
+            statusText: response.statusText,
+            body: payload,
+            AGENT_GATEWAY_URL: gatewayUrl,
+            projectId: AGENT_GATEWAY_PROJECT_ID
+          });
+        });
         if (!result.content) {
           throw new AgentGatewayError('Agent Gateway returned no assistant content', {
             status: 502,
