@@ -30,6 +30,147 @@ function normalizeBaseUrl(value) {
   }
 }
 
+const AGENT_GATEWAY_EVENT_TYPES = new Set(['start', 'delta', 'result', 'error', 'done']);
+
+function parseGatewayEventData(rawData) {
+  if (!rawData) return null;
+  try {
+    return JSON.parse(rawData);
+  } catch (error) {
+    throw new AgentGatewayError('Agent Gateway returned invalid SSE data', {
+      status: 502,
+      code: 'AGENT_GATEWAY_INVALID_RESPONSE',
+      cause: error
+    });
+  }
+}
+
+function gatewayEventText(payload) {
+  if (typeof payload === 'string') return payload;
+  if (!payload || typeof payload !== 'object') return '';
+  if (typeof payload.text === 'string') return payload.text;
+  if (typeof payload.result === 'string') return payload.result;
+  return '';
+}
+
+function gatewayEventError(payload) {
+  if (typeof payload === 'string') return { message: payload };
+  if (!payload || typeof payload !== 'object') return {};
+  return {
+    message: payload.error || payload.message,
+    code: payload.code
+  };
+}
+
+async function consumeGatewaySse(body, onEvent) {
+  if (!body || typeof body.getReader !== 'function') {
+    throw new AgentGatewayError('Agent Gateway returned no SSE body', {
+      status: 502,
+      code: 'AGENT_GATEWAY_INVALID_RESPONSE'
+    });
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let eventName = '';
+  let dataLines = [];
+  let doneSeen = false;
+  let streamedContent = '';
+  let resultContent = '';
+  let resultPayload = null;
+
+  const dispatch = () => {
+    if (!eventName && dataLines.length === 0) return;
+    if (!AGENT_GATEWAY_EVENT_TYPES.has(eventName)) {
+      throw new AgentGatewayError('Agent Gateway returned an invalid SSE event', {
+        status: 502,
+        code: 'AGENT_GATEWAY_INVALID_RESPONSE'
+      });
+    }
+
+    const payload = parseGatewayEventData(dataLines.join('\n'));
+    const event = { type: eventName, payload };
+
+    if (eventName === 'delta' || eventName === 'result') {
+      const text = gatewayEventText(payload);
+      if (eventName === 'delta' && !text) {
+        throw new AgentGatewayError('Agent Gateway returned an empty delta', {
+          status: 502,
+          code: 'AGENT_GATEWAY_INVALID_RESPONSE'
+        });
+      }
+      event.text = text;
+      if (eventName === 'delta') streamedContent += text;
+      else {
+        resultContent = text;
+        resultPayload = payload;
+      }
+    } else if (eventName === 'error') {
+      const upstreamError = gatewayEventError(payload);
+      throw new AgentGatewayError(upstreamError.message || 'Agent Gateway upstream failure', {
+        status: 502,
+        code: String(upstreamError.code || 'AGENT_GATEWAY_UPSTREAM_ERROR')
+      });
+    } else if (eventName === 'done') {
+      doneSeen = true;
+    }
+
+    onEvent?.(event);
+    eventName = '';
+    dataLines = [];
+  };
+
+  const processLine = line => {
+    if (line.startsWith(':')) return;
+    if (!line) {
+      dispatch();
+      return;
+    }
+    if (line.startsWith('event:')) {
+      eventName = line.slice('event:'.length).trim();
+      return;
+    }
+    if (line.startsWith('data:')) {
+      const value = line.slice('data:'.length);
+      dataLines.push(value.startsWith(' ') ? value.slice(1) : value);
+    }
+  };
+
+  while (!doneSeen) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex;
+    while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+      let line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line.endsWith('\r')) line = line.slice(0, -1);
+      processLine(line);
+      if (doneSeen) break;
+    }
+  }
+
+  if (!doneSeen) {
+    buffer += decoder.decode();
+    if (buffer) processLine(buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer);
+    if (eventName || dataLines.length > 0) dispatch();
+  }
+  if (!doneSeen) {
+    throw new AgentGatewayError('Agent Gateway SSE ended before done', {
+      status: 502,
+      code: 'AGENT_GATEWAY_INVALID_RESPONSE'
+    });
+  }
+
+  return {
+    content: resultContent || streamedContent,
+    sessionId: resultPayload?.sessionId || null,
+    usage: resultPayload?.usage || null,
+    resumed: Boolean(resultPayload?.resumed)
+  };
+}
+
 function createAgentGatewayClient({
   baseUrl = process.env.AGENT_GATEWAY_URL,
   token = process.env.AGENT_GATEWAY_TOKEN,
@@ -54,7 +195,7 @@ function createAgentGatewayClient({
   const timeout = Math.max(1, Number(timeoutMs) || DEFAULT_AGENT_GATEWAY_TIMEOUT_MS);
 
   return {
-    async run({ conversationId, prompt, signal }) {
+    async run({ conversationId, prompt, signal, onEvent }) {
       if (!String(conversationId || '').trim()) {
         throw new AgentGatewayError('Missing Gateway conversation id', {
           status: 400,
@@ -84,9 +225,8 @@ function createAgentGatewayClient({
         controller.abort();
       }, timeout);
 
-      let response;
       try {
-        response = await fetchImpl(`${gatewayUrl}/v1/agent/run`, {
+        const response = await fetchImpl(`${gatewayUrl}/v1/agent/stream`, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
@@ -100,7 +240,33 @@ function createAgentGatewayClient({
           }),
           signal: controller.signal
         });
+
+        if (!response.ok) {
+          let payload = null;
+          try {
+            payload = await response.json();
+          } catch (error) {
+            // The status code still identifies the upstream failure.
+          }
+          throw new AgentGatewayError(
+            response.status >= 500 ? 'Agent Gateway upstream failure' : 'Agent Gateway rejected the request',
+            {
+              status: response.status >= 400 ? response.status : 502,
+              code: String(payload?.code || 'AGENT_GATEWAY_UPSTREAM_ERROR')
+            }
+          );
+        }
+
+        const result = await consumeGatewaySse(response.body, onEvent);
+        if (!result.content) {
+          throw new AgentGatewayError('Agent Gateway returned no assistant content', {
+            status: 502,
+            code: 'AGENT_GATEWAY_INVALID_RESPONSE'
+          });
+        }
+        return result;
       } catch (error) {
+        if (error instanceof AgentGatewayError) throw error;
         if (externallyAborted && !timedOut) {
           throw new AgentGatewayError('Agent Gateway request was aborted', {
             status: 499,
@@ -124,48 +290,6 @@ function createAgentGatewayClient({
         clearTimeout(timeoutHandle);
         signal?.removeEventListener('abort', abortFromCaller);
       }
-
-      let payload;
-      try {
-        payload = await response.json();
-      } catch (error) {
-        throw new AgentGatewayError('Agent Gateway returned invalid JSON', {
-          status: 502,
-          code: 'AGENT_GATEWAY_INVALID_RESPONSE',
-          cause: error
-        });
-      }
-
-      if (!response.ok || payload?.ok === false) {
-        throw new AgentGatewayError(
-          response.status >= 500 ? 'Agent Gateway upstream failure' : 'Agent Gateway rejected the request',
-          {
-            status: response.status >= 400 ? response.status : 502,
-            code: String(payload?.code || 'AGENT_GATEWAY_UPSTREAM_ERROR')
-          }
-        );
-      }
-
-      const content = typeof payload?.result === 'string'
-        ? payload.result
-        : typeof payload?.result?.content === 'string'
-          ? payload.result.content
-          : typeof payload?.result?.text === 'string'
-            ? payload.result.text
-            : '';
-      if (!content) {
-        throw new AgentGatewayError('Agent Gateway returned no assistant content', {
-          status: 502,
-          code: 'AGENT_GATEWAY_INVALID_RESPONSE'
-        });
-      }
-
-      return {
-        content,
-        sessionId: payload.sessionId || null,
-        usage: payload.usage || null,
-        resumed: Boolean(payload.resumed)
-      };
     }
   };
 }

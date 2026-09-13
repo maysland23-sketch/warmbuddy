@@ -1941,19 +1941,57 @@ app.post('/api/agent/stream', async (req, res) => {
     if (!res.writableFinished) abortForDisconnect();
   });
 
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  let streamedText = '';
+  let finished = false;
+  const writeDone = () => {
+    if (finished || res.destroyed) return;
+    res.write('data: [DONE]\n\n');
+    finished = true;
+  };
+  const handleGatewayEvent = event => {
+    if (event.type === 'delta') {
+      const text = String(event.text || '');
+      if (text) {
+        streamedText += text;
+        writeAgentGatewaySse(res, { text });
+      }
+      return;
+    }
+    if (event.type === 'result') {
+      const text = String(event.text || '');
+      if (!text) return;
+      if (!streamedText) {
+        streamedText = text;
+        writeAgentGatewaySse(res, { text });
+      } else if (text.startsWith(streamedText)) {
+        const suffix = text.slice(streamedText.length);
+        streamedText = text;
+        if (suffix) writeAgentGatewaySse(res, { text: suffix });
+      }
+      return;
+    }
+    if (event.type === 'done') writeDone();
+  };
+
   try {
     const result = await client.run({
       conversationId: String(windowId),
       prompt: serializeAgentGatewayPrompt(messages),
-      signal: disconnectController.signal
+      signal: disconnectController.signal,
+      onEvent: handleGatewayEvent
     });
     if (disconnected || res.destroyed) return;
 
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    writeAgentGatewaySse(res, { text: result.content });
-    res.write('data: [DONE]\n\n');
+    if (!streamedText && result?.content) {
+      streamedText = result.content;
+      writeAgentGatewaySse(res, { text: result.content });
+    }
+    writeDone();
     res.end();
   } catch (error) {
     if (disconnected || error?.code === 'AGENT_GATEWAY_ABORTED') return;
@@ -1963,7 +2001,8 @@ app.post('/api/agent/stream', async (req, res) => {
       code: error.code || 'AGENT_GATEWAY_ERROR'
     };
     if (res.headersSent) {
-      writeAgentGatewaySse(res, payload);
+      if (!finished) writeAgentGatewaySse(res, payload);
+      writeDone();
       res.end();
     } else {
       res.status(status).json(payload);
