@@ -1,5 +1,11 @@
+const { createHash } = require('node:crypto');
+
 const AGENT_GATEWAY_PROJECT_ID = 'warmbuddy-test';
 const DEFAULT_AGENT_GATEWAY_TIMEOUT_MS = 120000;
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
 
 class AgentGatewayError extends Error {
   constructor(message, { status = 502, code = 'AGENT_GATEWAY_ERROR', cause } = {}) {
@@ -230,12 +236,23 @@ function createAgentGatewayClient({
       }, timeout);
 
       try {
+        const authorization = `Bearer ${gatewayToken}`;
+        const headers = {
+          'content-type': 'application/json',
+          authorization
+        };
+        console.error('[agent-gateway] auth diagnostics', {
+          tokenConfigured: Boolean(gatewayToken),
+          tokenLength: gatewayToken.length,
+          tokenSha256: sha256(gatewayToken),
+          authorizationPresent: Boolean(headers.authorization),
+          authorizationLength: headers.authorization.length,
+          authorizationBearerPrefix: headers.authorization.startsWith('Bearer '),
+          authorizationTokenSha256: sha256(headers.authorization.slice('Bearer '.length))
+        });
         const response = await fetchImpl(`${gatewayUrl}/v1/agent/stream`, {
           method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${gatewayToken}`
-          },
+          headers,
           body: JSON.stringify({
             projectId: AGENT_GATEWAY_PROJECT_ID,
             conversationId: String(conversationId),

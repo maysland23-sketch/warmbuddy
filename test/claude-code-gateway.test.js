@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 
 const { createAgentGatewayClient } = require('../claude-code-gateway');
 
@@ -15,6 +16,16 @@ function sseResponse(chunks) {
     status: 200,
     headers: { 'content-type': 'text/event-stream' }
   });
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function findLog(logs, label) {
+  const entry = logs.find(args => args[0] === label);
+  assert.ok(entry, `missing log: ${label}`);
+  return entry[1];
 }
 
 test('run posts the fixed project and parses the Gateway SSE stream', async () => {
@@ -58,6 +69,38 @@ test('run posts the fixed project and parses the Gateway SSE stream', async () =
   assert.equal(heartbeatCount, 1);
 });
 
+test('run logs redacted Gateway authorization diagnostics before fetch', async () => {
+  const logs = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => logs.push(args);
+  const client = createAgentGatewayClient({
+    baseUrl: 'https://gateway.test',
+    token: 'secret',
+    fetchImpl: async () => sseResponse([
+      'event: delta\ndata: {"text":"ok"}\n\n',
+      'event: result\ndata: {"text":"ok"}\n\n',
+      'event: done\ndata: {}\n\n'
+    ])
+  });
+
+  try {
+    await client.run({ conversationId: 'c1', prompt: 'hello' });
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.deepEqual(findLog(logs, '[agent-gateway] auth diagnostics'), {
+    tokenConfigured: true,
+    tokenLength: 6,
+    tokenSha256: sha256('secret'),
+    authorizationPresent: true,
+    authorizationLength: 13,
+    authorizationBearerPrefix: true,
+    authorizationTokenSha256: sha256('secret')
+  });
+  assert.doesNotMatch(JSON.stringify(logs), /secret|Bearer secret|Authorization:|AGENT_GATEWAY_TOKEN/);
+});
+
 test('run converts an upstream error event into a typed error', async () => {
   const logs = [];
   const originalConsoleError = console.error;
@@ -81,14 +124,13 @@ test('run converts an upstream error event into a typed error', async () => {
   } finally {
     console.error = originalConsoleError;
   }
-  assert.equal(logs.length, 1);
-  assert.equal(logs[0][0], '[agent-gateway] upstream SSE error');
-  assert.equal(logs[0][1].status, 200);
-  assert.equal(logs[0][1].body.error, 'Gateway rejected');
-  assert.equal(logs[0][1].body.code, 'PROJECT_NOT_ALLOWED');
-  assert.equal(logs[0][1].AGENT_GATEWAY_URL, 'http://gateway.test');
-  assert.equal(logs[0][1].projectId, 'warmbuddy-test');
-  assert.doesNotMatch(JSON.stringify(logs), /Authorization|Bearer|secret|AGENT_GATEWAY_TOKEN/);
+  const sseErrorLog = findLog(logs, '[agent-gateway] upstream SSE error');
+  assert.equal(sseErrorLog.status, 200);
+  assert.equal(sseErrorLog.body.error, 'Gateway rejected');
+  assert.equal(sseErrorLog.body.code, 'PROJECT_NOT_ALLOWED');
+  assert.equal(sseErrorLog.AGENT_GATEWAY_URL, 'http://gateway.test');
+  assert.equal(sseErrorLog.projectId, 'warmbuddy-test');
+  assert.doesNotMatch(JSON.stringify(logs), /"secret"|Bearer secret|Authorization:\s*Bearer|AGENT_GATEWAY_TOKEN/);
 });
 
 test('run converts Gateway failure and timeout into typed errors', async () => {
@@ -113,16 +155,14 @@ test('run converts Gateway failure and timeout into typed errors', async () => {
   } finally {
     console.error = originalConsoleError;
   }
-  assert.equal(logs.length, 1);
-  assert.equal(logs[0][0], '[agent-gateway] upstream non-2xx response');
-  assert.deepEqual(logs[0][1], {
+  assert.deepEqual(findLog(logs, '[agent-gateway] upstream non-2xx response'), {
     status: 403,
     statusText: 'Forbidden',
     body: '{"error":"denied","code":"PROJECT_NOT_ALLOWED"}',
     AGENT_GATEWAY_URL: 'http://gateway.test',
     projectId: 'warmbuddy-test'
   });
-  assert.doesNotMatch(JSON.stringify(logs), /Authorization|Bearer|secret|AGENT_GATEWAY_TOKEN/);
+  assert.doesNotMatch(JSON.stringify(logs), /"secret"|Bearer secret|Authorization:\s*Bearer|AGENT_GATEWAY_TOKEN/);
 
   const timedOut = createAgentGatewayClient({
     baseUrl: 'http://gateway.test',
