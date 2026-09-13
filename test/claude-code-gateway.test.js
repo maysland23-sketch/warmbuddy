@@ -77,17 +77,37 @@ test('run converts an upstream error event into a typed error', async () => {
 });
 
 test('run converts Gateway failure and timeout into typed errors', async () => {
+  const logs = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => logs.push(args);
   const failed = createAgentGatewayClient({
     baseUrl: 'http://gateway.test',
     token: 'secret',
-    fetchImpl: async () => new Response(JSON.stringify({ error: 'denied', code: 'PROJECT_NOT_ALLOWED' }), { status: 403 })
+    fetchImpl: async () => new Response(JSON.stringify({ error: 'denied', code: 'PROJECT_NOT_ALLOWED' }), {
+      status: 403,
+      statusText: 'Forbidden'
+    })
   });
-  await assert.rejects(() => failed.run({ conversationId: 'c1', prompt: 'hello' }), error => {
-    assert.equal(error.name, 'AgentGatewayError');
-    assert.equal(error.status, 403);
-    assert.equal(error.code, 'PROJECT_NOT_ALLOWED');
-    return true;
+  try {
+    await assert.rejects(() => failed.run({ conversationId: 'c1', prompt: 'hello' }), error => {
+      assert.equal(error.name, 'AgentGatewayError');
+      assert.equal(error.status, 403);
+      assert.equal(error.code, 'PROJECT_NOT_ALLOWED');
+      return true;
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0][0], '[agent-gateway] upstream non-2xx response');
+  assert.deepEqual(logs[0][1], {
+    status: 403,
+    statusText: 'Forbidden',
+    body: '{"error":"denied","code":"PROJECT_NOT_ALLOWED"}',
+    AGENT_GATEWAY_URL: 'http://gateway.test',
+    projectId: 'warmbuddy-test'
   });
+  assert.doesNotMatch(JSON.stringify(logs), /Authorization|Bearer|secret|AGENT_GATEWAY_TOKEN/);
 
   const timedOut = createAgentGatewayClient({
     baseUrl: 'http://gateway.test',

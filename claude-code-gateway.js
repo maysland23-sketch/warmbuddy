@@ -245,12 +245,16 @@ function createAgentGatewayClient({
         });
 
         if (!response.ok) {
+          const upstreamBody = await response.text();
+          console.error('[agent-gateway] upstream non-2xx response', {
+            status: response.status,
+            statusText: response.statusText,
+            body: upstreamBody,
+            AGENT_GATEWAY_URL: gatewayUrl,
+            projectId: AGENT_GATEWAY_PROJECT_ID
+          });
           let payload = null;
-          try {
-            payload = await response.json();
-          } catch (error) {
-            // The status code still identifies the upstream failure.
-          }
+          try { payload = upstreamBody ? JSON.parse(upstreamBody) : null; } catch (error) {}
           throw new AgentGatewayError(
             response.status >= 500 ? 'Agent Gateway upstream failure' : 'Agent Gateway rejected the request',
             {
