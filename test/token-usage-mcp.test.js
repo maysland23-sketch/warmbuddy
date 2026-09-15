@@ -6,8 +6,14 @@ process.env.VERCEL = '1';
 process.env.SUPABASE_URL = '';
 process.env.SUPABASE_KEY = '';
 process.env.NODE_ENV = 'test';
+process.env.RENDER_PROXY_SECRET = 'server-secret-at-least-32-bytes-long';
 
 const app = require('../server');
+
+const PROXY_HEADERS = {
+  'content-type': 'application/json',
+  'x-warmbuddy-proxy-secret': process.env.RENDER_PROXY_SECRET
+};
 
 function readBody(req) {
   return new Promise(resolve => {
@@ -79,7 +85,7 @@ test('MCP stream returns usage for both LLM calls', async () => {
     };
     const response = await fetch('http://127.0.0.1:' + api.address().port + '/api/chat/stream', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: PROXY_HEADERS,
       body: JSON.stringify(body)
     });
     const text = await response.text();
@@ -117,7 +123,7 @@ test('regular stream sends usageEvent before the final DONE marker', async () =>
   try {
     const response = await fetch('http://127.0.0.1:' + api.address().port + '/api/chat/stream', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: PROXY_HEADERS,
       body: JSON.stringify({
         apiKey: 'fake',
         endpoint: 'http://127.0.0.1:' + llm.address().port + '/v1/chat/completions',

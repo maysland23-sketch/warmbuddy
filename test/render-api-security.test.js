@@ -1,5 +1,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+process.env.VERCEL = '1';
+process.env.NODE_ENV = 'test';
+process.env.RENDER = 'true';
+process.env.SUPABASE_URL = '';
+process.env.SUPABASE_KEY = '';
+process.env.RENDER_PROXY_SECRET = 'server-secret-at-least-32-bytes-long';
+process.env.APP_PUBLIC_ORIGIN = 'https://warmbuddy.vercel.app';
 
 const {
   RENDER_PROXY_HEADER,
@@ -11,6 +18,18 @@ const {
 } = require('../render-api-security');
 
 const TEST_SECRET = 'server-secret-at-least-32-bytes-long';
+
+const app = require('../server');
+
+function startApi() {
+  return new Promise(resolve => {
+    const server = app.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+function stopApi(server) {
+  return new Promise(resolve => server.close(resolve));
+}
 
 function invokeGuard(guard, supplied) {
   let nextCalled = false;
@@ -152,4 +171,55 @@ test('internal API fetch rejects non-api and absolute targets', async () => {
   });
   await assert.rejects(() => internalFetch('https://evil.example/api/chat'), /relative \/api path/);
   await assert.rejects(() => internalFetch('/healthz'), /relative \/api path/);
+});
+
+test('healthz is public while every api route requires the proxy secret', async () => {
+  const api = await startApi();
+  const origin = `http://127.0.0.1:${api.address().port}`;
+  try {
+    const health = await fetch(origin + '/healthz');
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { status: 'ok' });
+
+    const anonymous = await fetch(origin + '/api/health');
+    assert.equal(anonymous.status, 401);
+    assert.deepEqual(await anonymous.json(), {
+      error: 'Unauthorized',
+      code: 'RENDER_API_UNAUTHORIZED'
+    });
+
+    const authenticated = await fetch(origin + '/api/health', {
+      headers: { [RENDER_PROXY_HEADER]: TEST_SECRET }
+    });
+    assert.equal(authenticated.status, 200);
+  } finally {
+    await stopApi(api);
+  }
+});
+
+test('Render root redirects to the Vercel app without copying the password query', async () => {
+  const api = await startApi();
+  const origin = `http://127.0.0.1:${api.address().port}`;
+  try {
+    const response = await fetch(origin + '/?project=p1&chat=c1&pwd=legacy', { redirect: 'manual' });
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('location'), 'https://warmbuddy.vercel.app/?project=p1&chat=c1');
+  } finally {
+    await stopApi(api);
+  }
+});
+
+test('Render API guard runs before the JSON body parser', async () => {
+  const api = await startApi();
+  const origin = `http://127.0.0.1:${api.address().port}`;
+  try {
+    const response = await fetch(origin + '/api/health', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: 'x'.repeat(5 * 1024 * 1024 + 1)
+    });
+    assert.equal(response.status, 401);
+  } finally {
+    await stopApi(api);
+  }
 });

@@ -5,9 +5,15 @@ process.env.VERCEL = '1';
 process.env.SUPABASE_URL = '';
 process.env.SUPABASE_KEY = '';
 process.env.NODE_ENV = 'test';
+process.env.RENDER_PROXY_SECRET = 'server-secret-at-least-32-bytes-long';
 
 const app = require('../server');
 const { AgentGatewayError } = require('../claude-code-gateway');
+
+const PROXY_HEADERS = {
+  'content-type': 'application/json',
+  'x-warmbuddy-proxy-secret': process.env.RENDER_PROXY_SECRET
+};
 
 function startApi() {
   return new Promise(resolve => {
@@ -37,7 +43,7 @@ test('agent stream forwards canonical context and streams Gateway deltas to Warm
   try {
     const response = await fetch(`http://127.0.0.1:${api.address().port}/api/agent/stream`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: PROXY_HEADERS,
       body: JSON.stringify({
         projectId: 'claude-code-test',
         windowId: 'chat-1',
@@ -94,7 +100,7 @@ test('agent stream writes the first Gateway delta before run resolves', async ()
   try {
     responsePromise = fetch(`http://127.0.0.1:${api.address().port}/api/agent/stream`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: PROXY_HEADERS,
       body: JSON.stringify({
         projectId: 'claude-code-test',
         windowId: 'chat-1',
@@ -132,7 +138,7 @@ test('agent stream rejects other projects before calling Gateway', async () => {
   try {
     const response = await fetch(`http://127.0.0.1:${api.address().port}/api/agent/stream`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: PROXY_HEADERS,
       body: JSON.stringify({
         projectId: 'reading',
         windowId: 'chat-1',
@@ -162,7 +168,7 @@ test('agent stream emits structured Gateway errors without returning credentials
   try {
     const response = await fetch(`http://127.0.0.1:${api.address().port}/api/agent/stream`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: PROXY_HEADERS,
       body: JSON.stringify({
         projectId: 'claude-code-test',
         windowId: 'chat-1',
