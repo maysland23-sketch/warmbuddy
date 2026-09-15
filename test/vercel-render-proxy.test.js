@@ -20,7 +20,7 @@ async function withProxy(handler, callback) {
   }
 }
 
-test('proxy forwards only to the fixed Render origin and injects its own secret', async () => {
+test('proxy preserves the original nested API path, query, method, body, and safe headers', async () => {
   let observed;
   const logs = [];
   const handler = createVercelRenderProxy({
@@ -37,7 +37,7 @@ test('proxy forwards only to the fixed Render origin and injects its own secret'
   });
 
   await withProxy(handler, async baseUrl => {
-    const response = await fetch(baseUrl + '/api/chat?mode=test', {
+    const response = await fetch(baseUrl + '/api/memories/p1?projectId=p1&include=latest', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -52,12 +52,54 @@ test('proxy forwards only to the fixed Render origin and injects its own secret'
     assert.equal(response.headers.get('x-upstream-secret'), null);
   });
 
-  assert.equal(observed.url, 'https://render.example/api/chat?mode=test');
+  assert.equal(observed.url, 'https://render.example/api/memories/p1?projectId=p1&include=latest');
+  assert.equal(observed.init.method, 'POST');
+  assert.equal(Buffer.from(observed.init.body).toString(), '{"message":"hello"}');
+  assert.equal(observed.init.headers['content-type'], 'application/json');
   assert.equal(observed.init.headers['x-warmbuddy-proxy-secret'], TEST_SECRET);
   assert.equal(observed.init.headers.cookie, undefined);
   assert.equal(observed.init.headers.authorization, undefined);
+  assert.deepEqual(logs, [
+    ['[render-proxy]', {
+      incomingPathname: '/api/memories/p1',
+      resolvedTargetPathname: '/api/memories/p1',
+      upstreamStatus: 201
+    }]
+  ]);
   const logText = JSON.stringify(logs);
   assert.doesNotMatch(logText, /TEST_SECRET|proxy-secret-at-least|spoofed|browser-value|hello|mode=test/);
+});
+
+test('proxy logs a missing API prefix without contacting Render', async () => {
+  let called = false;
+  const logs = [];
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example',
+    proxySecret: TEST_SECRET,
+    fetchImpl: async () => {
+      called = true;
+      return new Response('{}');
+    },
+    logger: {
+      info(...args) { logs.push(args); },
+      error(...args) { logs.push(args); }
+    }
+  });
+
+  await withProxy(handler, async baseUrl => {
+    const response = await fetch(baseUrl + '/memories/p1');
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: 'Not found', code: 'NOT_FOUND' });
+  });
+
+  assert.equal(called, false);
+  assert.deepEqual(logs, [
+    ['[render-proxy]', {
+      incomingPathname: '/memories/p1',
+      resolvedTargetPathname: '/memories/p1',
+      upstreamStatus: null
+    }]
+  ]);
 });
 
 test('proxy maps missing configuration, unsupported methods, and upstream failures', async () => {

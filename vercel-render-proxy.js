@@ -96,19 +96,22 @@ function readRequestBody(req, maxBytes) {
   });
 }
 
-function logRequest(logger, method, pathname, status, startedAt) {
+function logRequest(logger, incomingPathname, resolvedTargetPathname, upstreamStatus) {
   if (!logger || typeof logger.info !== 'function') return;
   logger.info('[render-proxy]', {
-    method,
-    path: pathname,
-    status,
-    durationMs: Date.now() - startedAt
+    incomingPathname,
+    resolvedTargetPathname,
+    upstreamStatus
   });
 }
 
-function logFailure(logger, method, pathname, code) {
+function logFailure(logger, incomingPathname, resolvedTargetPathname) {
   if (!logger || typeof logger.error !== 'function') return;
-  logger.error('[render-proxy]', { method, path: pathname, code });
+  logger.error('[render-proxy]', {
+    incomingPathname,
+    resolvedTargetPathname,
+    upstreamStatus: null
+  });
 }
 
 function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = globalThis.fetch, logger = console } = {}) {
@@ -126,15 +129,19 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
     const method = String(req.method || 'GET').toUpperCase();
     const parsed = new URL(req.url || '/', DUMMY_ORIGIN);
     const pathname = parsed.pathname;
-    const startedAt = Date.now();
+    const target = origin ? new URL(pathname + parsed.search, origin) : null;
+    const targetPathname = target ? target.pathname : null;
 
     if (!isApiPath(pathname)) {
+      logRequest(logger, pathname, targetPathname, null);
       return sendJson(res, 404, { error: 'Not found', code: 'NOT_FOUND' });
     }
     if (!ALLOWED_METHODS.has(method)) {
+      logRequest(logger, pathname, targetPathname, null);
       return sendJson(res, 405, { error: 'Method not allowed', code: 'METHOD_NOT_ALLOWED' });
     }
     if (configurationError) {
+      logRequest(logger, pathname, targetPathname, null);
       return sendJson(res, 503, { error: 'Proxy not configured', code: 'PROXY_NOT_CONFIGURED' });
     }
 
@@ -147,12 +154,11 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
           return sendJson(res, 413, { error: 'Request too large', code: 'REQUEST_TOO_LARGE' });
         }
         if (error.code === 'REQUEST_ABORTED') return;
-        logFailure(logger, method, pathname, 'REQUEST_READ_FAILED');
+        logFailure(logger, pathname, targetPathname);
         return sendJson(res, 400, { error: 'Invalid request', code: 'REQUEST_READ_FAILED' });
       }
     }
 
-    const target = new URL(pathname + parsed.search, origin);
     const controller = new AbortController();
     const abortIfDisconnected = () => {
       if (!req.complete) controller.abort();
@@ -172,7 +178,7 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
     } catch (_error) {
       req.removeListener('aborted', abortIfDisconnected);
       req.removeListener('close', abortIfDisconnected);
-      logFailure(logger, method, pathname, 'UPSTREAM_UNAVAILABLE');
+      logFailure(logger, pathname, targetPathname);
       return sendJson(res, 502, { error: 'Upstream unavailable', code: 'UPSTREAM_UNAVAILABLE' });
     }
 
@@ -188,10 +194,10 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
       } else {
         await pipeline(Readable.fromWeb(upstream.body), res);
       }
-      logRequest(logger, method, pathname, upstream.status, startedAt);
+      logRequest(logger, pathname, targetPathname, upstream.status);
     } catch (_error) {
       if (!res.headersSent && !res.destroyed) {
-        logFailure(logger, method, pathname, 'UPSTREAM_STREAM_FAILED');
+        logFailure(logger, pathname, targetPathname);
         return sendJson(res, 502, { error: 'Upstream unavailable', code: 'UPSTREAM_UNAVAILABLE' });
       }
     } finally {
