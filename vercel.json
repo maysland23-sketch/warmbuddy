@@ -3,6 +3,12 @@
   "version": 2,
   "framework": null,
   "outputDirectory": "public",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/proxy?__warmbuddy_path=/api/:path*"
+    }
+  ],
   "functions": {
     "api/*.js": {
       "maxDuration": 300

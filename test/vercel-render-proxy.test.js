@@ -37,7 +37,7 @@ test('proxy preserves the original nested API path, query, method, body, and saf
   });
 
   await withProxy(handler, async baseUrl => {
-    const response = await fetch(baseUrl + '/api/memories/p1?projectId=p1&include=latest', {
+    const response = await fetch(baseUrl + '/api/proxy?__warmbuddy_path=%2Fapi%2Fmemories%2Fp1&projectId=p1&include=latest', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',

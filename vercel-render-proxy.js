@@ -7,6 +7,7 @@ const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'
 const REQUEST_HEADERS = new Set(['accept', 'content-type', 'if-none-match', 'last-event-id']);
 const RESPONSE_HEADERS = new Set(['content-type', 'cache-control', 'etag', 'content-disposition', 'retry-after']);
 const DUMMY_ORIGIN = 'http://vercel-proxy.invalid';
+const INTERNAL_PATH_QUERY = '__warmbuddy_path';
 
 function sendJson(res, status, body) {
   if (res.headersSent || res.destroyed) return;
@@ -18,6 +19,44 @@ function sendJson(res, status, body) {
 
 function isApiPath(pathname) {
   return pathname === '/api' || pathname.startsWith('/api/');
+}
+
+function removeInternalPathQuery(search) {
+  if (!search || search === '?') return '';
+  const parts = search.slice(1).split('&');
+  let removed = false;
+  const remaining = parts.filter(part => {
+    if (removed) return true;
+    const separator = part.indexOf('=');
+    const rawKey = separator === -1 ? part : part.slice(0, separator);
+    let key;
+    try {
+      key = decodeURIComponent(rawKey.replace(/\+/g, ' '));
+    } catch (_error) {
+      return true;
+    }
+    if (key !== INTERNAL_PATH_QUERY) return true;
+    removed = true;
+    return false;
+  });
+  return remaining.length > 0 ? `?${remaining.join('&')}` : '';
+}
+
+function resolveIncomingRequest(reqUrl) {
+  const parsed = new URL(reqUrl || '/', DUMMY_ORIGIN);
+  const rewrittenPath = parsed.searchParams.get(INTERNAL_PATH_QUERY);
+  if (!rewrittenPath) {
+    return { pathname: parsed.pathname, search: parsed.search };
+  }
+
+  const original = new URL(rewrittenPath, DUMMY_ORIGIN);
+  if (original.origin !== DUMMY_ORIGIN || original.search || original.hash) {
+    throw new Error('Invalid internal proxy path');
+  }
+  return {
+    pathname: original.pathname,
+    search: removeInternalPathQuery(parsed.search)
+  };
 }
 
 function normalizeRenderOrigin(renderOrigin) {
@@ -127,9 +166,14 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
 
   return async function vercelRenderProxy(req, res) {
     const method = String(req.method || 'GET').toUpperCase();
-    const parsed = new URL(req.url || '/', DUMMY_ORIGIN);
-    const pathname = parsed.pathname;
-    const target = origin ? new URL(pathname + parsed.search, origin) : null;
+    let incoming;
+    try {
+      incoming = resolveIncomingRequest(req.url);
+    } catch (_error) {
+      return sendJson(res, 400, { error: 'Invalid proxy path', code: 'INVALID_PROXY_PATH' });
+    }
+    const { pathname, search } = incoming;
+    const target = origin ? new URL(pathname + search, origin) : null;
     const targetPathname = target ? target.pathname : null;
 
     if (!isApiPath(pathname)) {
