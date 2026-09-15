@@ -1,11 +1,5 @@
-const { createHash } = require('node:crypto');
-
 const AGENT_GATEWAY_PROJECT_ID = 'warmbuddy-test';
 const DEFAULT_AGENT_GATEWAY_TIMEOUT_MS = 120000;
-
-function sha256(value) {
-  return createHash('sha256').update(value).digest('hex');
-}
 
 class AgentGatewayError extends Error {
   constructor(message, { status = 502, code = 'AGENT_GATEWAY_ERROR', cause } = {}) {
@@ -242,13 +236,7 @@ function createAgentGatewayClient({
           authorization
         };
         console.error('[agent-gateway] auth diagnostics', {
-          tokenConfigured: Boolean(gatewayToken),
-          tokenLength: gatewayToken.length,
-          tokenSha256: sha256(gatewayToken),
-          authorizationPresent: Boolean(headers.authorization),
-          authorizationLength: headers.authorization.length,
-          authorizationBearerPrefix: headers.authorization.startsWith('Bearer '),
-          authorizationTokenSha256: sha256(headers.authorization.slice('Bearer '.length))
+          tokenConfigured: Boolean(gatewayToken)
         });
         const response = await fetchImpl(`${gatewayUrl}/v1/agent/stream`, {
           method: 'POST',
@@ -266,9 +254,6 @@ function createAgentGatewayClient({
           const upstreamBody = await response.text();
           console.error('[agent-gateway] upstream non-2xx response', {
             status: response.status,
-            statusText: response.statusText,
-            body: upstreamBody,
-            AGENT_GATEWAY_URL: gatewayUrl,
             projectId: AGENT_GATEWAY_PROJECT_ID
           });
           let payload = null;
@@ -285,10 +270,8 @@ function createAgentGatewayClient({
         const result = await consumeGatewaySse(response.body, onEvent, onHeartbeat, payload => {
           console.error('[agent-gateway] upstream SSE error', {
             status: response.status,
-            statusText: response.statusText,
-            body: payload,
-            AGENT_GATEWAY_URL: gatewayUrl,
-            projectId: AGENT_GATEWAY_PROJECT_ID
+            projectId: AGENT_GATEWAY_PROJECT_ID,
+            errorCode: payload?.code || 'UPSTREAM_STREAM_ERROR'
           });
         });
         if (!result.content) {

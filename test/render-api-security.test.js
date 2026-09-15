@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 process.env.VERCEL = '1';
 process.env.NODE_ENV = 'test';
 process.env.RENDER = 'true';
@@ -222,4 +224,40 @@ test('Render API guard runs before the JSON body parser', async () => {
   } finally {
     await stopApi(api);
   }
+});
+
+test('batch project config reads do not return API key values', async () => {
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = function(file, ...args) {
+    if (String(file).endsWith(path.join('data', 'projectConfigs.json'))) {
+      return JSON.stringify({
+        p1: {
+          enabled: true,
+          apiKey: 'READ_API_KEY_SENTINEL',
+          endpoint: 'https://llm.example'
+        }
+      });
+    }
+    return originalReadFileSync.call(this, file, ...args);
+  };
+  const api = await startApi();
+  try {
+    const response = await fetch(`http://127.0.0.1:${api.address().port}/api/projects/configs`, {
+      headers: { [RENDER_PROXY_HEADER]: TEST_SECRET }
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.configs.p1, { enabled: true, hasApiKey: true });
+    assert.doesNotMatch(JSON.stringify(body), /READ_API_KEY_SENTINEL/);
+  } finally {
+    await stopApi(api);
+    fs.readFileSync = originalReadFileSync;
+  }
+});
+
+test('credential-bearing server read routes use the response sanitizers', () => {
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(serverSource, /sanitizeProjectConfigForClient\(freshConfig\)/);
+  assert.match(serverSource, /sanitizeToolDefinitionsForClient\(data\.value \|\| \[\]\)/);
+  assert.match(serverSource, /sanitizeToolDefinitionsForClient\(enabledDefs\)/);
 });

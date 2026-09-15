@@ -33,6 +33,20 @@ var ToolkitModule = (function() {
     return store._toolDefinitions;
   }
 
+  // Merge sanitized server metadata without overwriting a locally stored token.
+  function mergeServerDefinition(local, server) {
+    var merged = Object.assign({}, local || {}, server || {});
+    var localAuth = (local && local.auth) || {};
+    var serverAuth = (server && server.auth) || {};
+    merged.auth = Object.assign({}, localAuth, serverAuth);
+    if (typeof localAuth.token === 'string' && localAuth.token) {
+      merged.auth.token = localAuth.token;
+    } else {
+      delete merged.auth.token;
+    }
+    return merged;
+  }
+
   // ═══════════════════════════════════════════
   //  Public: add a tool definition
   // ═══════════════════════════════════════════
@@ -406,7 +420,7 @@ var ToolkitModule = (function() {
           var localMap = {};
           store._toolDefinitions.forEach(function(d) { localMap[d.id] = d; });
           data.definitions.forEach(function(sd) {
-            localMap[sd.id] = sd;
+            localMap[sd.id] = mergeServerDefinition(localMap[sd.id], sd);
           });
           store._toolDefinitions = Object.values(localMap);
           AppCore.saveStore();
@@ -463,6 +477,7 @@ var ToolkitModule = (function() {
   return {
     init: init,
     getDefinitions: getDefinitions,
+    mergeServerDefinition: mergeServerDefinition,
     addDefinition: addDefinition,
     removeDefinition: removeDefinition,
     getEnabledTools: getEnabledTools,
