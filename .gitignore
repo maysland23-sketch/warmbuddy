@@ -5,3 +5,4 @@ google-services.json
 *.apk
 
 .claude/worktrees/
+.worktrees/
