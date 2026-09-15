@@ -15,6 +15,7 @@ const { createTokenUsageEvent, estimateUsage } = require('./token-usage-utils');
 const {
   createAgentGatewayClient
 } = require('./claude-code-gateway');
+const { buildMemoryRows } = require('./memories-persistence');
 const {
   createRenderApiGuard,
   createInternalApiFetch,
@@ -4898,16 +4899,7 @@ app.post('/api/memories', async (req, res) => {
     if (!projectId || !Array.isArray(memories) || memories.length === 0) {
       return res.status(400).json({ error: 'projectId and memories[] required' });
     }
-    const rows = memories.map(m => ({
-      id: m.id,
-      project_id: projectId,
-      content: (m.content || m.summary || '').slice(0, 500),
-      type: m.type || 'aem',
-      layer: m.layer || 'ai_emotional',
-      starred: m.starred || false,
-      updated_at: new Date().toISOString(),
-      metadata: m.metadata || m
-    }));
+    const rows = buildMemoryRows(projectId, memories);
     const { data, error } = await supabase
       .from('memories')
       .upsert(rows, { onConflict: 'id' });
@@ -4961,6 +4953,9 @@ app.post('/api/memories/sync', async (req, res) => {
     if (!projectId || !Array.isArray(memories)) {
       return res.status(400).json({ error: 'projectId and memories[] required' });
     }
+    // Normalize and deduplicate before deleting anything. The memories table
+    // primary key is `id`, so merged client layers must produce one row per id.
+    const rows = buildMemoryRows(projectId, memories);
     // Delete all existing memories for this project
     const { error: delErr } = await supabase
       .from('memories')
@@ -4968,21 +4963,11 @@ app.post('/api/memories/sync', async (req, res) => {
       .eq('project_id', projectId);
     if (delErr) throw delErr;
     // Insert all
-    if (memories.length > 0) {
-      const rows = memories.map(m => ({
-        id: m.id,
-        project_id: projectId,
-        content: (m.content || m.summary || '').slice(0, 500),
-        type: m.type || 'aem',
-        layer: m.layer || 'ai_emotional',
-        starred: m.starred || false,
-        updated_at: new Date().toISOString(),
-        metadata: m.metadata || m
-      }));
+    if (rows.length > 0) {
       const { error: insErr } = await supabase.from('memories').insert(rows);
       if (insErr) throw insErr;
     }
-    res.json({ ok: true, count: memories.length });
+    res.json({ ok: true, count: rows.length });
   } catch (e) {
     console.error('[memories] SYNC error:', e.message);
     res.status(500).json({ error: e.message });
