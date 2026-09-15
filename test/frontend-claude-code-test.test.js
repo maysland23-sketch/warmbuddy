@@ -18,7 +18,7 @@ test('frontend source defines and preserves the stable Claude Code test project'
 
 test('frontend agent route does not send provider credentials or MCP definitions', () => {
   const chat = fs.readFileSync(path.join(repo, 'public/js/chat.js'), 'utf8');
-  const routeBlock = chat.match(/var requestBody = agentGatewayProject[\s\S]*?\? \{([\s\S]*?)\n\s*\}\n\s*: \{/);
+  const routeBlock = chat.match(/var requestBody = agentGatewayProject[\s\S]*?\? \{([\s\S]*?)(?:\r?\n)\s*\}(?:\r?\n)\s*: \{/);
   assert.ok(routeBlock, 'agent route branch should be present');
   assert.doesNotMatch(routeBlock[1], /apiKey|endpoint|enabledToolDefs|enabledToolIds/);
 });
