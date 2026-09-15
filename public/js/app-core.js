@@ -15,7 +15,7 @@ var AppCore = (function() {
   // ═══════════════════════════════════════════
   var BACKEND_URL = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
     ? 'http://localhost:' + (window.location.port || '3000')
-    : 'https://warmbuddy.onrender.com';
+    : '';
   var VAPID_PUBLIC_KEY = 'BMxMi0X5umwzfA8ZZHJPuiGCKpH-nY53Eo3IaljnnML1F1oUXdB7kftY_e5oCIIMxMWKujGTdBp5VhS6BQjyKR4';
   var USER_NAME = 'mays';
   var CLAUDE_CODE_TEST_PROJECT_ID = 'claude-code-test';

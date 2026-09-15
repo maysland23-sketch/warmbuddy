@@ -8,7 +8,7 @@
   'use strict';
 
   // ── Configuration ──
-  var BACKEND = (typeof BACKEND_URL !== 'undefined') ? BACKEND_URL : 'https://warmbuddy.onrender.com';
+  var BACKEND = (typeof BACKEND_URL !== 'undefined') ? BACKEND_URL : '';
   var CACHE_KEY_PREFIX = 'mm_cache_';
   var CACHE_KEY_MIGRATED = 'mm_migrated_v3';
   var SYNC_DEBOUNCE_MS = 2000;
