@@ -17,6 +17,13 @@ const {
   createAgentGatewayClient
 } = require('./claude-code-gateway');
 const { buildMemoryRows } = require('./memories-persistence');
+const { createEmailService } = require('./email-service');
+const {
+  parseProactiveReply,
+  processProactiveEmail,
+  sanitizeFailedEmailMessage,
+  claimTodoWake
+} = require('./proactive-email-utils');
 const {
   createRenderApiGuard,
   createInternalApiFetch,
@@ -612,6 +619,8 @@ if (SUPABASE_URL && SUPABASE_KEY) {
       emailState.senderName = cfg.senderName || 'WarmBuddy';
       emailState.enabled = cfg.enabled !== false;
       emailState.maxPerDay = cfg.maxPerDay || 2;
+      emailState.sentToday = Number.isFinite(Number(cfg.sentToday)) ? Number(cfg.sentToday) : 0;
+      emailState.sentDate = cfg.sentDate || '';
       console.log('[email] Config restored from Supabase');
     }
   }).catch(function(){});
@@ -757,7 +766,8 @@ async function saveDesireStateOnly(pid, desireState, lastBackendGrowth, triggerI
   await saveProjectConfigs(configs);
 }
 
-// project config: { [pid]: { apiKey, endpoint, model, enabled, recipient?, emailEnabled?: true, emailMaxPerDay?: 2, emailSentToday?: 0, emailSentDate?: '', _desireState?: { drives, lastCheck }, _lastBackendGrowth?, _lastTriggerTime?, _lastTriggerDrive?, _chatId?: '' } }
+// project config: { [pid]: { apiKey, endpoint, model, enabled, _desireState?: { drives, lastCheck }, _lastBackendGrowth?, _lastTriggerTime?, _lastTriggerDrive?, _chatId?: '' } }
+// Email configuration and its shared daily count live in app_state.email_config.
 // system events: persisted in Supabase system_events table (survives Render restarts)
 
 // ── To-Do persistence (Supabase project_todos table) ──
@@ -2867,6 +2877,7 @@ app.post('/api/weather', async (req, res) => {
 
 // ==================== EMAIL ENDPOINTS ====================
 const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
+const EMAIL_FROM = (process.env.EMAIL_FROM || '').trim();
 const emailState = {
   enabled: true,
   maxPerDay: 2,
@@ -2875,30 +2886,6 @@ const emailState = {
   sentToday: 0,
   sentDate: ''
 };
-
-function createResendError(payload, status) {
-  const details = payload && typeof payload.error === 'object' ? payload.error : payload || {};
-  const error = new Error(details.message || payload?.message || `Resend API returned ${status}`);
-  error.name = details.name || payload?.name || `resend_http_${status}`;
-  error.resendStatus = status;
-  return error;
-}
-
-function createMissingEmailIdError(status) {
-  const error = new Error('Resend response did not include an email id');
-  error.name = 'missing_email_id';
-  error.resendStatus = status;
-  return error;
-}
-
-function logEmailError(prefix, requestId, error) {
-  console.error(prefix, {
-    requestId,
-    resendStatus: error.resendStatus ?? null,
-    errorName: error.name || 'Error',
-    errorMessage: error.message || String(error)
-  });
-}
 
 // Persist email config to Supabase (survives Render restarts)
 async function loadEmailConfig() {
@@ -2910,97 +2897,89 @@ async function loadEmailConfig() {
   } catch (e) { return null; }
 }
 async function saveEmailConfig() {
-  if (!supabase) return;
-  try {
-    var cfg = { recipient: emailState.recipient, senderName: emailState.senderName, enabled: emailState.enabled, maxPerDay: emailState.maxPerDay };
-    await supabase.from('app_state').upsert({ key: 'email_config', value: cfg, updated_at: new Date().toISOString() }, { onConflict: 'key' });
-  } catch (e) { console.error('[supabase] saveEmailConfig error:', e.message); }
-}
-
-function resetEmailDaily() {
-  const today = new Date().toISOString().slice(0, 10);
-  if (emailState.sentDate !== today) {
-    emailState.sentToday = 0;
-    emailState.sentDate = today;
-  }
-}
-
-app.get('/api/email/status', (req, res) => {
-  resetEmailDaily();
-  res.json({
-    configured: !!(RESEND_API_KEY && emailState.recipient),
-    enabled: emailState.enabled,
-    apiKeySet: !!RESEND_API_KEY,
+  if (!supabase) return { persisted: false, reason: 'supabase_not_configured' };
+  var cfg = {
     recipient: emailState.recipient,
     senderName: emailState.senderName,
+    enabled: emailState.enabled,
+    maxPerDay: emailState.maxPerDay,
     sentToday: emailState.sentToday,
-    maxPerDay: emailState.maxPerDay
-  });
+    sentDate: emailState.sentDate
+  };
+  const { error } = await supabase.from('app_state').upsert(
+    { key: 'email_config', value: cfg, updated_at: new Date().toISOString() },
+    { onConflict: 'key' }
+  );
+  if (error) throw error;
+  return { persisted: true };
+}
+
+const emailService = createEmailService({
+  state: emailState,
+  apiKey: RESEND_API_KEY,
+  from: EMAIL_FROM,
+  fetchImpl: (...args) => globalThis.fetch(...args),
+  persistState: saveEmailConfig,
+  logger: console
 });
 
-app.post('/api/email/config', (req, res) => {
+app.get('/api/email/status', (req, res) => {
+  res.json(emailService.getStatus());
+});
+
+app.post('/api/email/config', async (req, res) => {
   const { recipient, senderName } = req.body || {};
+  const previous = { recipient: emailState.recipient, senderName: emailState.senderName };
   if (recipient !== undefined) emailState.recipient = recipient.trim();
   if (senderName !== undefined) emailState.senderName = senderName.trim() || 'WarmBuddy';
-  saveEmailConfig();
-  res.json({ ok: true, configured: !!(RESEND_API_KEY && emailState.recipient) });
+  try {
+    const persistence = await saveEmailConfig();
+    res.json({
+      ok: true,
+      configured: !!(RESEND_API_KEY && emailState.recipient),
+      persisted: persistence.persisted
+    });
+  } catch (error) {
+    Object.assign(emailState, previous);
+    console.error('[email] Config persistence error', {
+      errorName: error.name || 'Error',
+      errorMessage: error.message || String(error)
+    });
+    res.status(503).json({ ok: false, error: '邮件配置保存失败' });
+  }
 });
 
-app.post('/api/email/settings', (req, res) => {
+app.post('/api/email/settings', async (req, res) => {
   const { enabled, maxPerDay } = req.body || {};
+  const previous = { enabled: emailState.enabled, maxPerDay: emailState.maxPerDay };
   if (enabled !== undefined) emailState.enabled = !!enabled;
   if (maxPerDay !== undefined) emailState.maxPerDay = Math.max(1, parseInt(maxPerDay) || 2);
-  saveEmailConfig();
-  res.json({ ok: true, enabled: emailState.enabled, maxPerDay: emailState.maxPerDay });
+  try {
+    const persistence = await saveEmailConfig();
+    res.json({
+      ok: true,
+      enabled: emailState.enabled,
+      maxPerDay: emailState.maxPerDay,
+      persisted: persistence.persisted
+    });
+  } catch (error) {
+    Object.assign(emailState, previous);
+    console.error('[email] Settings persistence error', {
+      errorName: error.name || 'Error',
+      errorMessage: error.message || String(error)
+    });
+    res.status(503).json({ ok: false, error: '邮件设置保存失败' });
+  }
 });
 
 app.post('/api/email/send', async (req, res) => {
   const requestId = req.requestId || randomUUID();
-  resetEmailDaily();
-  if (!RESEND_API_KEY) return res.status(400).json({ error: 'Resend API Key 未配置 (环境变量 RESEND_API_KEY)', requestId });
-  if (!emailState.enabled) return res.status(403).json({ error: '邮件功能已关闭', requestId });
-  if (!emailState.recipient) return res.status(400).json({ error: '收件人邮箱未配置', requestId });
-  if (emailState.sentToday >= emailState.maxPerDay) {
-    return res.status(429).json({ error: `今日发送已达上限(${emailState.maxPerDay}封)`, requestId });
-  }
-
   const { subject, body } = req.body || {};
-  if (!subject) return res.status(400).json({ error: '缺少邮件主题', requestId });
-
-  // Email body is composed on the frontend (from [[EMAIL:主题|正文]]); no LLM generation here.
-  const emailBody = (body && body.trim()) ? body.trim() : subject;
-
   try {
-    // Send via Resend API
-    const resp = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${RESEND_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        from: `${emailState.senderName} <onboarding@resend.dev>`,
-        to: emailState.recipient,
-        subject: subject,
-        text: emailBody
-      })
-    });
-
-    const resendData = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw createResendError(resendData, resp.status);
-    const emailId = typeof resendData.id === 'string' ? resendData.id : '';
-    if (!emailId) throw createMissingEmailIdError(resp.status);
-
-    emailState.sentToday++;
-    console.log('[email] Send accepted', {
-      requestId,
-      resendStatus: resp.status,
-      emailId
-    });
-    res.json({ ok: true, emailId, requestId, sentToday: emailState.sentToday, maxPerDay: emailState.maxPerDay });
+    const result = await emailService.send({ source: 'manual', requestId, subject, body });
+    res.json({ ok: true, emailId: result.emailId, requestId, sentToday: result.sentToday, maxPerDay: result.maxPerDay });
   } catch (e) {
-    logEmailError('[email] Send error', requestId, e);
-    res.status(500).json({ error: '发送失败: ' + e.message, requestId });
+    res.status(e.httpStatus || 500).json({ error: e.clientMessage || ('发送失败: ' + e.message), requestId });
   }
 });
 
@@ -3781,14 +3760,14 @@ const DESIRE_THRESHOLD = 60;  // any drive ≥ 60 → trigger
 // ── Daily limits (env-configurable, persisted in Supabase project_configs) ──
 const MAX_DAILY_WAKE = parseInt(process.env.MAX_DAILY_WAKE || '10', 10);      // TODO wake-ups per day per project
 const MAX_DAILY_DESIRE = parseInt(process.env.MAX_DAILY_DESIRE || '5', 10);   // desire-driven proactive messages per day per project
-const MAX_DAILY_EMAILS = parseInt(process.env.MAX_DAILY_EMAILS || '2', 10);   // proactive emails per day per project
 const MAX_AI_TODOS_PER_DAY = 3;
 const TODO_COOLDOWN_MIN = 30;
 let _todoWakeLocked = false;
 
 /**
  * Persist daily-count fields for a project via atomic RPC.
- * Only touches _dailyWakeCount, _dailyDesireCount, _dailyEmailCount, _lastWakeResetDate.
+ * _dailyEmailCount remains in the RPC payload for schema compatibility, but
+ * email quota enforcement now uses app_state.email_config.sentToday only.
  */
 async function saveDailyCounts(pid, cfg) {
   if (!supabase) return;
@@ -3844,8 +3823,6 @@ async function checkTodoWakeUps() {
   const now = new Date();
   const windowStart = new Date(now.getTime() - 10 * 60000);
 
-  const configs = await loadProjectConfigs();
-
   // Query due todos
   const { data: dueTodos } = await supabase.from('project_todos')
     .select('*').eq('triggered', false).eq('done', false)
@@ -3854,10 +3831,9 @@ async function checkTodoWakeUps() {
   if (!dueTodos || dueTodos.length === 0) return;
 
   for (const todo of dueTodos) {
-    const cfg = configs[todo.project_id];
     // Re-load latest config to get current enabled state (bypass 15s cache)
-    const freshTodoCfg = await loadProjectConfig(todo.project_id);
-    if (!cfg || !freshTodoCfg || freshTodoCfg.enabled === false || !cfg.apiKey) {
+    const cfg = await loadProjectConfig(todo.project_id);
+    if (!cfg || cfg.enabled === false || !cfg.apiKey) {
       console.log(`[todo-wake] Project ${todo.project_id} is disabled or missing API key, skipping`);
       continue;
     }
@@ -3871,6 +3847,20 @@ async function checkTodoWakeUps() {
     // Reset daily counts if new day, then check per-project limit
     resetDailyCountsIfNewDay(cfg);
     if ((cfg._dailyWakeCount || 0) >= MAX_DAILY_WAKE) continue;
+
+    // Claim the row atomically before generating or sending anything. A
+    // second cron scan can see the same due row, but only one scan may own it.
+    try {
+      const claimed = await claimTodoWake(supabase, todo.id);
+      if (!claimed) {
+        console.log(`[todo-wake] ${todo.project_id}: todo ${todo.id} was already claimed, skipping`);
+        continue;
+      }
+    } catch (e) {
+      console.error(`[todo-wake] ${todo.project_id}: failed to claim todo ${todo.id}:`, e.message);
+      continue;
+    }
+
     cfg._dailyWakeCount = (cfg._dailyWakeCount || 0) + 1;
 
     // Update project cooldown
@@ -3881,6 +3871,20 @@ async function checkTodoWakeUps() {
     // Build wake-up message via LLM
     const triggeredAt = now.toISOString();
     const wakeContent = await buildTodoWakeMessage(todo, cfg);
+    const requestId = randomUUID();
+    const parsedWake = parseProactiveReply(wakeContent);
+    const wakeEmailOutcome = await processProactiveEmail({
+      parsed: parsedWake,
+      source: 'todo',
+      requestId,
+      emailService
+    });
+    // Keep the wake-up visible even when email is disabled or fails, but never
+    // expose the actionable EMAIL marker in chat or ntfy content.
+    const visibleWakeMessage = wakeEmailOutcome.attempted && !wakeEmailOutcome.sent
+      ? sanitizeFailedEmailMessage(parsedWake.message)
+      : parsedWake.message;
+    const displayWakeContent = visibleWakeMessage || todo.title;
 
     // Store system event in Supabase
     const savedWakeEvent = await saveSystemEvent({
@@ -3890,7 +3894,7 @@ async function checkTodoWakeUps() {
       todoId: todo.id,
       todoTitle: todo.title,
       driveKey: 'todo',
-      content: wakeContent,
+      content: displayWakeContent,
       timestamp: triggeredAt,
       pushSent: false,
       _hasContext: true
@@ -3903,16 +3907,13 @@ async function checkTodoWakeUps() {
           chatId: todo.chat_id || cfg._chatId,
           type: 'todo_wake',
           driveKey: 'todo',
-          content: wakeContent,
+          content: displayWakeContent,
           timestamp: triggeredAt
         }, cfg.aiName);
       } catch (e) {
         console.error('[todo-wake] chat_messages upsert error:', e.message);
       }
     }
-
-    // Mark todo as triggered
-    await supabase.from('project_todos').update({ triggered: true }).eq('id', todo.id);
 
     await dispatchNtfyForEvent({
       id: savedWakeEvent && savedWakeEvent.id,
@@ -3921,7 +3922,7 @@ async function checkTodoWakeUps() {
       aiName: (cfg && cfg.aiName) || '暖伴',
       type: 'todo_wake',
       driveKey: 'todo',
-      content: (wakeContent || todo.title).slice(0, 200)
+      content: (displayWakeContent || todo.title).slice(0, 200)
     });
 
     console.log(`[todo-wake] ${todo.project_id}: 「${todo.title}」 triggered`);
@@ -4410,86 +4411,6 @@ function applyBackendDesireGrowth(ds, pid, cfg) {
   return changed ? ds : null;
 }
 
-/**
- * Parse LLM proactive reply: extract [[TYPE:...]] markers, separate message text,
- * and handle malformed raw TYPE: prefix fallback.
- * Returns { message, actionType, actions: { litter?, diary?, todo?, email? } }
- * where actions.diary is { title, mood, body } for structured diary format.
- */
-function parseProactiveReply(content) {
-  let message = content;
-  const actions = {};
-
-  // ── Pass 1: Match [[TYPE:内容]] standard markers ──
-  const markerRegex = /\[\[(\w+):([\s\S]*?)\]\]/gi;
-  let match;
-  while ((match = markerRegex.exec(content)) !== null) {
-    const type = match[1].toLowerCase();
-    const body = match[2].trim();
-    if (!actions[type]) {
-      actions[type] = body;
-    }
-    message = message.replace(match[0], '');
-  }
-
-  // ── Pass 2: Fallback — raw LITTER:/DIARY:/MESSAGE:/POKE: prefix (no brackets) ──
-  const fallbackTypes = ['LITTER', 'DIARY', 'MESSAGE', 'EMAIL', 'TODO', 'POKE', 'STATUS'];
-  for (const fb of fallbackTypes) {
-    const fbRegex = new RegExp('(?:^|\\n)\\s*' + fb + ':\\s*(.+?)(?=\\n|$)', 'im');
-    const fbMatch = message.match(fbRegex);
-    if (fbMatch) {
-      const fbType = fb.toLowerCase();
-      if (!actions[fbType]) {
-        console.warn('[proactive] LLM used raw ' + fb + ': instead of [[' + fb + ':]] — auto-corrected');
-        actions[fbType] = fbMatch[1].trim();
-      }
-      message = message.replace(fbMatch[0], '');
-    }
-  }
-
-  // ── Pass 3: Parse DIARY sub-fields (标题|心情|正文) ──
-  if (actions.diary && typeof actions.diary === 'string') {
-    const parts = actions.diary.split('|').map(function(s) { return s.trim(); });
-    if (parts.length >= 3) {
-      actions.diary = {
-        title: parts[0].substring(0, 15),
-        mood: parts[1] || '平静',
-        body: parts.slice(2).join('|')
-      };
-    } else {
-      // Compat: old format — no title/mood
-      actions.diary = {
-        title: actions.diary.substring(0, 15),
-        mood: '平静',
-        body: actions.diary
-      };
-    }
-  }
-
-  // ── Final: strip any residual markers and prefixes ──
-  message = message
-    .replace(/\[\[\w+:[\s\S]*?\]\]/g, '')
-    .replace(/^(MESSAGE|LITTER|DIARY|EMAIL|TODO|POKE|STATUS):\s*/gmi, '')
-    .trim();
-
-  // Determine primary action type (for push notification tag matching)
-  let actionType = 'message';
-  if (actions.email) actionType = 'email';
-  else if (actions.poke) actionType = 'poke';
-  else if (actions.status) actionType = 'status';
-  else if (actions.todo) actionType = 'todo';
-  else if (actions.litter) actionType = 'litter';
-  else if (actions.diary) actionType = 'diary';
-
-  if (message) {
-    console.log('[proactive] Parsed — message: ' + message.substring(0, 80) + ' | actions: ' + Object.keys(actions).join(','));
-  } else {
-    console.log('[proactive] Parsed — no message | actions: ' + Object.keys(actions).join(','));
-  }
-
-  return { message: message, actionType: actionType, actions: actions };
-}
-
 async function dispatchNtfyForEvent(event) {
   if (!event || !event.id) return { sent: false, skipped: true, reason: 'missing_event_id' };
   const notification = buildNotificationPayload({
@@ -4818,8 +4739,31 @@ async function checkProjectDesires(pid, cfg, requestId = randomUUID()) {
       }
     }
 
+    // Generate and send email before persisting the visible event so a model
+    // claim such as “已发送” can be replaced when the actual send fails.
+    let emailSent = actionType !== 'email';
+    let emailOutcome = null;
+    if (actionType === 'email') {
+      emailOutcome = await processProactiveEmail({
+        parsed,
+        source: 'desire',
+        requestId,
+        emailService
+      });
+      emailSent = emailOutcome.sent;
+    }
+
+    const visibleMessage = emailOutcome && !emailSent
+      ? sanitizeFailedEmailMessage(cleanMessage)
+      : cleanMessage;
+    const emailFallback = emailOutcome && emailOutcome.subject
+      ? '邮件主题：' + emailOutcome.subject
+      : '';
+
     // ── Step B: Store system event (unified audit log + frontend polling source) ──
-    const eventContent = cleanMessage || (actions.litter || (actions.diary && actions.diary.body) || (actions.todo) || (actions.status) || (cfg._userStatus || '') || '');
+    const eventContent = visibleMessage || (actionType === 'email'
+      ? emailFallback
+      : (actions.litter || (actions.diary && actions.diary.body) || (actions.todo) || (actions.status) || (cfg._userStatus || '') || ''));
     const savedEvent = await saveSystemEvent({
       projectId: pid,
       chatId: chatId,
@@ -4850,35 +4794,6 @@ async function checkProjectDesires(pid, cfg, requestId = randomUUID()) {
       } catch (e) {
         console.error('[cron] chat_messages proactive upsert error:', e.message);
       }
-    }
-
-    // Handle email directly (only if it's the primary action)
-    let emailSent = actionType !== 'email';
-    if (actionType === 'email' && actions.email && cfg.recipient) {
-      const emParts = (typeof actions.email === 'string' ? actions.email : '').split('|').map(function(s) { return s.trim(); });
-      const emSubj = emParts[0] || '来自暖伴';
-      const emBody = emParts.slice(1).join('\n') || cleanMessage;
-      try {
-        const emailResponse = await fetch('https://api.resend.com/emails', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ from: 'WarmBuddy <onboarding@resend.dev>', to: cfg.recipient, subject: emSubj, text: emBody })
-        });
-        const resendData = await emailResponse.json().catch(() => ({}));
-        if (!emailResponse.ok) throw createResendError(resendData, emailResponse.status);
-        const emailId = typeof resendData.id === 'string' ? resendData.id : '';
-        if (!emailId) throw createMissingEmailIdError(emailResponse.status);
-        console.log('[email] Proactive send accepted', {
-          requestId,
-          resendStatus: emailResponse.status,
-          emailId
-        });
-        emailSent = true;
-        // Update daily email count (persisted)
-        resetDailyCountsIfNewDay(cfg);
-        cfg._dailyEmailCount = (cfg._dailyEmailCount || 0) + 1;
-        await saveDailyCounts(pid, cfg);
-      } catch (e) { logEmailError('[email] Proactive send error', requestId, e); }
     }
 
     // ── Step C: Send the backend event through ntfy only ──

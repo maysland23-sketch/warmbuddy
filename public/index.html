@@ -2705,7 +2705,7 @@ function showEmailConfigModal(){
     <input class="modal-input" id="emailRecipientInput" placeholder="收件人邮箱">
     <div style="font-size:11px;color:var(--text-lighter);margin:12px 0 4px;">发件人名称</div>
     <input class="modal-input" id="emailSenderNameInput" placeholder="WarmBuddy">
-    <div style="font-size:10px;color:var(--text-lighter);margin:2px 0 12px;">发件地址为 onboarding@resend.dev（Resend 免费层）</div>
+    <div style="font-size:10px;color:var(--text-lighter);margin:2px 0 12px;">发件地址由服务器 EMAIL_FROM 配置</div>
   `,[
     {label:'cancel',cls:'cancel',onclick:closeModal},
     {label:'save',cls:'confirm',onclick:saveEmailConfig}
@@ -2724,17 +2724,16 @@ function saveEmailConfig(){
     method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({recipient:recipient,senderName:senderName})
   }).then(function(r){return r.json()}).then(function(d){
+    if(!d.ok)throw new Error(d.error||'配置保存失败');
     store._importing=true;closeModal();
-    if(d.configured)UIModule.toast('✅ 邮件已配置'); elseUIModule.toast('⚠️ 请填写收件人邮箱');
+    if(d.persisted===false)UIModule.toast('⚠️ 已更新，但未持久化（重启后失效）');
+    else if(d.configured)UIModule.toast('✅ 邮件已配置'); elseUIModule.toast('⚠️ 请填写收件人邮箱');
     updateEmailSettingsUI();
   }).catch(function(){UIModule.toast('配置保存失败'); });
 }
 
 function toggleEmailEnabled(){
-  const chat=getActiveChatObj(); if(!chat)return;
-  chat.emailEnabled=!chat.emailEnabled;
-  updateEmailSettingsUI(); saveStore();
- UIModule.toast('邮件发送: '+(chat.emailEnabled?'ON':'OFF'));
+  if(typeof EmailModule!=='undefined'&&EmailModule.toggleEnabled)return EmailModule.toggleEnabled();
 }
 
 function updateEmailSettingsUI(){
@@ -2743,6 +2742,8 @@ function updateEmailSettingsUI(){
   $('toggleEmail').classList.toggle('on', !!(chat&&chat.emailEnabled));
   // Fetch global email config (recipient, send count) from backend
   fetch(AppCore.BACKEND_URL+'/api/email/status').then(function(r){return r.json()}).then(function(s){
+    if(chat)chat.emailEnabled=!!s.enabled;
+    $('toggleEmail').classList.toggle('on',!!(chat&&chat.emailEnabled));
     var status=s.apiKeySet?(s.recipient?'已配置':'缺收件人'):'API Key 未设';
     $('emailStatusVal').textContent=status;
     $('emailSentVal').textContent=s.sentToday+'/'+s.maxPerDay;
@@ -2768,7 +2769,7 @@ async function handleEmailSend(chat, subject, body){
       body:JSON.stringify({subject:subject,body:body||subject})
     });
     var data=await resp.json();
-    if(data.ok){
+    if(data.ok&&data.emailId){
       chat.messages.push({role:'system',contentType:'email_notification',text:'邮件已发送',time:nowTime()});
       if(typingArea)typingArea.innerHTML='';
       return true;

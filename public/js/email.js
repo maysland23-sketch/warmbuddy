@@ -16,7 +16,7 @@ var EmailModule = (function() {
       '<input class="modal-input" id="emailRecipientInput" placeholder="收件人邮箱">' +
       '<div style="font-size:11px;color:var(--text-lighter);margin:12px 0 4px;">发件人名称</div>' +
       '<input class="modal-input" id="emailSenderNameInput" placeholder="WarmBuddy">' +
-      '<div style="font-size:10px;color:var(--text-lighter);margin:2px 0 12px;">发件地址为 onboarding@resend.dev（Resend 免费层）</div>',
+      '<div style="font-size:10px;color:var(--text-lighter);margin:2px 0 12px;">发件地址由服务器 EMAIL_FROM 配置</div>',
       [
         { label: 'cancel', cls: 'cancel', onclick: UIModule.closeModal },
         { label: 'save', cls: 'confirm', onclick: EmailModule.saveConfig }
@@ -41,9 +41,12 @@ var EmailModule = (function() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recipient: recipient, senderName: senderName })
     }).then(function(r) { return r.json(); }).then(function(d) {
+      if (!d.ok) throw new Error(d.error || '配置保存失败');
       store._importing = true;
       UIModule.closeModal();
-      if (d.configured) UIModule.toast('✅ 邮件已配置'); else UIModule.toast('⚠️ 请填写收件人邮箱');
+      if (d.persisted === false) UIModule.toast('⚠️ 已更新，但未持久化（重启后失效）');
+      else if (d.configured) UIModule.toast('✅ 邮件已配置');
+      else UIModule.toast('⚠️ 请填写收件人邮箱');
       EmailModule.updateUI();
     }).catch(function() { UIModule.toast('配置保存失败'); });
   }
@@ -55,10 +58,23 @@ var EmailModule = (function() {
   function toggleEnabled() {
     var chat = AppCore.getActiveChatObj();
     if (!chat) return;
-    chat.emailEnabled = !chat.emailEnabled;
-    EmailModule.updateUI();
-    AppCore.saveStore();
-    UIModule.toast('邮件发送: ' + (chat.emailEnabled ? 'ON' : 'OFF'));
+    var nextEnabled = !chat.emailEnabled;
+    fetch(AppCore.BACKEND_URL + '/api/email/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: nextEnabled })
+    }).then(function(r) { return r.json(); }).then(function(s) {
+      if (!s.ok) throw new Error(s.error || '邮件开关保存失败');
+      chat.emailEnabled = !!s.enabled;
+      AppCore.saveStore();
+      EmailModule.updateUI();
+      UIModule.toast(s.persisted === false
+        ? '邮件开关已更新，但未持久化'
+        : '邮件发送: ' + (chat.emailEnabled ? 'ON' : 'OFF'));
+    }).catch(function() {
+      EmailModule.updateUI();
+      UIModule.toast('邮件开关保存失败');
+    });
   }
 
   // ═══════════════════════════════════════════
@@ -69,6 +85,8 @@ var EmailModule = (function() {
     var chat = AppCore.getActiveChatObj();
     AppCore.$('toggleEmail').classList.toggle('on', !!(chat && chat.emailEnabled));
     fetch(AppCore.BACKEND_URL + '/api/email/status').then(function(r) { return r.json(); }).then(function(s) {
+      if (chat) chat.emailEnabled = !!s.enabled;
+      AppCore.$('toggleEmail').classList.toggle('on', !!(chat && chat.emailEnabled));
       var status = s.apiKeySet ? (s.recipient ? '已配置' : '缺收件人') : 'API Key 未设';
       AppCore.$('emailStatusVal').textContent = status;
       AppCore.$('emailSentVal').textContent = s.sentToday + '/' + s.maxPerDay;

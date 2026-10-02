@@ -7,6 +7,7 @@ process.env.RENDER = 'true';
 process.env.SUPABASE_URL = '';
 process.env.SUPABASE_KEY = '';
 process.env.RESEND_API_KEY = 'test-resend-key';
+process.env.EMAIL_FROM = 'WarmBuddy <notifications@mail.example.com>';
 process.env.RENDER_PROXY_SECRET = 'server-secret-at-least-32-bytes-long';
 process.env.APP_PUBLIC_ORIGIN = 'https://warmbuddy.vercel.app';
 
@@ -35,6 +36,9 @@ async function configureEmail(origin) {
     body: JSON.stringify({ recipient: 'recipient@example.com', senderName: 'WarmBuddy' })
   });
   assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.ok, true);
+  assert.equal(result.persisted, false);
 }
 
 async function sendEmail(origin, body) {
@@ -94,11 +98,13 @@ test('Resend success returns the accepted email id and request diagnostics', asy
   const originalFetch = global.fetch;
   const originalLog = console.log;
   const logs = [];
+  let resendPayload;
   const api = await startApi();
   const origin = `http://127.0.0.1:${api.address().port}`;
   try {
     global.fetch = async (url, init) => {
       if (url === 'https://api.resend.com/emails') {
+        resendPayload = JSON.parse(init.body);
         return new Response(JSON.stringify({ id: 'resend-email-id-123' }), {
           status: 200,
           headers: { 'content-type': 'application/json' }
@@ -117,6 +123,7 @@ test('Resend success returns the accepted email id and request diagnostics', asy
     assert.equal(response.status, 200);
     assert.equal(result.ok, true);
     assert.equal(result.emailId, 'resend-email-id-123');
+    assert.equal(resendPayload.from, 'WarmBuddy <notifications@mail.example.com>');
     assert.match(result.requestId, /^[0-9a-f-]{36}$/);
     const logText = JSON.stringify(logs);
     assert.match(logText, new RegExp(result.requestId));
