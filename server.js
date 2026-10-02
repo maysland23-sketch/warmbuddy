@@ -113,6 +113,28 @@ function writeAgentGatewayComment(res, comment) {
   res.write(`: ${comment}\n\n`);
 }
 
+function createClientAbortContext(req, res) {
+  const controller = new AbortController();
+  let disconnected = false;
+  const abort = () => {
+    disconnected = true;
+    if (!controller.signal.aborted) controller.abort();
+  };
+  const onClose = () => {
+    if (!res.writableFinished) abort();
+  };
+  req.once('aborted', abort);
+  res.once('close', onClose);
+  return {
+    signal: controller.signal,
+    isDisconnected: () => disconnected,
+    cleanup: () => {
+      req.removeListener('aborted', abort);
+      res.removeListener('close', onClose);
+    }
+  };
+}
+
 function agentGatewayErrorStatus(error) {
   if (error?.code === 'AGENT_GATEWAY_TIMEOUT') return 504;
   if (error?.code === 'AGENT_GATEWAY_NOT_CONFIGURED') return 503;
@@ -298,7 +320,7 @@ function resolveModel(model, userEndpoint) {
  * All other domains use the standard global fetch().
  *
  * @param {string} url - Full URL to fetch
- * @param {object} opts - { method, headers, body?, stream? }
+ * @param {object} opts - { method, headers, body?, stream?, signal? }
  *   stream: if true, returns a response with body.getReader() for SSE streaming
  * @returns {Promise<{ok:boolean, status:number, text:()=>Promise<string>, json:()=>Promise<any>, body?:{getReader:fn}}>}
  */
@@ -310,7 +332,7 @@ async function safeFetch(url, opts = {}) {
   // Native https for OpenRouter — undici drops Authorization header
   const https = require('https');
   const u = new URL(url);
-  const { method = 'GET', headers = {}, body, stream } = opts;
+  const { method = 'GET', headers = {}, body, stream, signal } = opts;
 
   console.log(`[safe-fetch] Native HTTPS ${method} ${u.hostname} stream=${!!stream}`);
 
@@ -364,7 +386,19 @@ async function safeFetch(url, opts = {}) {
       }
     });
 
+    const abortRequest = () => {
+      const error = new Error('Request aborted');
+      error.name = 'AbortError';
+      req.destroy(error);
+    };
     req.on('error', (err) => reject(err));
+    if (signal) {
+      if (signal.aborted) {
+        abortRequest();
+        return;
+      }
+      else signal.addEventListener('abort', abortRequest, { once: true });
+    }
 
     if (body) {
       req.write(body);
@@ -1381,6 +1415,39 @@ const mcpSessions = {};    // { url: { sessionId, expiresAt } }
 const mcpToolListCache = {}; // { url: { tools: [...], expiresAt } }
 const MCP_TIMEOUT = 5000;    // 5-second timeout for MCP requests
 const MCP_CACHE_TTL = 300000; // 5-minute tool list cache
+const MCP_TOTAL_TIMEOUT_DEFAULT = 120000;
+const MCP_MAX_TOOL_ROUNDS = 8;
+const MCP_MAX_TOOL_CALLS = 32;
+
+class MCPConversationError extends Error {
+  constructor(message, { code = 'MCP_CONVERSATION_ERROR', status = 502, incomplete = false, cause } = {}) {
+    super(message, cause ? { cause } : undefined);
+    this.name = 'MCPConversationError';
+    this.code = code;
+    this.status = status;
+    this.incomplete = incomplete;
+    this.cause = cause;
+  }
+}
+
+function getMCPTotalTimeoutMs() {
+  return Math.max(1, Number(process.env.MCP_TOTAL_TIMEOUT_MS) || MCP_TOTAL_TIMEOUT_DEFAULT);
+}
+
+function createCombinedAbortSignal(parentSignal, timeoutController) {
+  if (!parentSignal) return timeoutController.signal;
+  return AbortSignal.any([parentSignal, timeoutController.signal]);
+}
+
+function throwIfMCPConversationAborted(signal) {
+  if (signal?.aborted) {
+    throw new MCPConversationError('MCP conversation was aborted', {
+      code: 'MCP_CONVERSATION_ABORTED',
+      status: 499,
+      cause: signal.reason
+    });
+  }
+}
 
 /**
  * Build a JSON-RPC 2.0 request body, omitting `params` when empty.
@@ -1419,14 +1486,12 @@ function buildMCPAuthHeaders(auth) {
  * Ensure an MCP session is initialized for the given URL.
  * Returns the session ID, or null on failure.
  */
-async function ensureMCPSession(url, auth) {
+async function ensureMCPSession(url, auth, signal) {
   // Return cached session if still valid
   const cached = mcpSessions[url];
   if (cached && cached.expiresAt > Date.now()) return cached.sessionId;
 
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), MCP_TIMEOUT);
     const reqHeaders = {
       'Content-Type': 'application/json',
       'Accept': 'application/json, text/event-stream',
@@ -1436,6 +1501,9 @@ async function ensureMCPSession(url, auth) {
     var authHeaders = buildMCPAuthHeaders(auth);
     Object.assign(reqHeaders, authHeaders);
 
+    const requestSignals = [AbortSignal.timeout(MCP_TIMEOUT)];
+    if (signal) requestSignals.unshift(signal);
+    const requestSignal = AbortSignal.any(requestSignals);
     const resp = await fetch(url, {
       method: 'POST',
       headers: reqHeaders,
@@ -1445,10 +1513,8 @@ async function ensureMCPSession(url, auth) {
         params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'warmbuddy', version: '1.0' } },
         id: 1
       }),
-      signal: ctrl.signal
+      signal: requestSignal
     });
-    clearTimeout(timer);
-
     // Extract session ID from response header (case-insensitive)
     const sessionId = resp.headers.get('Mcp-Session-Id') || resp.headers.get('mcp-session-id');
     // Drain body
@@ -1463,6 +1529,7 @@ async function ensureMCPSession(url, auth) {
     console.log('[mcp] Stateless mode:', safeLogUrlHost(url));
     return null;
   } catch (err) {
+    if (signal?.aborted) throwIfMCPConversationAborted(signal);
     console.warn('[mcp] Session init failed:', safeLogUrlHost(url), err?.code || err?.name || 'UNKNOWN');
     return null;
   }
@@ -1472,7 +1539,7 @@ async function ensureMCPSession(url, auth) {
  * Send a JSON-RPC request to an MCP server and parse the response.
  * Handles both application/json and text/event-stream responses.
  */
-async function mcpRequest(url, sessionId, method, params, auth) {
+async function mcpRequest(url, sessionId, method, params, auth, signal) {
   const headers = {
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/event-stream',
@@ -1491,17 +1558,16 @@ async function mcpRequest(url, sessionId, method, params, auth) {
   });
 
   try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), MCP_TIMEOUT);
     const reqBody = buildMCPRequestBody(method, params);
+    const requestSignals = [AbortSignal.timeout(MCP_TIMEOUT)];
+    if (signal) requestSignals.unshift(signal);
+    const requestSignal = AbortSignal.any(requestSignals);
     const resp = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(reqBody),
-      signal: ctrl.signal
+      signal: requestSignal
     });
-    clearTimeout(timer);
-
     if (!resp.ok) {
       await resp.text().catch(() => '');
       throw new Error(`MCP upstream request failed (HTTP ${resp.status})`);
@@ -1539,7 +1605,8 @@ async function mcpRequest(url, sessionId, method, params, auth) {
       return sseResult2;
     }
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error('MCP request timeout (' + MCP_TIMEOUT + 'ms)');
+    if (signal?.aborted) throwIfMCPConversationAborted(signal);
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') throw new Error('MCP request timeout (' + MCP_TIMEOUT + 'ms)');
     throw err;
   }
 }
@@ -1570,7 +1637,7 @@ function parseMCPSSE(body) {
  * List tools from a single MCP server.
  * Caches results for 5 minutes.
  */
-async function listMCPTools(toolDef) {
+async function listMCPTools(toolDef, signal) {
   const url = toolDef.url;
   const cached = mcpToolListCache[url];
   if (cached && cached.expiresAt > Date.now()) {
@@ -1579,8 +1646,8 @@ async function listMCPTools(toolDef) {
   }
 
   const auth = toolDef.auth || { type: 'none' };
-  const sessionId = await ensureMCPSession(url, auth);
-  const result = await mcpRequest(url, sessionId, 'tools/list', {}, auth);
+  const sessionId = await ensureMCPSession(url, auth, signal);
+  const result = await mcpRequest(url, sessionId, 'tools/list', {}, auth, signal);
 
   if (!result || !result.tools) {
     console.warn('[mcp] tools/list returned no tools for', safeLogUrlHost(url));
@@ -1687,14 +1754,14 @@ function convertToAnthropicTools(mcpTools) {
 /**
  * Execute a single MCP tool call and return the text content.
  */
-async function executeMCPToolCall(toolDef, toolName, args) {
+async function executeMCPToolCall(toolDef, toolName, args, signal) {
   console.log('[mcp] Executing tool:', toolName, 'on', safeLogUrlHost(toolDef.url));
   const auth = toolDef.auth || { type: 'none' };
-  const sessionId = await ensureMCPSession(toolDef.url, auth);
+  const sessionId = await ensureMCPSession(toolDef.url, auth, signal);
   const result = await mcpRequest(toolDef.url, sessionId, 'tools/call', {
     name: toolName,
     arguments: args || {}
-  }, auth);
+  }, auth, signal);
 
   // Extract text content from MCP result
   if (!result) return '[Tool returned empty result]';
@@ -1751,17 +1818,18 @@ function buildToolResultMessages(provider, assistantMsgWithTools, toolResults) {
   msgs.push(assistantMsgWithTools);
 
   // Tool result messages
-  for (const tr of toolResults) {
-    if (provider === 'anthropic') {
-      msgs.push({
-        role: 'user',
-        content: [{
-          type: 'tool_result',
-          tool_use_id: tr.id,
-          content: tr.content || tr.error || ''
-        }]
-      });
-    } else {
+  if (provider === 'anthropic') {
+    msgs.push({
+      role: 'user',
+      content: toolResults.map(tr => ({
+        type: 'tool_result',
+        tool_use_id: tr.id,
+        content: tr.content || tr.error || '',
+        ...(tr.error ? { is_error: true } : {})
+      }))
+    });
+  } else {
+    for (const tr of toolResults) {
       msgs.push({
         role: 'tool',
         tool_call_id: tr.id,
@@ -1770,6 +1838,193 @@ function buildToolResultMessages(provider, assistantMsgWithTools, toolResults) {
     }
   }
   return msgs;
+}
+
+function buildAssistantMessage(provider, data) {
+  if (provider === 'anthropic') {
+    return { role: 'assistant', content: data.content || [] };
+  }
+  const message = data.choices?.[0]?.message || {};
+  return {
+    role: 'assistant',
+    content: message.content ?? null,
+    ...(message.tool_calls ? { tool_calls: message.tool_calls } : {})
+  };
+}
+
+function mcpConversationStage(round) {
+  return round === 1 ? 'initial' : (round === 2 ? 'followup' : 'followup_' + (round - 1));
+}
+
+async function runMCPConversation({
+  provider,
+  format,
+  model,
+  fetchUrl,
+  headers,
+  messages,
+  llmTools,
+  toolDefLookup,
+  signal,
+  onTurn,
+  maxToolRounds = MCP_MAX_TOOL_ROUNDS,
+  maxToolCalls = MCP_MAX_TOOL_CALLS
+}) {
+  const timeoutController = new AbortController();
+  const timeoutHandle = setTimeout(() => timeoutController.abort(), getMCPTotalTimeoutMs());
+  const conversationSignal = createCombinedAbortSignal(signal, timeoutController);
+  let conversationMessages = messages.slice();
+  let toolRounds = 0;
+  let totalToolCalls = 0;
+  let round = 0;
+  const textSegments = [];
+  const toolCallMeta = [];
+
+  try {
+    while (true) {
+      throwIfMCPConversationAborted(conversationSignal);
+      round++;
+      const stage = mcpConversationStage(round);
+      const requestBody = buildRequestBody(format, model, conversationMessages, false);
+      if (llmTools.length > 0) injectToolsIntoBody(requestBody, llmTools, provider);
+
+      let response;
+      try {
+        response = await safeFetch(fetchUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(requestBody),
+          signal: conversationSignal
+        });
+      } catch (error) {
+        throwIfMCPConversationAborted(conversationSignal);
+        throw new MCPConversationError('MCP LLM request failed', {
+          code: 'MCP_LLM_REQUEST_FAILED',
+          cause: error
+        });
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorMessage = errorText;
+        try {
+          const payload = JSON.parse(errorText);
+          errorMessage = payload.error?.message || payload.error?.code || errorText;
+        } catch {}
+        throw new MCPConversationError(`MCP LLM request failed (${response.status}): ${errorMessage}`, {
+          code: 'MCP_LLM_REQUEST_FAILED'
+        });
+      }
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (error) {
+        throw new MCPConversationError('MCP LLM returned invalid JSON', {
+          code: 'MCP_LLM_INVALID_RESPONSE',
+          cause: error
+        });
+      }
+      if (data.error) {
+        throw new MCPConversationError(data.error.message || JSON.stringify(data.error), {
+          code: 'MCP_LLM_ERROR'
+        });
+      }
+
+      const result = extractResponseContent(format, data);
+      if (result.error) {
+        throw new MCPConversationError(result.error, { code: 'MCP_LLM_ERROR' });
+      }
+      const toolCalls = llmTools.length > 0 ? extractToolCalls(provider, data) : [];
+      const exceedsLimit = toolCalls.length > 0 && (
+        toolRounds >= maxToolRounds || totalToolCalls + toolCalls.length > maxToolCalls
+      );
+
+      await onTurn?.({
+        round,
+        stage,
+        text: exceedsLimit ? '' : (result.content || ''),
+        usage: result.usage,
+        toolCalls,
+        emitText: !exceedsLimit,
+        incomplete: exceedsLimit
+      });
+
+      if (exceedsLimit) {
+        throw new MCPConversationError('MCP tool call limit reached before completion', {
+          code: 'MCP_TOOL_CALL_LIMIT',
+          status: 409,
+          incomplete: true
+        });
+      }
+
+      if (result.content) textSegments.push(result.content);
+      if (toolCalls.length === 0) {
+        return {
+          content: textSegments.join(''),
+          toolCalls: toolCallMeta,
+          rounds: round,
+          toolRounds,
+          totalToolCalls,
+          usage: result.usage
+        };
+      }
+
+      toolRounds++;
+      totalToolCalls += toolCalls.length;
+      const assistantMessage = buildAssistantMessage(provider, data);
+      const toolResults = [];
+      for (const toolCall of toolCalls) {
+        throwIfMCPConversationAborted(conversationSignal);
+        const def = toolDefLookup[toolCall.name];
+        if (!def) {
+          toolResults.push({ id: toolCall.id, error: 'Tool not found in enabled definitions: ' + toolCall.name });
+          continue;
+        }
+        try {
+          const resultText = await executeMCPToolCall(def, toolCall.name, toolCall.args, conversationSignal);
+          toolResults.push({ id: toolCall.id, content: resultText });
+        } catch (error) {
+          throwIfMCPConversationAborted(conversationSignal);
+          toolResults.push({ id: toolCall.id, error: error.message });
+        }
+      }
+
+      for (let index = 0; index < toolCalls.length; index++) {
+        const toolCall = toolCalls[index];
+        const toolResult = toolResults[index];
+        toolCallMeta.push({
+          name: toolCall.name,
+          args: toolCall.args,
+          result: (toolResult?.content || toolResult?.error || '').slice(0, 2000)
+        });
+      }
+      conversationMessages = conversationMessages.concat(
+        buildToolResultMessages(provider, assistantMessage, toolResults)
+      );
+    }
+  } catch (error) {
+    if (timeoutController.signal.aborted) {
+      throw new MCPConversationError('MCP conversation timed out', {
+        code: 'MCP_CONVERSATION_TIMEOUT',
+        status: 504,
+        incomplete: true,
+        cause: error
+      });
+    }
+    if (error instanceof MCPConversationError) throw error;
+    if (signal?.aborted || conversationSignal.aborted) {
+      throw new MCPConversationError('MCP conversation was aborted', {
+        code: 'MCP_CONVERSATION_ABORTED',
+        status: 499,
+        incomplete: true,
+        cause: error
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
 }
 
 /**
@@ -1992,6 +2247,7 @@ app.post('/api/agent/stream', async (req, res) => {
 });
 
 app.post('/api/chat/stream', async (req, res) => {
+  let clientAbortContext;
   try {
     // Null-safety: req.body may be undefined if body-parser skipped
     const body = req.body || {};
@@ -2001,6 +2257,7 @@ app.post('/api/chat/stream', async (req, res) => {
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: 'Missing messages' });
     }
+    clientAbortContext = createClientAbortContext(req, res);
 
     // Check project-level API enabled status
     const projectId = body.projectId;
@@ -2008,10 +2265,10 @@ app.post('/api/chat/stream', async (req, res) => {
       return res.status(403).json({ error: '该项目的 AI 功能已被禁用，请先开启后再尝试。' });
     }
 
-    // ═══ Tool-call gate: if tools are enabled, route to non-streaming handler ═══
-    // Streaming cannot handle tool_calls (they arrive as deltas). When tools are
-    // active, we internally delegate to the non-streaming path, then return the
-    // result as a single SSE event so the frontend's existing stream parser works.
+    // ═══ Tool-call gate: run the MCP conversation loop when tools are enabled ═══
+    // The first version of this path performed one tool round and then removed
+    // tools from the follow-up request. Keep the round-based SSE contract here:
+    // emit each completed LLM text segment, execute its tool calls, then continue.
     const windowId = body.windowId;
     const enabledToolIds = body.enabledToolIds || [];
     const enabledToolDefs = body.enabledToolDefs || null;
@@ -2046,9 +2303,10 @@ app.post('/api/chat/stream', async (req, res) => {
     if (windowId && projectId) {
       const enabledDefs = await getEnabledToolDefsForWindow(projectId, windowId, enabledToolIds, enabledToolDefs);
       if (enabledDefs.length > 0) {
-        console.log('[chat/stream] Tools enabled (' + enabledDefs.length + ' defs), delegating to non-streaming handler');
-        // Build a fake request object and call the non-streaming handler logic inline.
-        // We import the Express res methods manually rather than calling the app route.
+        console.log('[chat/stream] Tools enabled (' + enabledDefs.length + ' defs), using MCP conversation loop');
+        res.status(200);
+        res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
+        res.flushHeaders();
         try {
           const resolved = resolveModel(model, endpoint);
           const provider = resolved.provider;
@@ -2063,131 +2321,49 @@ app.post('/api/chat/stream', async (req, res) => {
           for (const def of enabledDefs) {
             try {
               console.log('[mcp-debug] /stream listing tools from:', safeLogUrlHost(def.url), 'name:', def.name);
-              const tools = await listMCPTools(def);
+              const tools = await listMCPTools(def, clientAbortContext.signal);
               console.log('[mcp-debug] /stream listed ' + tools.length + ' tool(s) from ' + def.name + ':', tools.map(function(t){return t.name;}));
               for (const t of tools) { llmTools.push(t); toolDefLookup[t.name] = def; }
-            } catch (e) { console.warn('[mcp] List tools failed for', safeLogUrlHost(def.url), ':', e?.code || e?.name || 'UNKNOWN'); }
+            } catch (e) {
+              if (clientAbortContext.signal.aborted) throw e;
+              console.warn('[mcp] List tools failed for', safeLogUrlHost(def.url), ':', e?.code || e?.name || 'UNKNOWN');
+            }
           }
           console.log('[mcp-debug] /stream Total llmTools after listing: ' + llmTools.length + ' tool(s)');
-
-          // First LLM call
-          const requestBody = buildRequestBody(format, model, messages, false);
-          if (llmTools.length > 0) {
-            console.log('[mcp-debug] /stream Injecting ' + llmTools.length + ' tools into LLM request (provider=' + provider + ')');
-            injectToolsIntoBody(requestBody, llmTools, provider);
-            console.log('[mcp-debug] /stream Request body tools count:', (requestBody.tools || []).length);
-          } else {
-            console.log('[mcp-debug] /stream No tools to inject (llmTools is empty)');
-          }
-
-          const response = await safeFetch(fetchUrl, { method: 'POST', headers: reqHeaders, body: JSON.stringify(requestBody) });
-          if (!response.ok) {
-            const errText = await response.text();
-            let errMsg = errText;
-            try { const ej = JSON.parse(errText); errMsg = ej.error?.message || ej.error?.code || errText; } catch {}
-            res.write(`data: ${JSON.stringify({ error: `API error (${response.status}): ${errMsg}` })}\n\n`);
-            res.end();
-            return;
-          }
-
-          const data = await response.json();
-          if (data.error) {
-            res.write(`data: ${JSON.stringify({ error: data.error.message || JSON.stringify(data.error) })}\n\n`);
-            res.end();
-            return;
-          }
-
-          const toolCalls = llmTools.length > 0 ? extractToolCalls(provider, data) : [];
-          console.log('[mcp-debug] /stream LLM response — tool_calls count:', toolCalls.length);
-          if (toolCalls.length > 0) {
-            console.log('[chat/stream] LLM requested', toolCalls.length, 'tool call(s)');
-            const firstUsage = extractResponseContent(format, data).usage;
-            await captureUsage(firstUsage, 'mcp', 'initial', {
-              toolCount: toolCalls.length
-            }, estimateUsage(estimateMessageTokens(messages), 1));
-
-            let assistantMsg;
-            if (provider === 'anthropic') {
-              assistantMsg = { role: 'assistant', content: data.content || [] };
-            } else {
-              assistantMsg = { role: 'assistant', content: data.choices[0].message.content || null, tool_calls: data.choices[0].message.tool_calls };
+          const result = await runMCPConversation({
+            provider,
+            format,
+            model,
+            fetchUrl,
+            headers: reqHeaders,
+            messages,
+            llmTools,
+            toolDefLookup,
+            signal: clientAbortContext.signal,
+            onTurn: async turn => {
+              if (turn.emitText && turn.text) {
+                res.write(`data: ${JSON.stringify({ text: turn.text })}\n\n`);
+              }
+              await captureUsage(turn.usage, 'mcp', turn.stage, {
+                toolCount: turn.toolCalls.length,
+                toolNames: turn.toolCalls.map(toolCall => toolCall.name),
+                markerTypes: detectEmbeddedMarkerTypes(turn.text)
+              }, estimateUsage(estimateMessageTokens(messages), Math.max(1, Math.ceil((turn.text || '').length / 1.5))));
+              const latestEvent = usageEvents[usageEvents.length - 1];
+              if (latestEvent) res.write(`data: ${JSON.stringify({ usageEvent: tokenEventToClient(latestEvent) })}\n\n`);
             }
-
-            const toolResults = [];
-            for (const tc of toolCalls) {
-              const def = toolDefLookup[tc.name];
-              if (!def) { toolResults.push({ id: tc.id, error: 'Tool not found: ' + tc.name }); continue; }
-              try {
-                const resultText = await executeMCPToolCall(def, tc.name, tc.args);
-                toolResults.push({ id: tc.id, content: resultText });
-              } catch (e) { toolResults.push({ id: tc.id, error: e.message }); }
-            }
-
-            const followUpMessages = messages.concat(buildToolResultMessages(provider, assistantMsg, toolResults));
-            const requestBody2 = buildRequestBody(format, model, followUpMessages, false);
-
-            const response2 = await safeFetch(fetchUrl, { method: 'POST', headers: reqHeaders, body: JSON.stringify(requestBody2) });
-            if (!response2.ok) {
-              const errText2 = await response2.text();
-              res.write(`data: ${JSON.stringify({ error: 'Follow-up API error: ' + errText2.slice(0, 200) })}\n\n`);
-              res.end();
-              return;
-            }
-
-            const data2 = await response2.json();
-            const result2 = extractResponseContent(format, data2);
-            if (result2.error) {
-              res.write(`data: ${JSON.stringify({ error: result2.error })}\n\n`);
-              res.end();
-              return;
-            }
-            await captureUsage(result2.usage, 'mcp', 'followup', {
-              toolCount: toolCalls.length,
-              toolNames: toolCalls.map(function(tc) { return tc.name; }),
-              markerTypes: detectEmbeddedMarkerTypes(result2.content)
-            }, estimateUsage(estimateMessageTokens(followUpMessages), Math.max(1, Math.ceil((result2.content || '').length / 1.5))));
-
-            // Return final result as single SSE chunk + [DONE]
-            res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-            res.flushHeaders();
-            const finalText = result2.content || '';
-            const toolCallsMeta = toolCalls.map(function(tc, idx) {
-              var tr = toolResults[idx];
-              return { name: tc.name, args: tc.args, result: tr ? (tr.content || tr.error || '').slice(0, 2000) : '' };
-            });
-            usageEvents.forEach(function(event) {
-              res.write(`data: ${JSON.stringify({ usageEvent: tokenEventToClient(event) })}\n\n`);
-            });
-            res.write(`data: ${JSON.stringify({ text: finalText, _toolCalls: toolCallsMeta })}\n\n`);
-            res.write(`data: [DONE]\n\n`);
-            res.end();
-            return;
-          }
-
-          // No tool calls — return LLM text as single SSE event
-          const result = extractResponseContent(format, data);
-          if (result.error) {
-            res.write(`data: ${JSON.stringify({ error: result.error })}\n\n`);
-            res.end();
-            return;
-          }
-          res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-          res.flushHeaders();
-          const text = result.content || '';
-          await captureUsage(result.usage, tokenContext.actionType || 'chat', tokenContext.stage || 'single', {
-            toolCount: 0,
-            markerTypes: detectEmbeddedMarkerTypes(text)
-          }, estimateUsage(estimateMessageTokens(messages), Math.max(1, Math.ceil(text.length / 1.5))));
-          res.write(`data: ${JSON.stringify({ text: text })}\n\n`);
-          usageEvents.forEach(function(event) {
-            res.write(`data: ${JSON.stringify({ usageEvent: tokenEventToClient(event) })}\n\n`);
           });
-          res.write(`data: [DONE]\n\n`);
+          if (result.toolCalls.length > 0) {
+            res.write(`data: ${JSON.stringify({ _toolCalls: result.toolCalls })}\n\n`);
+          }
+          res.write('data: [DONE]\n\n');
           res.end();
           return;
         } catch (e) {
+          if (clientAbortContext.isDisconnected() || e.code === 'MCP_CONVERSATION_ABORTED') return;
           console.error('[chat/stream] Tool fallback error:', e.message);
-          res.write(`data: ${JSON.stringify({ error: 'Tool call failed: ' + e.message })}\n\n`);
+          res.write(`data: ${JSON.stringify({ error: e.message, code: e.code || 'MCP_CONVERSATION_ERROR', incomplete: Boolean(e.incomplete) })}\n\n`);
+          res.write('data: [DONE]\n\n');
           res.end();
           return;
         }
@@ -2220,7 +2396,8 @@ app.post('/api/chat/stream', async (req, res) => {
       method: 'POST',
       headers,
       body: JSON.stringify(requestBody),
-      stream: true
+      stream: true,
+      signal: clientAbortContext.signal
     });
 
     console.log(`[chat/stream] upstream status=${response.status}`);
@@ -2387,6 +2564,7 @@ app.post('/api/chat/stream', async (req, res) => {
     res.write(`data: [DONE]\n\n`);
     res.end();
   } catch (err) {
+    if (clientAbortContext?.isDisconnected() || err.code === 'MCP_CONVERSATION_ABORTED') return;
     console.error('[chat/stream] error:', err.message);
     if (res.headersSent) {
       // SSE stream already started — send error in SSE format
@@ -2401,6 +2579,8 @@ app.post('/api/chat/stream', async (req, res) => {
         res.status(500).json({ error: `Stream error: ${err.message}` });
       } catch {}
     }
+  } finally {
+    clientAbortContext?.cleanup();
   }
 });
 
@@ -2410,6 +2590,7 @@ app.post('/api/chat/stream', async (req, res) => {
  * Supports MCP tool calling when window has enabled tools.
  */
 app.post('/api/chat', async (req, res) => {
+  let clientAbortContext;
   try {
     const body = req.body || {};
     const { apiKey, endpoint, model, messages, projectId, windowId, enabledToolIds, enabledToolDefs } = body;
@@ -2429,6 +2610,7 @@ app.post('/api/chat', async (req, res) => {
     if (projectId && !(await isProjectApiEnabled(projectId))) {
       return res.status(403).json({ error: '该项目的 AI 功能已被禁用，请先开启后再尝试。' });
     }
+    clientAbortContext = createClientAbortContext(req, res);
 
     const resolved = resolveModel(model, endpoint);
     const provider = resolved.provider;
@@ -2468,13 +2650,14 @@ app.post('/api/chat', async (req, res) => {
         for (const def of enabledDefs) {
           try {
             console.log('[mcp-debug] /chat listing tools from:', safeLogUrlHost(def.url), 'name:', def.name);
-            const tools = await listMCPTools(def);
+              const tools = await listMCPTools(def, clientAbortContext.signal);
             console.log('[mcp-debug] /chat listed ' + tools.length + ' tool(s) from ' + def.name + ':', tools.map(function(t){return t.name;}));
             for (const t of tools) {
               llmTools.push(t);
               toolDefLookup[t.name] = def;
             }
           } catch (e) {
+            if (clientAbortContext.signal.aborted) throw e;
             console.warn('[mcp] Failed to list tools for', safeLogUrlHost(def.url), ':', e?.code || e?.name || 'UNKNOWN');
           }
         }
@@ -2486,142 +2669,74 @@ app.post('/api/chat', async (req, res) => {
       console.log('[mcp-debug] /chat No windowId provided — skipping tool loading');
     }
 
-    // ═══ Build and send LLM request ═══
-    const requestBody = buildRequestBody(format, model, messages, false);
+    const headers = getAuthHeaders(provider, resolved.endpoint, apiKey);
     if (llmTools.length > 0) {
-      console.log('[mcp-debug] /chat Injecting ' + llmTools.length + ' tools into LLM request (provider=' + provider + ')');
-      injectToolsIntoBody(requestBody, llmTools, provider);
-      console.log('[mcp-debug] /chat Request body tools count:', (requestBody.tools || []).length);
-    } else {
-      console.log('[mcp-debug] /chat No tools to inject (llmTools is empty)');
+      const result = await runMCPConversation({
+        provider,
+        format,
+        model,
+        fetchUrl,
+        headers,
+        messages,
+        llmTools,
+        toolDefLookup,
+        signal: clientAbortContext.signal,
+        onTurn: async turn => {
+          await captureUsage(turn.usage, 'mcp', turn.stage, {
+            toolCount: turn.toolCalls.length,
+            toolNames: turn.toolCalls.map(toolCall => toolCall.name),
+            markerTypes: detectEmbeddedMarkerTypes(turn.text)
+          }, estimateUsage(estimateMessageTokens(messages), Math.max(1, Math.ceil((turn.text || '').length / 1.5))));
+        }
+      });
+      return res.json({
+        reply: { role: 'assistant', content: result.content },
+        usage: result.usage,
+        usageEvents: usageEvents.map(tokenEventToClient),
+        _toolCalls: result.toolCalls
+      });
     }
 
-    const headers = getAuthHeaders(provider, resolved.endpoint, apiKey);
+    console.log('[mcp-debug] /chat No tools to inject (llmTools is empty)');
+    const requestBody = buildRequestBody(format, model, messages, false);
     const response = await safeFetch(fetchUrl, {
       method: 'POST',
       headers,
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify(requestBody),
+      signal: clientAbortContext.signal
     });
-
     if (!response.ok) {
       const errText = await response.text();
       let errMsg = errText;
       try { const ej = JSON.parse(errText); errMsg = ej.error?.message || ej.error?.code || errText; } catch {}
       return res.status(502).json({ error: `API error (${response.status}): ${errMsg}` });
     }
-
     const data = await response.json();
-
-    if (data.error) {
-      return res.status(502).json({ error: data.error.message || JSON.stringify(data.error) });
-    }
-
-    // ═══ Check for tool_calls ═══
-    const toolCalls = llmTools.length > 0 ? extractToolCalls(provider, data) : [];
-    console.log('[mcp-debug] /chat LLM response — tool_calls count:', toolCalls.length, toolCalls.length > 0 ? 'names: ' + toolCalls.map(function(tc){return tc.name;}).join(', ') : '(no tool calls)');
-    let assistantMsg, usage;
-
-    if (toolCalls.length > 0) {
-      console.log('[mcp] LLM requested', toolCalls.length, 'tool call(s):', toolCalls.map(tc => tc.name).join(', '));
-
-      // Build the assistant message that contains the tool_calls
-      if (provider === 'anthropic') {
-        assistantMsg = { role: 'assistant', content: data.content || [] };
-      } else {
-        assistantMsg = { role: 'assistant', content: data.choices[0].message.content || null, tool_calls: data.choices[0].message.tool_calls };
-      }
-      usage = extractResponseContent(format, data).usage;
-      await captureUsage(usage, 'mcp', 'initial', { toolCount: toolCalls.length }, estimateUsage(estimateMessageTokens(messages), 1));
-
-      // Execute each tool call
-      const toolResults = [];
-      for (const tc of toolCalls) {
-        const def = toolDefLookup[tc.name];
-        if (!def) {
-          toolResults.push({ id: tc.id, error: 'Tool not found in enabled definitions: ' + tc.name });
-          console.warn('[mcp] Tool not found:', tc.name);
-          continue;
-        }
-        try {
-          const resultText = await executeMCPToolCall(def, tc.name, tc.args);
-          toolResults.push({ id: tc.id, content: resultText });
-          console.log('[mcp] Tool result received:', tc.name, 'length:', resultText.length);
-        } catch (e) {
-          toolResults.push({ id: tc.id, error: e.message });
-          console.error('[mcp] Tool execution error:', tc.name, e.message);
-        }
-      }
-
-      // Build follow-up messages array
-      const followUpMessages = messages.concat(buildToolResultMessages(provider, assistantMsg, toolResults));
-
-      // Second LLM call with tool results
-      const requestBody2 = buildRequestBody(format, model, followUpMessages, false);
-      // Don't include tools in the follow-up to avoid infinite loops
-      // (the LLM should produce a final text response)
-
-      console.log('[mcp] Second LLM call with', toolResults.length, 'tool result(s)');
-
-      const response2 = await safeFetch(fetchUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(requestBody2)
-      });
-
-      if (!response2.ok) {
-        const errText2 = await response2.text();
-        let errMsg2 = errText2;
-        try { const ej2 = JSON.parse(errText2); errMsg2 = ej2.error?.message || ej2.error?.code || errText2; } catch {}
-        return res.status(502).json({ error: `API error on follow-up (${response2.status}): ${errMsg2}` });
-      }
-
-      const data2 = await response2.json();
-      if (data2.error) {
-        return res.status(502).json({ error: data2.error.message || JSON.stringify(data2.error) });
-      }
-
-      const result2 = extractResponseContent(format, data2);
-      if (result2.error) {
-        return res.status(502).json({ error: result2.error });
-      }
-      await captureUsage(result2.usage, 'mcp', 'followup', {
-        toolCount: toolCalls.length,
-        toolNames: toolCalls.map(function(tc) { return tc.name; }),
-        markerTypes: detectEmbeddedMarkerTypes(result2.content)
-      }, estimateUsage(estimateMessageTokens(followUpMessages), Math.max(1, Math.ceil((result2.content || '').length / 1.5))));
-
-      // Return final response with tool call metadata
-      res.json({
-        reply: { role: 'assistant', content: result2.content },
-        usage: result2.usage,
-        usageEvents: usageEvents.map(tokenEventToClient),
-        _toolCalls: toolCalls.map(function(tc, idx) {
-          var tr = toolResults[idx];
-          return { name: tc.name, args: tc.args, result: tr ? (tr.content || tr.error || '').slice(0, 2000) : '' };
-        })
-      });
-    } else {
-      // No tool calls — return response directly
-      const result = extractResponseContent(format, data);
-      if (result.error) {
-        return res.status(502).json({ error: result.error });
-      }
-      await captureUsage(result.usage, tokenContext.actionType || 'chat', tokenContext.stage || 'single', Object.assign({}, tokenContext.metadata || {}, {
-        markerTypes: detectEmbeddedMarkerTypes(result.content)
-      }),
-        estimateUsage(estimateMessageTokens(messages), Math.max(1, Math.ceil((result.content || '').length / 1.5))));
-      res.json({
-        reply: { role: 'assistant', content: result.content },
-        usage: result.usage,
-        usageEvents: usageEvents.map(tokenEventToClient)
-      });
-    }
+    if (data.error) return res.status(502).json({ error: data.error.message || JSON.stringify(data.error) });
+    const result = extractResponseContent(format, data);
+    if (result.error) return res.status(502).json({ error: result.error });
+    await captureUsage(result.usage, tokenContext.actionType || 'chat', tokenContext.stage || 'single', Object.assign({}, tokenContext.metadata || {}, {
+      markerTypes: detectEmbeddedMarkerTypes(result.content)
+    }), estimateUsage(estimateMessageTokens(messages), Math.max(1, Math.ceil((result.content || '').length / 1.5))));
+    res.json({
+      reply: { role: 'assistant', content: result.content },
+      usage: result.usage,
+      usageEvents: usageEvents.map(tokenEventToClient)
+    });
   } catch (err) {
+    if (clientAbortContext?.isDisconnected() || err.code === 'MCP_CONVERSATION_ABORTED') return;
     console.error('[chat] request failed', {
       name: err?.name || 'Error',
       code: err?.code || 'UNKNOWN'
     });
-    res.status(500).json({ error: 'Backend request failed: ' + err.message });
+    const status = err instanceof MCPConversationError ? err.status : 500;
+    res.status(status).json({
+      error: err.message,
+      code: err.code || 'BACKEND_REQUEST_FAILED',
+      ...(err.incomplete ? { incomplete: true } : {})
+    });
+  } finally {
+    clientAbortContext?.cleanup();
   }
 });
 
