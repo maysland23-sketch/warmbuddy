@@ -1,4 +1,5 @@
 require('dotenv').config();
+const { randomUUID } = require('node:crypto');
 const express = require('express');
 const webpush = require('web-push');
 const cron = require('node-cron');
@@ -31,6 +32,12 @@ if (OUTBOUND_PROXY) {
 
 const app = express();
 const IS_RENDER = String(process.env.RENDER || '').toLowerCase() === 'true';
+
+app.use((req, res, next) => {
+  req.requestId = randomUUID();
+  res.setHeader('x-request-id', req.requestId);
+  next();
+});
 
 function safeLogUrlHost(value) {
   try {
@@ -2869,6 +2876,30 @@ const emailState = {
   sentDate: ''
 };
 
+function createResendError(payload, status) {
+  const details = payload && typeof payload.error === 'object' ? payload.error : payload || {};
+  const error = new Error(details.message || payload?.message || `Resend API returned ${status}`);
+  error.name = details.name || payload?.name || `resend_http_${status}`;
+  error.resendStatus = status;
+  return error;
+}
+
+function createMissingEmailIdError(status) {
+  const error = new Error('Resend response did not include an email id');
+  error.name = 'missing_email_id';
+  error.resendStatus = status;
+  return error;
+}
+
+function logEmailError(prefix, requestId, error) {
+  console.error(prefix, {
+    requestId,
+    resendStatus: error.resendStatus ?? null,
+    errorName: error.name || 'Error',
+    errorMessage: error.message || String(error)
+  });
+}
+
 // Persist email config to Supabase (survives Render restarts)
 async function loadEmailConfig() {
   if (!supabase) return null;
@@ -2924,16 +2955,17 @@ app.post('/api/email/settings', (req, res) => {
 });
 
 app.post('/api/email/send', async (req, res) => {
+  const requestId = req.requestId || randomUUID();
   resetEmailDaily();
-  if (!RESEND_API_KEY) return res.status(400).json({ error: 'Resend API Key 未配置 (环境变量 RESEND_API_KEY)' });
-  if (!emailState.enabled) return res.status(403).json({ error: '邮件功能已关闭' });
-  if (!emailState.recipient) return res.status(400).json({ error: '收件人邮箱未配置' });
+  if (!RESEND_API_KEY) return res.status(400).json({ error: 'Resend API Key 未配置 (环境变量 RESEND_API_KEY)', requestId });
+  if (!emailState.enabled) return res.status(403).json({ error: '邮件功能已关闭', requestId });
+  if (!emailState.recipient) return res.status(400).json({ error: '收件人邮箱未配置', requestId });
   if (emailState.sentToday >= emailState.maxPerDay) {
-    return res.status(429).json({ error: `今日发送已达上限(${emailState.maxPerDay}封)` });
+    return res.status(429).json({ error: `今日发送已达上限(${emailState.maxPerDay}封)`, requestId });
   }
 
   const { subject, body } = req.body || {};
-  if (!subject) return res.status(400).json({ error: '缺少邮件主题' });
+  if (!subject) return res.status(400).json({ error: '缺少邮件主题', requestId });
 
   // Email body is composed on the frontend (from [[EMAIL:主题|正文]]); no LLM generation here.
   const emailBody = (body && body.trim()) ? body.trim() : subject;
@@ -2954,17 +2986,21 @@ app.post('/api/email/send', async (req, res) => {
       })
     });
 
-    if (!resp.ok) {
-      const errData = await resp.json().catch(() => ({}));
-      throw new Error(errData.message || `Resend API returned ${resp.status}`);
-    }
+    const resendData = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw createResendError(resendData, resp.status);
+    const emailId = typeof resendData.id === 'string' ? resendData.id : '';
+    if (!emailId) throw createMissingEmailIdError(resp.status);
 
     emailState.sentToday++;
-    console.log(`[email] Sent "${subject}" → ${emailState.recipient} (${emailState.sentToday}/${emailState.maxPerDay} today)`);
-    res.json({ ok: true, sentToday: emailState.sentToday, maxPerDay: emailState.maxPerDay });
+    console.log('[email] Send accepted', {
+      requestId,
+      resendStatus: resp.status,
+      emailId
+    });
+    res.json({ ok: true, emailId, requestId, sentToday: emailState.sentToday, maxPerDay: emailState.maxPerDay });
   } catch (e) {
-    console.error('[email] Send error:', e.message);
-    res.status(500).json({ error: '发送失败: ' + e.message });
+    logEmailError('[email] Send error', requestId, e);
+    res.status(500).json({ error: '发送失败: ' + e.message, requestId });
   }
 });
 
@@ -2988,7 +3024,7 @@ app.get('/api/cron/check', async (req, res) => {
       continue;
     }
     try {
-      await checkProjectDesires(pid, freshCfg);
+      await checkProjectDesires(pid, freshCfg, req.requestId);
       triggered++;
     } catch (e) { console.error(`[cron] Check error ${pid}:`, e.message); }
   }
@@ -4482,7 +4518,7 @@ async function dispatchNtfyForEvent(event) {
 // ── Global mutex for proactive processing (prevents concurrent trigger of same project) ──
 const processingProjects = new Set();
 
-async function checkProjectDesires(pid, cfg) {
+async function checkProjectDesires(pid, cfg, requestId = randomUUID()) {
   // cfg is the full project config (apiKey, endpoint, _desireState, _chatId, etc.)
   // _desireState is synced from frontend every 60s via syncDesireStateToBackend()
 
@@ -4828,13 +4864,21 @@ async function checkProjectDesires(pid, cfg) {
           headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ from: 'WarmBuddy <onboarding@resend.dev>', to: cfg.recipient, subject: emSubj, text: emBody })
         });
-        if (!emailResponse.ok) throw new Error('Email API returned ' + emailResponse.status);
+        const resendData = await emailResponse.json().catch(() => ({}));
+        if (!emailResponse.ok) throw createResendError(resendData, emailResponse.status);
+        const emailId = typeof resendData.id === 'string' ? resendData.id : '';
+        if (!emailId) throw createMissingEmailIdError(emailResponse.status);
+        console.log('[email] Proactive send accepted', {
+          requestId,
+          resendStatus: emailResponse.status,
+          emailId
+        });
         emailSent = true;
         // Update daily email count (persisted)
         resetDailyCountsIfNewDay(cfg);
         cfg._dailyEmailCount = (cfg._dailyEmailCount || 0) + 1;
         await saveDailyCounts(pid, cfg);
-      } catch (e) { console.error('[email] Proactive send error:', e.message); }
+      } catch (e) { logEmailError('[email] Proactive send error', requestId, e); }
     }
 
     // ── Step C: Send the backend event through ntfy only ──
