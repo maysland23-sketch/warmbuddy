@@ -477,7 +477,10 @@ function buildRequestBody(provider, model, messages, stream) {
   switch (provider) {
     case 'anthropic': {
       // Convert messages format for Anthropic
-      const systemMsg = messages.find(m => m.role === 'system');
+      const systemParts = messages
+        .filter(m => m && m.role === 'system')
+        .map(m => m.content == null ? '' : String(m.content))
+        .filter(content => content.length > 0);
       const chatMessages = messages.filter(m => m.role !== 'system');
       const body = {
         model: model || 'claude-sonnet-4-6',
@@ -488,7 +491,7 @@ function buildRequestBody(provider, model, messages, stream) {
         })),
         stream: stream
       };
-      if (systemMsg) body.system = systemMsg.content;
+      if (systemParts.length > 0) body.system = systemParts.join('\n\n');
       return body;
     }
     case 'deepseek':
