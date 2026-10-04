@@ -315,6 +315,9 @@ var SettingsModule = (function() {
     // Toolkit list
     var tkm = AppCore.getModule('toolkit');
     if (tkm && tkm.renderToolkitList) tkm.renderToolkitList();
+    // Custom prompts
+    var cpm = AppCore.getModule('customPrompts');
+    if (cpm && cpm.renderSettings) cpm.renderSettings();
     // Theme picker
     var uiMod = AppCore.getModule('ui');
     if (uiMod && uiMod.renderThemePicker) uiMod.renderThemePicker();

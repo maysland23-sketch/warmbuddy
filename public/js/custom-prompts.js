@@ -194,12 +194,21 @@ var CustomPromptModule = (function() {
     return typeof content === 'string' && content.trim() && codePointLength(content) <= MAX_BODY_LENGTH;
   }
 
+  function validUserInterval(value) {
+    var interval = Number(value);
+    return value !== '' && isFinite(interval) && interval >= MIN_INTERVAL && Math.floor(interval) === interval;
+  }
+
   function createDefinition(input) {
     input = isObject(input) ? input : {};
     if (!validUserBody(input.content)) {
       notify(input.content && codePointLength(input.content) > MAX_BODY_LENGTH
         ? '自定义提示词内容最多 3000 字。'
         : '自定义提示词内容不能为空。');
+      return null;
+    }
+    if (Object.prototype.hasOwnProperty.call(input, 'interval') && !validUserInterval(input.interval)) {
+      notify('注入频率至少为 1 轮。');
       return null;
     }
     var timestamp = now();
@@ -230,6 +239,10 @@ var CustomPromptModule = (function() {
       notify(nextContent && codePointLength(nextContent) > MAX_BODY_LENGTH
         ? '自定义提示词内容最多 3000 字。'
         : '自定义提示词内容不能为空。');
+      return false;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'interval') && !validUserInterval(patch.interval)) {
+      notify('注入频率至少为 1 轮。');
       return false;
     }
     var contentChanged = nextContent !== definition.content;
@@ -302,9 +315,96 @@ var CustomPromptModule = (function() {
     };
   }
 
-  function renderSettings() { return ''; }
-  function showEditor() {}
-  function saveEditor() { return false; }
+  function escapeHtml(value) {
+    try {
+      return AppCore.escapeHtml(String(value || ''));
+    } catch (e) {
+      return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+  }
+
+  function encodeId(promptId) {
+    return encodeURIComponent(promptId || '');
+  }
+
+  function getActiveChatForSettings() {
+    try { return AppCore.getActiveChatObj && AppCore.getActiveChatObj(); } catch (e) { return null; }
+  }
+
+  function renderSettings() {
+    var container = AppCore.$ && AppCore.$('customPromptList');
+    if (!container) return '';
+    var chat = getActiveChatForSettings();
+    var definitions = getDefinitions();
+    if (!chat || definitions.length === 0) {
+      container.innerHTML = '<div style="font-size:11px;color:var(--text-lighter);padding:4px 0;">暂无自定义提示词</div>';
+      return container.innerHTML;
+    }
+    ensureChatState(chat);
+    container.innerHTML = definitions.map(function(definition) {
+      var state = chat.customPromptStates[definition.id];
+      var enabled = !!(state && state.enabled);
+      var preview = definition.content.replace(/\s+/g, ' ').slice(0, 72);
+      if (definition.content.length > 72) preview += '…';
+      var safeId = encodeId(definition.id);
+      var label = definition.title || '未命名提示词';
+      return '<div class="settings-item" style="cursor:default;align-items:flex-start;">' +
+        '<div style="flex:1;min-width:0;">' +
+          '<div style="font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(label) + '</div>' +
+          '<div style="font-size:10px;color:var(--text-lighter);margin-top:2px;line-height:1.4;white-space:normal;word-break:break-word;">' + escapeHtml(preview) + '</div>' +
+          '<div style="font-size:10px;color:var(--text-lighter);margin-top:3px;">每 ' + definition.interval + ' 轮注入</div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:4px;margin-left:8px;flex-shrink:0;">' +
+          '<button type="button" data-action="editCustomPrompt" data-args="' + safeId + '" style="border:0;background:transparent;color:var(--text-lighter);font-size:11px;cursor:pointer;padding:3px;">编辑</button>' +
+          '<button type="button" data-action="deleteCustomPrompt" data-args="' + safeId + '" style="border:0;background:transparent;color:var(--danger);font-size:11px;cursor:pointer;padding:3px;">删除</button>' +
+          '<div class="toggle-switch' + (enabled ? ' on' : '') + '" data-action="toggleCustomPrompt" data-args="' + safeId + '|' + (!enabled) + '" title="' + (enabled ? '当前窗口已开启' : '当前窗口未开启') + '"></div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+    return container.innerHTML;
+  }
+
+  function showEditor(promptId) {
+    var definition = promptId ? findDefinition(promptId) : null;
+    var title = definition ? definition.title : '';
+    var content = definition ? definition.content : '';
+    var interval = definition ? definition.interval : DEFAULT_INTERVAL;
+    var idValue = definition ? encodeId(definition.id) : '';
+    var body = '<input type="hidden" id="customPromptIdInput" value="' + idValue + '">' +
+      '<label style="display:block;font-size:11px;color:var(--text-light);margin-bottom:4px;">标题（可选）</label>' +
+      '<input class="modal-input" id="customPromptTitleInput" maxlength="100" placeholder="例如：写作风格" value="' + escapeHtml(title) + '">' +
+      '<label style="display:block;font-size:11px;color:var(--text-light);margin:10px 0 4px;">内容（必填）</label>' +
+      '<textarea class="modal-input modal-textarea" id="customPromptContentInput" maxlength="3000" rows="8" placeholder="输入要注入对话的提示词内容">' + escapeHtml(content) + '</textarea>' +
+      '<label style="display:block;font-size:11px;color:var(--text-light);margin:10px 0 4px;">注入频率</label>' +
+      '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-light);"><span>每</span><input class="modal-input" id="customPromptIntervalInput" type="number" min="1" step="1" value="' + interval + '" style="width:90px;margin:0;"><span>轮对话注入一次</span></div>' +
+      '<div style="font-size:10px;color:var(--text-lighter);line-height:1.5;margin-top:8px;">下一次实际 AI 请求会立即注入。开启内容会发送给当前配置的模型服务。</div>';
+    UIModule.showModal(definition ? '编辑自定义提示词' : '新建自定义提示词', body, [
+      { label: '取消', cls: 'cancel', onclick: UIModule.closeModal },
+      { label: '保存', cls: 'confirm', onclick: saveEditor }
+    ]);
+  }
+
+  function saveEditor() {
+    var titleEl = AppCore.$('customPromptTitleInput');
+    var contentEl = AppCore.$('customPromptContentInput');
+    var intervalEl = AppCore.$('customPromptIntervalInput');
+    var idEl = AppCore.$('customPromptIdInput');
+    if (!contentEl || !intervalEl) return false;
+    var rawId = idEl && idEl.value ? decodeURIComponent(idEl.value) : '';
+    var content = contentEl.value;
+    var interval = Number(intervalEl.value);
+    if (!validUserInterval(intervalEl.value)) {
+      notify('注入频率至少为 1 轮。');
+      return false;
+    }
+    var saved = rawId
+      ? updateDefinition(rawId, { title: titleEl ? titleEl.value : '', content: content, interval: interval })
+      : !!createDefinition({ title: titleEl ? titleEl.value : '', content: content, interval: interval });
+    if (!saved) return false;
+    UIModule.closeModal();
+    renderSettings();
+    return true;
+  }
 
   function init() {
     try { normalizeStore(); } catch (e) {

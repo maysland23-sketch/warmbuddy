@@ -1061,6 +1061,12 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
       <div class="settings-item" data-action="showPreferenceModal"><span class="si-label">preference</span><span class="si-val" id="prefVal">edit</span></div>
     </div>
     <div class="settings-group">
+      <div class="settings-group-label">自定义提示词</div>
+      <div id="customPromptList" style="margin-bottom:8px;"></div>
+      <button class="test-conn-btn" data-action="showAddCustomPrompt" style="margin-top:0;">添加提示词</button>
+      <div style="font-size:10px;color:var(--text-lighter);line-height:1.5;margin-top:8px;">提示词定义在所有窗口可用，但开关只对当前聊天窗口生效。开启后，内容会发送给当前配置的模型服务。</div>
+    </div>
+    <div class="settings-group">
       <div class="settings-group-label">API 配置</div>
       <div class="settings-item" data-action="showProjectApiModal"><span class="si-label">API Key</span><span class="si-val" id="apiKeyStatus">●●●●●●●●</span></div>
       <div class="settings-item" data-action="showProjectApiModal"><span class="si-label">API Endpoint</span><span class="si-val" id="apiEndpointVal">anthropic</span></div>
@@ -1192,6 +1198,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 <script src="localforage.min.js"></script>
 <script src="js/memory.js"></script>
 <script src="js/app-core.js"></script>
+<script src="js/custom-prompts.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/sync.js"></script>
 <script src="js/chat.js"></script>

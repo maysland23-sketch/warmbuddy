@@ -262,6 +262,33 @@ var UIModule = (function() {
           var set = AppCore.getModule('settings');
           if (set) set.toggleAiSetting(k);
           break;
+        case 'showAddCustomPrompt':
+          var cp = AppCore.getModule('customPrompts');
+          if (cp && cp.showEditor) cp.showEditor();
+          break;
+        case 'saveCustomPrompt':
+          var cpSave = AppCore.getModule('customPrompts');
+          if (cpSave && cpSave.saveEditor) cpSave.saveEditor();
+          break;
+        case 'editCustomPrompt':
+          var cpEdit = AppCore.getModule('customPrompts');
+          if (cpEdit && cpEdit.showEditor) cpEdit.showEditor(decodeURIComponent(args));
+          break;
+        case 'deleteCustomPrompt':
+          var cpDelete = AppCore.getModule('customPrompts');
+          if (cpDelete && cpDelete.deleteDefinition && confirm('确定删除此自定义提示词吗？')) {
+            cpDelete.deleteDefinition(decodeURIComponent(args));
+            if (cpDelete.renderSettings) cpDelete.renderSettings();
+          }
+          break;
+        case 'toggleCustomPrompt':
+          var cpToggle = AppCore.getModule('customPrompts');
+          var cpToggleParts = args.split('|');
+          if (cpToggle && cpToggle.toggleForActiveChat && cpToggleParts.length >= 2) {
+            cpToggle.toggleForActiveChat(decodeURIComponent(cpToggleParts[0]), cpToggleParts[1] === 'true');
+            if (cpToggle.renderSettings) cpToggle.renderSettings();
+          }
+          break;
         // Toolkit
         case 'showAddToolModal':
           var tk = AppCore.getModule('toolkit');
