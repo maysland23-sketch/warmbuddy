@@ -1110,8 +1110,8 @@ var AppCore = (function() {
 
       var chat = AppCore.getModule('chat');
       if (chat && chat.updateChatInputEnabledState) chat.updateChatInputEnabledState();
+      if (sync && sync.reconcileFromBackend) await sync.reconcileFromBackend();
       if (sync && sync.syncProjectConfigToBackend) sync.syncProjectConfigToBackend();
-      if (sync && sync.reconcileFromBackend) sync.reconcileFromBackend();
 
       // Chat input auto-resize
       var chatInput = AppCore.$('chatInput');

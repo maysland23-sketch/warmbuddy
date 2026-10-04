@@ -143,8 +143,7 @@ var SyncModule = (function() {
         webSearch: ais.webSearch || false
       },
       weatherText: (store.weather && store.weather.text) ? store.weather.text : '',
-      _userStatus: proj._userStatus || '',
-      _aiStatus: proj._aiStatus || ''
+      _userStatus: proj._userStatus || ''
     };
     if (updateChatTime) {
       config.lastUserMessageTime = new Date().toISOString();
@@ -354,6 +353,7 @@ var SyncModule = (function() {
     var store = AppCore.getStore();
     var proj = getActiveProject();
     if (!proj) return;
+    var statusChanged = false;
     try {
       var resp = await fetch(AppCore.BACKEND_URL + '/api/projects/sync-configs', {
         method: 'POST',
@@ -390,7 +390,15 @@ var SyncModule = (function() {
         proj._userStatus = data.config._userStatus;
       }
       if (data.config && data.config._aiStatus !== undefined) {
-        proj._aiStatus = data.config._aiStatus;
+        if (proj._aiStatus !== data.config._aiStatus) {
+          proj._aiStatus = data.config._aiStatus;
+          proj._aiStatusChanged = true;
+          statusChanged = true;
+        }
+      }
+      if (statusChanged) {
+        AppCore.saveStore();
+        if (typeof renderChatMessages === 'function') renderChatMessages(true);
       }
       pollSystemEvents();
       store.projects.forEach(function(project) { pullChatMessages(project.id); });
@@ -572,7 +580,7 @@ var SyncModule = (function() {
             var todo = store.todos.find(function(t2) { return t2.id === evt.todoId; });
             if (todo) { todo.triggered = true; AppCore.saveStore(); }
           }
-        } else if (evt.type === 'ai_status_change') {
+        } else if (evt.type === 'status' || evt.type === 'ai_status_change') {
           if (evt.content) {
             proj._aiStatus = evt.content;
             proj._aiStatusChanged = true;

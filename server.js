@@ -9,6 +9,12 @@ const { HttpsProxyAgent } = require('https-proxy-agent');
 const { createClient } = require('@supabase/supabase-js');
 const { createProactiveChatMessage } = require('./proactive-message-utils');
 const {
+  isAiStatusEventType,
+  normalizeAiStatus,
+  getStatusEventContent,
+  createStatusNotice
+} = require('./proactive-status-utils');
+const {
   buildNotificationPayload,
   createNotificationDispatcher
 } = require('./notification-utils');
@@ -1026,6 +1032,7 @@ function proactiveNoticeText(event, aiName) {
     case 'todo_wake': return '⏰ 自我唤醒';
     case 'litter': return '🐾 猫砂盆好像需要铲一铲';
     case 'diary': return '📝 在日记里写了点什么';
+    case 'status':
     case 'ai_status_change': return '戳一戳更新了';
     case 'poke': {
       const userStatus = event.content || '';
@@ -1048,8 +1055,20 @@ async function saveProactiveChatMessages(event, aiName) {
   const baseId = proactiveMessageBaseId(event.id, event.chatId);
   const rows = [];
   const content = String(event.content || '').trim();
-  const hasAssistantContent = content && event.type !== 'poke' && event.type !== 'ai_status_change';
-  if (hasAssistantContent) {
+  const isStatusEvent = isAiStatusEventType(event.type);
+  const hasAssistantContent = content && event.type !== 'poke' && !isStatusEvent;
+  if (isStatusEvent) {
+    rows.push(createStatusNotice({
+      projectId: event.projectId,
+      windowId: event.chatId,
+      messageId: baseId + '_notice',
+      eventId: event.id,
+      driveKey: event.driveKey,
+      createdAt: event.timestamp,
+      actionType: event.type,
+      aiName
+    }));
+  } else if (hasAssistantContent) {
     rows.push(createProactiveChatMessage({
       projectId: event.projectId,
       windowId: event.chatId,
@@ -1062,7 +1081,7 @@ async function saveProactiveChatMessages(event, aiName) {
       eventId: event.id
     }));
   }
-  const notice = proactiveNoticeText(event, aiName);
+  const notice = isStatusEvent ? '' : proactiveNoticeText(event, aiName);
   if (notice) {
     rows.push(createProactiveChatMessage({
       projectId: event.projectId,
@@ -1112,7 +1131,8 @@ async function backfillProactiveChatMessages(projectId, windowId) {
       };
       const baseId = proactiveMessageBaseId(event.id, event.chatId);
       const notice = proactiveNoticeText(event, cfg && cfg.aiName);
-      const hasAssistantContent = String(event.content || '').trim() && event.type !== 'poke' && event.type !== 'ai_status_change';
+      const isStatusEvent = isAiStatusEventType(event.type);
+      const hasAssistantContent = String(event.content || '').trim() && event.type !== 'poke' && !isStatusEvent;
       if ((!hasAssistantContent || existingIds.has(baseId)) && (!notice || existingIds.has(baseId + '_notice'))) continue;
       saved += (await saveProactiveChatMessages(event, cfg && cfg.aiName)).saved;
     }
@@ -4707,7 +4727,7 @@ async function checkProjectDesires(pid, cfg, requestId = randomUUID()) {
 
         // A5: Status update (only if it's the primary action; update AI status)
         if (actionType === 'status' && actions.status && typeof actions.status === 'string') {
-          const newStatus = actions.status.trim().substring(0, 15);
+          const newStatus = normalizeAiStatus(actions.status);
           if (newStatus) {
             cfg._aiStatus = newStatus;
             // Persist to project_configs
@@ -4764,9 +4784,11 @@ async function checkProjectDesires(pid, cfg, requestId = randomUUID()) {
       : '';
 
     // ── Step B: Store system event (unified audit log + frontend polling source) ──
-    const eventContent = visibleMessage || (actionType === 'email'
-      ? emailFallback
-      : (actions.litter || (actions.diary && actions.diary.body) || (actions.todo) || (actions.status) || (cfg._userStatus || '') || ''));
+    const eventContent = actionType === 'status'
+      ? getStatusEventContent({ status: actions.status, message: visibleMessage })
+      : (visibleMessage || (actionType === 'email'
+        ? emailFallback
+        : (actions.litter || (actions.diary && actions.diary.body) || (actions.todo) || (cfg._userStatus || '') || '')));
     const savedEvent = await saveSystemEvent({
       projectId: pid,
       chatId: chatId,
