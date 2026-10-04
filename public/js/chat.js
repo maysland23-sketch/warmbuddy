@@ -477,6 +477,10 @@ var ChatModule = (function() {
     return getAIName();
   }
 
+  function diaryChatRole(d) {
+    return d && d.author === 'ai' ? 'ai' : 'user';
+  }
+
   function formatDiaryContext(d) {
     var author = diaryAuthorName(d);
     return '标题：' + (d.title || '未命名') + '；心情：' + (d.mood || '未标注') + '；日期时间：' + (d.date || '') + ' ' + (d.time || '') + '；落款：' + author + '；正文：' + (d.content || '');
@@ -490,7 +494,7 @@ var ChatModule = (function() {
     }).forEach(function(delivery) {
       var diary = (store.diaries || []).filter(function(d) { return d.id === delivery.diaryId && !d._deleted && !d.deletedAt; })[0];
       if (!diary || chat.messages.some(function(m) { return m.contentType === 'shared_diary' && m.deliveryId === delivery.id; })) return;
-      chat.messages.push({ role: 'user', text: '', contentType: 'shared_diary', diaryId: diary.id, deliveryId: delivery.id,
+      chat.messages.push({ role: diaryChatRole(diary), text: '', contentType: 'shared_diary', diaryId: diary.id, deliveryId: delivery.id,
         sharedDiary: diary, time: delivery.createdAt ? new Date(delivery.createdAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : AppCore.nowTime(),
         date: diary.date, id: AppCore.generateMsgId() });
     });
@@ -858,11 +862,13 @@ var ChatModule = (function() {
       var isUser = m.role === 'user';
       if (m.contentType === 'shared_diary') {
         var sd = m.sharedDiary || {};
+        var sdRole = diaryChatRole(sd);
+        var sdIsUser = sdRole === 'user';
         var sdAuthor = diaryAuthorName(sd);
         var sdHtml = '<div class="shared-diary-card" onclick="event.stopPropagation();openSharedDiary(\'' + sd.id + '\')">' +
           '<div class="shared-diary-card-title">' + AppCore.escapeHtml(sd.title || '未命名') + '</div>' +
           '<div class="shared-diary-card-meta">' + AppCore.escapeHtml((sd.date || '') + ' ' + (sd.time || '')) + ' · ' + AppCore.escapeHtml(sdAuthor) + '</div></div>';
-        html += '<div class="chat-row user" id="msg-' + msgId + '"><div class="chat-avatar user">MY</div><div class="chat-bubble-wrap"><div class="chat-bubble user shared-diary-bubble">' + sdHtml + '</div><div class="bubble-time-row"><span class="bubble-time">' + AppCore.escapeHtml(m.time || '') + '</span></div></div></div>';
+        html += '<div class="chat-row ' + sdRole + '" id="msg-' + msgId + '"><div class="chat-avatar ' + sdRole + '">' + (sdIsUser ? 'MY' : '✦') + '</div><div class="chat-bubble-wrap"><div class="chat-bubble ' + sdRole + ' shared-diary-bubble">' + sdHtml + '</div><div class="bubble-time-row"><span class="bubble-time">' + AppCore.escapeHtml(m.time || '') + '</span></div></div></div>';
         return;
       }
       var isSelected = batchSelectMode && batchSelectedIds.indexOf(msgId) >= 0;
