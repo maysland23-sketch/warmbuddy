@@ -92,6 +92,7 @@ var AppCore = (function() {
     ],
     diaryDeliveries: [],
     aiSettings: { autoDateTime: true, autoWeather: false, aiVoice: false, webSearch: false, model: 'deepseek-chat' },
+    customPrompts: [],
     aiName: 'warmbuddy',
     apiKey: '', apiEndpoint: 'https://api.deepseek.com/v1/chat/completions', darkMode: false, themeId: 'warmSand',
     availableModels: [
@@ -602,6 +603,49 @@ var AppCore = (function() {
     if (!_store.tokenDailyReset) _store.tokenDailyReset = (function() { var d = new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); })();
     if (!_store._pendingHandoff) _store._pendingHandoff = null;
     if (_store.aiSettings && _store.aiSettings.webSearch === undefined) _store.aiSettings.webSearch = false;
+
+    // Custom prompts: definitions are global, enablement and round counters are per chat.
+    if (!Array.isArray(_store.customPrompts)) _store.customPrompts = [];
+    var customPromptModule = _modules.customPrompts;
+    if (customPromptModule && typeof customPromptModule.normalizeStore === 'function') {
+      try {
+        customPromptModule.normalizeStore();
+      } catch (e) {
+        console.warn('[migrate] custom prompt definitions skipped:', e.message);
+      }
+    }
+    var customPromptIds = {};
+    _store.customPrompts.forEach(function(definition) {
+      if (definition && definition.id) customPromptIds[definition.id] = true;
+    });
+    for (var cpi = 0; cpi < _store.projects.length; cpi++) {
+      var customPromptProject = _store.projects[cpi];
+      var customPromptChats = Array.isArray(customPromptProject.chats) ? customPromptProject.chats : [];
+      for (var cpj = 0; cpj < customPromptChats.length; cpj++) {
+        var customPromptChat = customPromptChats[cpj];
+        var customPromptRound = Number(customPromptChat.customPromptRound);
+        customPromptChat.customPromptRound = isFinite(customPromptRound) && customPromptRound >= 0
+          ? Math.floor(customPromptRound) : 0;
+        if (!customPromptChat.customPromptStates || typeof customPromptChat.customPromptStates !== 'object' || Array.isArray(customPromptChat.customPromptStates)) {
+          customPromptChat.customPromptStates = {};
+        }
+        Object.keys(customPromptChat.customPromptStates).forEach(function(promptId) {
+          if (!customPromptIds[promptId]) {
+            delete customPromptChat.customPromptStates[promptId];
+            return;
+          }
+          var promptState = customPromptChat.customPromptStates[promptId];
+          if (!promptState || typeof promptState !== 'object') {
+            delete customPromptChat.customPromptStates[promptId];
+            return;
+          }
+          promptState.enabled = promptState.enabled === true;
+          var nextRound = Number(promptState.nextRound);
+          promptState.nextRound = promptState.enabled && isFinite(nextRound) && nextRound >= 1
+            ? Math.floor(nextRound) : (promptState.enabled ? customPromptChat.customPromptRound + 1 : null);
+        });
+      }
+    }
 
     // Message-level upgrades
     for (var i5 = 0; i5 < _store.projects.length; i5++) {

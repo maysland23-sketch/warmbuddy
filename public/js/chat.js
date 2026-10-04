@@ -237,6 +237,8 @@ var ChatModule = (function() {
       aiSettings: { autoDateTime: getActiveChatAiSettings().autoDateTime, autoWeather: getActiveChatAiSettings().autoWeather, aiVoice: getActiveChatAiSettings().aiVoice, webSearch: getActiveChatAiSettings().webSearch },
       emailEnabled: false,
       enabledTools: [],
+      customPromptRound: 0,
+      customPromptStates: {},
       sharedMemoryIds: sids, weeklyExports: [], artifacts: [],
       messages: inheritedMsgs.length > 0
         ? [{ role: 'system', text: '[继续自上一个窗口]', time: AppCore.nowTime(), _isHandoffNote: true, id: 'msg_' + Date.now().toString(36) + '_h' }].concat(inheritedMsgs)
@@ -2638,6 +2640,8 @@ var ChatModule = (function() {
         aiSettings: { autoDateTime: getActiveChatAiSettings().autoDateTime, autoWeather: getActiveChatAiSettings().autoWeather, aiVoice: getActiveChatAiSettings().aiVoice, webSearch: getActiveChatAiSettings().webSearch },
         emailEnabled: false,
         enabledTools: [],
+        customPromptRound: 0,
+        customPromptStates: {},
         sharedMemoryIds: [], weeklyExports: [], artifacts: [],
         messages: [], chatTokens: 0,
         lastConversationDate: AppCore.fmtDate().iso, lastActiveDate: null, lastInteractionTime: null,
@@ -2858,6 +2862,8 @@ var ChatModule = (function() {
         aiSettings: { autoDateTime: getActiveChatAiSettings().autoDateTime, autoWeather: getActiveChatAiSettings().autoWeather, aiVoice: getActiveChatAiSettings().aiVoice, webSearch: getActiveChatAiSettings().webSearch },
         emailEnabled: false,
         enabledTools: [],
+        customPromptRound: 0,
+        customPromptStates: {},
         sharedMemoryIds: [], weeklyExports: [], artifacts: [],
         messages: initMessages,
         chatTokens: 0, lastConversationDate: AppCore.fmtDate().iso, lastActiveDate: null, lastInteractionTime: null,
