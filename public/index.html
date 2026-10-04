@@ -1200,6 +1200,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 <script src="js/app-core.js"></script>
 <script src="js/custom-prompts.js"></script>
 <script src="js/ui.js"></script>
+<script src="js/chat-time.js"></script>
 <script src="js/sync.js"></script>
 <script src="js/chat.js"></script>
 <script src="js/desire.js"></script>
@@ -2320,7 +2321,7 @@ async function triggerLitterBox(userText, aiResponse) {
   chat._lastLitterTime = Date.now();
 
   // Insert system message
-  chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: nowTime(), id: generateMsgId() });
+  chat.messages.push(ChatTimeModule.createMessage({ role: 'system', text: '猫砂盆好像需要铲一铲', id: generateMsgId() }, new Date()));
   renderChatMessages();
   // Push notification
   sendPushNotification(getAIName() + ' · 🐾 猫砂盆', '猫砂盆好像需要铲一铲', { tag: 'litter-box', url: '/', requireInteraction: false });
@@ -2777,7 +2778,7 @@ async function handleEmailSend(chat, subject, body){
     });
     var data=await resp.json();
     if(data.ok&&data.emailId){
-      chat.messages.push({role:'system',contentType:'email_notification',text:'邮件已发送',time:nowTime()});
+      chat.messages.push(ChatTimeModule.createMessage({role:'system',contentType:'email_notification',text:'邮件已发送'}, new Date()));
       if(typingArea)typingArea.innerHTML='';
       return true;
     }else{

@@ -5,6 +5,10 @@ const vm = require('node:vm');
 
 function loadSyncModule(store, responses, requestedUrls) {
   const source = fs.readFileSync('public/js/sync.js', 'utf8');
+  let chatTimeModule;
+  vm.runInNewContext(fs.readFileSync('public/js/chat-time.js', 'utf8'), {
+    AppCore: { register: (_name, module) => { chatTimeModule = module; } }
+  });
   const sandbox = {
     console,
     Date,
@@ -23,9 +27,11 @@ function loadSyncModule(store, responses, requestedUrls) {
       getStore: () => store,
       getActiveProject: () => store.projects.find(project => project.id === store.activeProject),
       getActiveChatObj: () => store.projects.flatMap(project => project.chats).find(chat => chat.id === store.activeChat),
+      fmtDate: () => ({ iso: '2026-10-04' }),
       saveStore: () => {}
     }
   };
+  sandbox.ChatTimeModule = chatTimeModule;
   sandbox.AppCore.register = (name, module) => { sandbox[name + 'Module'] = module; };
   vm.runInNewContext(source, sandbox, { filename: 'public/js/sync.js' });
   return sandbox.SyncModule;
@@ -57,4 +63,26 @@ test('pullChatMessages restores a closed-page proactive message with trigger tim
   assert.equal(chatMessages[0].time, '11:04');
   assert.match(requestedUrls[0], /targetWindowId=c1/);
   assert.match(requestedUrls[1], /since=/);
+});
+
+test('pullChatMessages orders legacy local system prompts before later prompts from cloud', async () => {
+  const store = {
+    activeProject: 'p1',
+    activeChat: 'c1',
+    projects: [{ id: 'p1', chats: [{ id: 'c1', messages: [
+      { id: 'local-late', role: 'system', text: '确认欲', time: '21:00' }
+    ] }] }]
+  };
+  const cloudRows = [{
+    projectId: 'p1', windowId: 'c1', messageId: 'cloud-early',
+    role: 'system', content: '猫砂盆好像需要铲一铲',
+    createdAt: '2026-10-04T20:00:00.000', metadata: {}
+  }];
+  const sync = loadSyncModule(store, [cloudRows], []);
+
+  await sync.pullChatMessages('p1');
+
+  assert.deepEqual(store.projects[0].chats[0].messages.map(message => message.text), [
+    '猫砂盆好像需要铲一铲', '确认欲'
+  ]);
 });

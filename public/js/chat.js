@@ -68,6 +68,12 @@ var ChatModule = (function() {
 
   function getActiveChatAiSettings() { return AppCore.getActiveChatAiSettings(); }
 
+  function createChatMessage(fields, timestamp) {
+    var chatTime = (typeof ChatTimeModule !== 'undefined' && ChatTimeModule) ||
+      (AppCore.getModule && AppCore.getModule('chatTime'));
+    return chatTime && chatTime.createMessage ? chatTime.createMessage(fields, timestamp) : fields;
+  }
+
   function setActiveModel(modelId) {
     var store = AppCore.getStore();
     var proj = getActiveProject();
@@ -224,6 +230,7 @@ var ChatModule = (function() {
         return {
           role: m.role === 'ai' ? 'ai' : m.role,
           text: m.text || '', time: m.time || AppCore.nowTime(),
+          date: m.date, createdAt: m.createdAt,
           _starred: m._starred || false, _isCoreMemory: m._isCoreMemory || false,
           _tokenEstimate: m._tokenEstimate || 0, _starredOnce: m._starredOnce || false,
           _inheritedFromWindow: prevChat.id,
@@ -241,7 +248,7 @@ var ChatModule = (function() {
       customPromptStates: {},
       sharedMemoryIds: sids, weeklyExports: [], artifacts: [],
       messages: inheritedMsgs.length > 0
-        ? [{ role: 'system', text: '[继续自上一个窗口]', time: AppCore.nowTime(), _isHandoffNote: true, id: 'msg_' + Date.now().toString(36) + '_h' }].concat(inheritedMsgs)
+        ? [createChatMessage({ role: 'system', text: '[继续自上一个窗口]', _isHandoffNote: true, id: 'msg_' + Date.now().toString(36) + '_h' })].concat(inheritedMsgs)
         : [],
       chatTokens: 0, lastConversationDate: null, lastActiveDate: null, lastInteractionTime: null,
       _messageCount: inheritedMsgs.length, _lastSummaryIdx: 0,
@@ -494,9 +501,8 @@ var ChatModule = (function() {
     }).forEach(function(delivery) {
       var diary = (store.diaries || []).filter(function(d) { return d.id === delivery.diaryId && !d._deleted && !d.deletedAt; })[0];
       if (!diary || chat.messages.some(function(m) { return m.contentType === 'shared_diary' && m.deliveryId === delivery.id; })) return;
-      chat.messages.push({ role: diaryChatRole(diary), text: '', contentType: 'shared_diary', diaryId: diary.id, deliveryId: delivery.id,
-        sharedDiary: diary, time: delivery.createdAt ? new Date(delivery.createdAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : AppCore.nowTime(),
-        date: diary.date, id: AppCore.generateMsgId() });
+      chat.messages.push(createChatMessage({ role: diaryChatRole(diary), text: '', contentType: 'shared_diary', diaryId: diary.id, deliveryId: delivery.id,
+        sharedDiary: diary, id: AppCore.generateMsgId() }, delivery.createdAt || new Date()));
     });
   }
 
@@ -814,6 +820,8 @@ var ChatModule = (function() {
     var proj = getActiveProject();
     ensureSharedDiaryCards(chat);
     var todayIso = AppCore.fmtDate().iso;
+    var chatTime = (typeof ChatTimeModule !== 'undefined' && ChatTimeModule) ||
+      (AppCore.getModule && AppCore.getModule('chatTime'));
     if (!chat || chat.messages.length === 0) {
       el.innerHTML = '<div style="text-align:center;padding:40px 20px;"><span style="font-family:var(--font-en);font-size:12px;color:var(--text-lighter);">— start a conversation —</span></div>';
       return;
@@ -822,14 +830,17 @@ var ChatModule = (function() {
 
     var html = '';
     var shownDate = '';
-    var prevTimeMin = null;
-    chat.messages.forEach(function(m, i) {
-      var dateMatch = (m.time || '').match(/(\d{4}-\d{2}-\d{2})/);
-      var msgDate = dateMatch ? dateMatch[1] : '';
-      if (!msgDate && m.role !== 'system') {
-        var now = new Date();
-        msgDate = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
-      }
+    var previousTimeInfo = null;
+    var visibleMessages = chat.messages.map(function(message, index) {
+      return { message: message, index: index };
+    }).filter(function(entry) {
+      return entry.message.contentType !== 'dateDivider';
+    });
+    visibleMessages.forEach(function(entry) {
+      var m = entry.message;
+      var i = entry.index;
+      var timeInfo = chatTime && chatTime.getTimeInfo ? chatTime.getTimeInfo(m, todayIso) : null;
+      var msgDate = timeInfo ? timeInfo.date : '';
       if (msgDate && msgDate !== shownDate) {
         var d = new Date(msgDate + 'T00:00:00');
         var weekdays = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
@@ -837,23 +848,16 @@ var ChatModule = (function() {
         html += '<div class="chat-date-separator">📅 ' + msgDate + ' ' + weekday + '</div>';
         shownDate = msgDate;
       }
-      if (i > 0 && m.role !== 'system') {
-        var timeMatch = (m.time || '').match(/(\d{2}:\d{2})/);
-        if (timeMatch) {
-          var parts = timeMatch[1].split(':');
-          var currMin = parseInt(parts[0]) * 60 + parseInt(parts[1]);
-          if (prevTimeMin !== null) {
-            var gap = currMin - prevTimeMin;
-            if (gap < 0) gap += 24 * 60;
-            if (gap >= 5) { html += '<div class="chat-gap-separator"></div>'; }
-          }
-          prevTimeMin = currMin;
-        }
+      if (previousTimeInfo && timeInfo && timeInfo.sortValue - previousTimeInfo.sortValue >= 5 * 60 * 1000) {
+        html += '<div class="chat-gap-separator"></div>';
       }
+      if (timeInfo) previousTimeInfo = timeInfo;
+      var displayTime = timeInfo ? timeInfo.time : (m.time || '');
+      var bubbleTime = timeInfo && timeInfo.date !== todayIso ? timeInfo.date.slice(5) + ' ' + timeInfo.time : displayTime;
       if (m.role === 'system') {
         html += '<div class="chat-system-msg">' +
           '<span class="chat-system-msg-text">' + m.text + '</span>' +
-          (m.time ? '<span class="chat-system-msg-time">' + m.time + '</span>' : '') +
+          (displayTime ? '<span class="chat-system-msg-time">' + displayTime + '</span>' : '') +
         '</div>';
         return;
       }
@@ -868,7 +872,7 @@ var ChatModule = (function() {
         var sdHtml = '<div class="shared-diary-card" onclick="event.stopPropagation();openSharedDiary(\'' + sd.id + '\')">' +
           '<div class="shared-diary-card-title">' + AppCore.escapeHtml(sd.title || '未命名') + '</div>' +
           '<div class="shared-diary-card-meta">' + AppCore.escapeHtml((sd.date || '') + ' ' + (sd.time || '')) + ' · ' + AppCore.escapeHtml(sdAuthor) + '</div></div>';
-        html += '<div class="chat-row ' + sdRole + '" id="msg-' + msgId + '"><div class="chat-avatar ' + sdRole + '">' + (sdIsUser ? 'MY' : '✦') + '</div><div class="chat-bubble-wrap"><div class="chat-bubble ' + sdRole + ' shared-diary-bubble">' + sdHtml + '</div><div class="bubble-time-row"><span class="bubble-time">' + AppCore.escapeHtml(m.time || '') + '</span></div></div></div>';
+        html += '<div class="chat-row ' + sdRole + '" id="msg-' + msgId + '"><div class="chat-avatar ' + sdRole + '">' + (sdIsUser ? 'MY' : '✦') + '</div><div class="chat-bubble-wrap"><div class="chat-bubble ' + sdRole + ' shared-diary-bubble">' + sdHtml + '</div><div class="bubble-time-row"><span class="bubble-time">' + AppCore.escapeHtml(bubbleTime) + '</span></div></div></div>';
         return;
       }
       var isSelected = batchSelectMode && batchSelectedIds.indexOf(msgId) >= 0;
@@ -924,9 +928,9 @@ var ChatModule = (function() {
                 ' ontouchstart="event.stopPropagation();"' +
                 ' ontouchend="event.stopPropagation();"' +
                 ' title="' + starTitle + '">' + starIcon + '</span>' +
-          '<span class="bubble-time">' + ((m.date && m.date !== todayIso) ? m.date.slice(5) + ' ' + m.time : m.time) + '</span>'
+          '<span class="bubble-time">' + AppCore.escapeHtml(bubbleTime) + '</span>'
           :
-          '<span class="bubble-time">' + ((m.date && m.date !== todayIso) ? m.date.slice(5) + ' ' + m.time : m.time) + '</span>' +
+          '<span class="bubble-time">' + AppCore.escapeHtml(bubbleTime) + '</span>' +
           (m._proactive ? '<span class="bubble-source-label">' + (m._todoWake ? '自我唤醒' : (m._desireType ? getDriveLabel(m._desireType) : '')) + '</span>' : '') +
           '<span class="outer-star-icon ' + starOnceCls + ' ' + starSelectedCls + '"' +
                 ' onclick="event.stopPropagation();' + starAction + '"' +
@@ -1847,7 +1851,7 @@ var ChatModule = (function() {
     return sentences;
   }
 
-  async function displaySentences(sentences, chat, startTime, replyTo, pendingToolCalls) {
+  async function displaySentences(sentences, chat, createdAt, replyTo, pendingToolCalls) {
     var typingArea = AppCore.$('chatTypingArea');
     var messagesEl = AppCore.$('chatMessages');
 
@@ -1858,7 +1862,7 @@ var ChatModule = (function() {
       }
       typingArea.innerHTML = '';
 
-      var msg = { role: 'ai', text: sentences[i], time: startTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
+      var msg = createChatMessage({ role: 'ai', text: sentences[i], id: AppCore.generateMsgId() }, createdAt);
       if (i === 0 && replyTo) msg.replyTo = replyTo;
       if (i === 0 && pendingToolCalls) msg._toolCalls = pendingToolCalls;
       chat.messages.push(msg);
@@ -1891,7 +1895,7 @@ var ChatModule = (function() {
     return bubbles;
   }
 
-  async function displayAIBubbles(bubbles, chat, startTime) {
+  async function displayAIBubbles(bubbles, chat, createdAt) {
     var typingArea = AppCore.$('chatTypingArea');
     var messagesEl = AppCore.$('chatMessages');
 
@@ -1903,7 +1907,7 @@ var ChatModule = (function() {
       }
       typingArea.innerHTML = '';
 
-      var msg = { role: 'ai', text: bubble.text, time: startTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
+      var msg = createChatMessage({ role: 'ai', text: bubble.text, id: AppCore.generateMsgId() }, createdAt);
       if (bubble.replyTo) msg.replyTo = bubble.replyTo;
       chat.messages.push(msg);
       renderChatMessages();
@@ -2057,7 +2061,7 @@ var ChatModule = (function() {
 
     var fullResponse = '';
     var tokenUsage = null;
-    var bubbleTime = AppCore.nowTime();
+    var bubbleAt = new Date();
 
     try {
       var agentGatewayProject = isAgentGatewayProject(getActiveProject());
@@ -2089,7 +2093,7 @@ var ChatModule = (function() {
 
       if (!response.ok) {
         typingArea.innerHTML = '';
-        chat.messages.push({ role: 'ai', text: '连接API失败，请检查配置。', time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() });
+        chat.messages.push(createChatMessage({ role: 'ai', text: '连接API失败，请检查配置。', id: AppCore.generateMsgId() }, bubbleAt));
         renderChatMessages();
         return;
       }
@@ -2159,13 +2163,12 @@ var ChatModule = (function() {
           var searchData = await searchResp.json();
           var searchResults = searchData.results || '(no results)';
 
-          chat.messages.push({
+          chat.messages.push(createChatMessage({
             role: 'user',
             text: '[系统] 网络搜索结果（搜索词: ' + searchQuery + '）: ' + searchResults,
-            time: AppCore.nowTime(),
             _searchResult: true,
             id: AppCore.generateMsgId()
-          });
+          }, new Date()));
 
           var newDynamicBlock = buildDynamicContextBlock();
           var apiMessages2 = [
@@ -2337,7 +2340,7 @@ var ChatModule = (function() {
       if (mm && mm.setCoreOverviewLocal) {
         mm.setCoreOverviewLocal(overviewContent, aiName);
       }
-      chat.messages.push({ role: 'system', contentType: 'core_overview_update', text: '核心概述已更新', time: bubbleTime, id: AppCore.generateMsgId() });
+      chat.messages.push(createChatMessage({ role: 'system', contentType: 'core_overview_update', text: '核心概述已更新', id: AppCore.generateMsgId() }, bubbleAt));
     }
 
     var extractedTodos = extractTodosFromResponse(displayResponse);
@@ -2358,7 +2361,7 @@ var ChatModule = (function() {
         }
       }
       if (hasNewTodo) {
-        chat.messages.push({ role: 'system', contentType: 'todo_notification', text: '有了新的to-do', time: AppCore.nowTime() });
+        chat.messages.push(createChatMessage({ role: 'system', contentType: 'todo_notification', text: '有了新的to-do' }, bubbleAt));
         AppCore.saveStore();
         SyncModule.syncTodosToBackend();
       }
@@ -2379,9 +2382,9 @@ var ChatModule = (function() {
       var aiName = getAIName();
       var userStatus = (proj && proj._userStatus) ? proj._userStatus : '';
       var pokeText = aiName + ' 戳了戳 mays，' + (userStatus ? '她' + userStatus : '她什么也没发生。');
-      chat.messages.push({ role: 'system', contentType: 'poke_notification', text: pokeText, time: bubbleTime, id: AppCore.generateMsgId() });
+      chat.messages.push(createChatMessage({ role: 'system', contentType: 'poke_notification', text: pokeText, id: AppCore.generateMsgId() }, bubbleAt));
       if (!userStatus) {
-        chat.messages.push({ role: 'system', contentType: 'poke_hint', text: '她现在没有状态。', time: bubbleTime, id: AppCore.generateMsgId() });
+        chat.messages.push(createChatMessage({ role: 'system', contentType: 'poke_hint', text: '她现在没有状态。', id: AppCore.generateMsgId() }, bubbleAt));
       }
       if (proj) {
         fetch(AppCore.BACKEND_URL + '/api/poke-events', {
@@ -2411,7 +2414,7 @@ var ChatModule = (function() {
     // — intentionally NOT replacing them here to keep m.text raw
 
     if (diaryWritten) {
-      chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: bubbleTime, id: AppCore.generateMsgId() });
+      chat.messages.push(createChatMessage({ role: 'system', text: '在日记里写了点什么', id: AppCore.generateMsgId() }, bubbleAt));
       renderChatMessages();
       var dproj = getActiveProject();
       var dchat = getActiveChatObj();
@@ -2428,13 +2431,13 @@ var ChatModule = (function() {
     var parsedBubbles = parseAIBubbles(cleanText);
 
     if (hasBubbleMarker && parsedBubbles.length > 0) {
-      await displayAIBubbles(parsedBubbles, chat, bubbleTime);
+      await displayAIBubbles(parsedBubbles, chat, bubbleAt);
     } else if (parsedBubbles.length === 1) {
       var replyTo = parsedBubbles[0].replyTo;
       var text = parsedBubbles[0].text;
       var hasArtifactCard = text.indexOf('artifact-card-inline') >= 0 || text.indexOf('<!--ARTIFACT_START:') >= 0;
       if (hasArtifactCard) {
-        var msgCard = { role: 'ai', text: text, time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
+        var msgCard = createChatMessage({ role: 'ai', text: text, id: AppCore.generateMsgId() }, bubbleAt);
         if (replyTo) msgCard.replyTo = replyTo;
         if (pendingToolCalls) msgCard._toolCalls = pendingToolCalls;
         chat.messages.push(msgCard);
@@ -2442,17 +2445,17 @@ var ChatModule = (function() {
       } else {
         var sentences = splitSentences(text);
         if (sentences.length <= 1) {
-          var msg1 = { role: 'ai', text: text, time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
+          var msg1 = createChatMessage({ role: 'ai', text: text, id: AppCore.generateMsgId() }, bubbleAt);
           if (replyTo) msg1.replyTo = replyTo;
           if (pendingToolCalls) msg1._toolCalls = pendingToolCalls;
           chat.messages.push(msg1);
           renderChatMessages();
         } else {
-          await displaySentences(sentences, chat, bubbleTime, replyTo, pendingToolCalls);
+          await displaySentences(sentences, chat, bubbleAt, replyTo, pendingToolCalls);
         }
       }
     } else {
-      var mainMsg = { role: 'ai', text: cleanText, time: bubbleTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() };
+      var mainMsg = createChatMessage({ role: 'ai', text: cleanText, id: AppCore.generateMsgId() }, bubbleAt);
       if (pendingToolCalls) mainMsg._toolCalls = pendingToolCalls;
       chat.messages.push(mainMsg);
       renderChatMessages();
@@ -2627,8 +2630,7 @@ var ChatModule = (function() {
     var aiName = getAIName();
     var statusText = aiStatus ? 'TA' + aiStatus : 'TA什么也没发生';
     var now = new Date();
-    var timeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
-    chat.messages.push({ role: 'system', contentType: 'poke_notification', text: 'mays 戳了戳 ' + aiName + '，' + statusText, time: timeStr, id: AppCore.generateMsgId() });
+    chat.messages.push(createChatMessage({ role: 'system', contentType: 'poke_notification', text: 'mays 戳了戳 ' + aiName + '，' + statusText, id: AppCore.generateMsgId() }, now));
     if (proj._aiStatusChanged) { proj._aiStatusChanged = false; }
     renderChatMessages();
     AppCore.saveStore();
@@ -2674,7 +2676,7 @@ var ChatModule = (function() {
     updateSendButtonState();
     renderReplyPreview();
 
-    var timeStr = AppCore.nowTime();
+    var createdAt = new Date();
     if (window._pendingFiles && window._pendingFiles.length > 0 && bubbles.length > 0) {
       var fileMarkers = window._pendingFiles.map(function(fid) { return '[[FILE:' + fid + ']]'; }).join(' ');
       bubbles[0].text = (bubbles[0].text || '') + ' ' + fileMarkers;
@@ -2683,7 +2685,7 @@ var ChatModule = (function() {
     }
     for (var i = 0; i < bubbles.length; i++) {
       var bubble = bubbles[i];
-      var msg = { role: 'user', text: bubble.text, time: timeStr, id: AppCore.generateMsgId() };
+      var msg = createChatMessage({ role: 'user', text: bubble.text, id: AppCore.generateMsgId() }, createdAt);
       if (bubble.replyTo) {
         msg.replyTo = bubble.replyTo;
       }
@@ -2713,8 +2715,8 @@ var ChatModule = (function() {
       var cmdResult = await executeCommand(cmd, lastText);
       if (cmdResult) {
         AppCore.$('chatTypingArea').innerHTML = '';
-        chat.messages.push({ role: 'system', text: cmd.type === 'diary' ? '在日记里写了点什么' : '猫砂盆好像需要铲一铲', time: timeStr, id: AppCore.generateMsgId() });
-        chat.messages.push({ role: 'ai', text: cmdResult, time: timeStr, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() });
+        chat.messages.push(createChatMessage({ role: 'system', text: cmd.type === 'diary' ? '在日记里写了点什么' : '猫砂盆好像需要铲一铲', id: AppCore.generateMsgId() }, new Date()));
+        chat.messages.push(createChatMessage({ role: 'ai', text: cmdResult, id: AppCore.generateMsgId() }, new Date()));
         renderChatMessages();
         renderProjectList();
         return;
@@ -2831,6 +2833,8 @@ var ChatModule = (function() {
             role: m.role === 'ai' ? 'ai' : m.role,
             text: m.text || '',
             time: m.time || AppCore.nowTime(),
+            date: m.date,
+            createdAt: m.createdAt,
             _starred: m._starred || false,
             _isCoreMemory: m._isCoreMemory || false,
             _tokenEstimate: m._tokenEstimate || 0,
@@ -2847,6 +2851,7 @@ var ChatModule = (function() {
             return {
               role: m.role === 'ai' ? 'ai' : m.role,
               text: m.text || '', time: m.time || AppCore.nowTime(),
+              date: m.date, createdAt: m.createdAt,
               _starred: m._starred || false, _isCoreMemory: m._isCoreMemory || false,
               _tokenEstimate: m._tokenEstimate || 0, _inheritedFromWindow: 'handoff'
             };
@@ -2859,12 +2864,11 @@ var ChatModule = (function() {
 
       var initMessages = [];
       if (inheritedMsgs.length > 0) {
-        initMessages.push({
+        initMessages.push(createChatMessage({
           role: 'system',
           text: '[继续自上一个窗口的对话，以下是最近的对话记录]',
-          time: AppCore.nowTime(),
           _isHandoffNote: true, id: 'msg_' + Date.now().toString(36) + '_sys_h'
-        });
+        }));
         for (var imi = 0; imi < inheritedMsgs.length; imi++) {
           var im = inheritedMsgs[imi];
           if (!im.id) im.id = 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
@@ -2892,9 +2896,8 @@ var ChatModule = (function() {
       flushMemoryFile(p.id, cid, 'context_handoff_inherited');
       console.log('[cold-start] New window initialized with', inheritedMsgs.length, 'inherited messages');
     }
-    var timeStr = AppCore.nowTime();
-    var todayStr = AppCore.fmtDate().iso;
-    var userMsg = { role: 'user', text: text, time: timeStr, date: todayStr, id: AppCore.generateMsgId() };
+    var userCreatedAt = new Date();
+    var userMsg = createChatMessage({ role: 'user', text: text, id: AppCore.generateMsgId() }, userCreatedAt);
     if (pendingReply) {
       userMsg.replyTo = pendingReply.msgId;
       pendingReply = null;
@@ -2916,12 +2919,6 @@ var ChatModule = (function() {
 
     chat.lastConversationDate = AppCore.fmtDate().iso;
 
-    var todayStr = new Date().toLocaleDateString('zh-CN');
-    if (chat.lastActiveDate !== todayStr) {
-      chat.messages.push({ role: 'system', contentType: 'dateDivider', text: AppCore.formatDateChinese(todayStr), time: AppCore.nowTime() });
-      chat.lastActiveDate = todayStr;
-    }
-
     var statusMessage = '';
     var cmd = detectCommand(text);
     if (cmd) {
@@ -2938,13 +2935,13 @@ var ChatModule = (function() {
       var cmdResult = await executeCommand(cmd, text);
       if (cmdResult) {
         typingArea.innerHTML = '';
-        var aiTime = AppCore.nowTime();
+        var aiAt = new Date();
         if (cmd.type === 'diary') {
-          chat.messages.push({ role: 'system', text: '在日记里写了点什么', time: aiTime, id: AppCore.generateMsgId() });
+          chat.messages.push(createChatMessage({ role: 'system', text: '在日记里写了点什么', id: AppCore.generateMsgId() }, aiAt));
         } else if (cmd.type === 'litter') {
-          chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: aiTime, id: AppCore.generateMsgId() });
+          chat.messages.push(createChatMessage({ role: 'system', text: '猫砂盆好像需要铲一铲', id: AppCore.generateMsgId() }, aiAt));
         }
-        chat.messages.push({ role: 'ai', text: cmdResult, time: aiTime, date: AppCore.fmtDate().iso, id: AppCore.generateMsgId() });
+        chat.messages.push(createChatMessage({ role: 'ai', text: cmdResult, id: AppCore.generateMsgId() }, aiAt));
         chat.lastInteractionTime = new Date().toISOString();
         renderChatMessages();
         renderProjectList();

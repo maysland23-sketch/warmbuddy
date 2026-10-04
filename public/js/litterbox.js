@@ -177,7 +177,7 @@ var LitterBoxModule = (function() {
       });
       if (store.litterThoughts.length > 50) store.litterThoughts.length = 50;
       chat._lastLitterTime = Date.now();
-      chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: AppCore.nowTime(), id: AppCore.generateMsgId() });
+      chat.messages.push(ChatTimeModule.createMessage({ role: 'system', text: '猫砂盆好像需要铲一铲', id: AppCore.generateMsgId() }, new Date()));
 
       var chatMod = AppCore.getModule('chat');
       if (chatMod) chatMod.renderChatMessages();
@@ -216,7 +216,7 @@ var LitterBoxModule = (function() {
       });
       if (store.litterThoughts.length > 50) store.litterThoughts.length = 50;
       if (chat) {
-        chat.messages.push({ role: 'system', text: '猫砂盆好像需要铲一铲', time: AppCore.nowTime(), id: AppCore.generateMsgId() });
+        chat.messages.push(ChatTimeModule.createMessage({ role: 'system', text: '猫砂盆好像需要铲一铲', id: AppCore.generateMsgId() }, new Date()));
       }
       syncToDiaryLitterboxLayer('litterbox', content.trim());
       return true;

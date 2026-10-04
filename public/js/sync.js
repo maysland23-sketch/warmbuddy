@@ -283,23 +283,13 @@ var SyncModule = (function() {
       }
     });
     if (changed) {
-      function sortTime(message) {
-        if (message.createdAt) return message.createdAt;
-        var date = message.date;
-        var timeMatch = (message.time || '').match(/(\d{2}:\d{2})/);
-        if (!date) {
-          var dateMatch = (message.time || '').match(/(\d{4}-\d{2}-\d{2})/);
-          date = dateMatch && dateMatch[1];
-        }
-        return date && timeMatch ? date + 'T' + timeMatch[1] : '';
-      }
+      var chatTime = (typeof ChatTimeModule !== 'undefined' && ChatTimeModule) ||
+        (AppCore.getModule && AppCore.getModule('chatTime'));
+      var fallbackDate = AppCore.fmtDate ? AppCore.fmtDate().iso : '';
       proj.chats.forEach(function(chat) {
-        chat.messages.sort(function(a, b) {
-          var aTime = sortTime(a);
-          var bTime = sortTime(b);
-          if (!aTime || !bTime) return 0;
-          return aTime.localeCompare(bTime);
-        });
+        if (chatTime && chatTime.sortMessages) {
+          chat.messages = chatTime.sortMessages(chat.messages, fallbackDate);
+        }
       });
       AppCore.saveStore();
       if (proj.id === store.activeProject && typeof renderChatMessages === 'function') renderChatMessages(true);

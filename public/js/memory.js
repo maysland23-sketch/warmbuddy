@@ -1147,7 +1147,7 @@
       };
       MemoryModule.addAEM(AppCore.getStore().activeProject, aem);
       MemoryModule.buildRelatedEdges(AppCore.getStore().activeProject, aem);
-      if (chat) chat.messages.push({ role: 'system', text: '有什么被记住了', time: AppCore.nowTime() });
+      if (chat) chat.messages.push(ChatTimeModule.createMessage({ role: 'system', text: '有什么被记住了' }, new Date()));
     },
 
     groupMessagesIntoRounds: function(messages) {
