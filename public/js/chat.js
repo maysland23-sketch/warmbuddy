@@ -1950,6 +1950,13 @@ var ChatModule = (function() {
       dynamicBlock += '\n【当前任务】用户让你写一篇你自己视角的日记。使用 [[DIARY:标题|心情|正文]] 标记，标记外正常回复可简短。';
     }
 
+    var customPromptContext = '';
+    var customPromptModule = AppCore.getModule('customPrompts');
+    if (customPromptModule && customPromptModule.beginAiRound) {
+      var customPromptRound = customPromptModule.beginAiRound(chat);
+      customPromptContext = customPromptRound && customPromptRound.content || '';
+    }
+
     var apiMessages = [];
 
     var L1_ROUNDS = 6;
@@ -1965,6 +1972,7 @@ var ChatModule = (function() {
 
     apiMessages.push({ role: 'system', content: SYSTEM_PROMPT_STATIC });
     apiMessages.push({ role: 'system', content: dynamicBlock });
+    if (customPromptContext) apiMessages.push({ role: 'system', content: customPromptContext });
     var sharedDiaryBlock = pendingSharedDiaryContext(chat);
     if (sharedDiaryBlock) apiMessages.push({ role: 'system', content: sharedDiaryBlock });
 
@@ -2158,6 +2166,7 @@ var ChatModule = (function() {
             { role: 'system', content: SYSTEM_PROMPT_STATIC },
             { role: 'system', content: newDynamicBlock }
           ];
+          if (customPromptContext) apiMessages2.push({ role: 'system', content: customPromptContext });
           for (var mi2 = 0; mi2 < chat.messages.length; mi2++) {
             var m3 = chat.messages[mi2];
             if (m3.role === 'system' || m3._searchResult) continue;

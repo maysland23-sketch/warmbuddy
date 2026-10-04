@@ -38,3 +38,13 @@ test('custom prompt actions are delegated and prompt text is escaped in the UI',
   assert.match(customPromptSource, /maxlength="3000"/);
   assert.match(customPromptSource, /MIN_INTERVAL\s*=\s*1/);
 });
+
+test('chat request integration counts once and reuses the same prompt context for search follow-up', () => {
+  assert.match(chatSource, /beginAiRound\(chat\)/);
+  assert.match(chatSource, /customPromptContext/);
+  assert.match(chatSource, /apiMessages\.push\(\{ role: 'system', content: customPromptContext \}\)/);
+  assert.match(chatSource, /apiMessages2\.push\(\{ role: 'system', content: customPromptContext \}\)/);
+  assert.match(chatSource, /messages: apiMessages2/);
+  assert.match(chatSource, /projectId: 'claude-code-test'/);
+  assert.doesNotMatch(chatSource, /chat\.messages\.push\(\{[^}]*customPrompt/);
+});
