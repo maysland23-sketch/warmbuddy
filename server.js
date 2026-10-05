@@ -1,4 +1,4 @@
-require('dotenv').config();
+if (process.env.NODE_ENV !== 'test') require('dotenv').config();
 const { randomUUID } = require('node:crypto');
 const express = require('express');
 const webpush = require('web-push');
@@ -22,6 +22,13 @@ const { createTokenUsageEvent, estimateUsage } = require('./token-usage-utils');
 const {
   createAgentGatewayClient
 } = require('./claude-code-gateway');
+const {
+  CODEX_ERROR_MESSAGES,
+  CODEX_SESSION_ID_PATTERN,
+  CodexGatewayError,
+  createCodexGatewayClient,
+  serializeCodexRequest
+} = require('./codex-gateway');
 const { buildMemoryRows } = require('./memories-persistence');
 const { createEmailService } = require('./email-service');
 const {
@@ -89,6 +96,14 @@ function getAgentGatewayClient() {
   if (app.locals.agentGatewayClient) return app.locals.agentGatewayClient;
   if (!agentGatewayClient) agentGatewayClient = createAgentGatewayClient();
   return agentGatewayClient;
+}
+
+let codexGatewayClient = null;
+
+function getCodexGatewayClient() {
+  if (app.locals.codexGatewayClient) return app.locals.codexGatewayClient;
+  if (!codexGatewayClient) codexGatewayClient = createCodexGatewayClient();
+  return codexGatewayClient;
 }
 
 function truncateAgentPromptText(value, maxChars) {
@@ -162,6 +177,95 @@ function agentGatewayErrorStatus(error) {
   if (typeof error?.code === 'string' && error.code.startsWith('AGENT_GATEWAY_')) return 502;
   if (error?.status >= 400 && error.status <= 599) return error.status;
   return 502;
+}
+
+const CODEX_PUBLIC_ERROR_CODES = new Set(Object.keys(CODEX_ERROR_MESSAGES));
+const CODEX_RESPONSE_WRITE_TIMEOUT_MS = 15000;
+const CODEX_RESPONSE_BACKPRESSURE_TIMEOUT = 'CODEX_RESPONSE_BACKPRESSURE_TIMEOUT';
+
+function codexResponseWriteTimeoutMs() {
+  const testOverride = app.locals.codexResponseWriteTimeoutMs;
+  if (Number.isInteger(testOverride) && testOverride >= 1 && testOverride <= CODEX_RESPONSE_WRITE_TIMEOUT_MS) {
+    return testOverride;
+  }
+  return CODEX_RESPONSE_WRITE_TIMEOUT_MS;
+}
+
+function codexPublicErrorCode(error) {
+  return CODEX_PUBLIC_ERROR_CODES.has(error?.code) ? error.code : 'CODEX_GATEWAY_UNAVAILABLE';
+}
+
+function codexErrorStatus(error, code) {
+  if (code === 'CODEX_GATEWAY_NOT_CONFIGURED') return 503;
+  if (code === 'CODEX_GATEWAY_TIMEOUT') return 504;
+  if (code === 'CODEX_GATEWAY_ABORTED') return 499;
+  if (code === 'BUSY' || code === 'SESSION_ACTIVE') return 409;
+  if (code === 'UNKNOWN_SESSION') return 404;
+  if (code === 'CODEX_INVALID_REQUEST' || code === 'CODEX_INVALID_PROMPT' || code === 'CODEX_INVALID_SESSION') return 400;
+  if (code === 'CODEX_PROMPT_TOO_LARGE') return 413;
+  if (error?.status >= 400 && error.status <= 599 && error instanceof CodexGatewayError) return error.status;
+  return 502;
+}
+
+function codexErrorPayload(error) {
+  const code = codexPublicErrorCode(error);
+  return { error: CODEX_ERROR_MESSAGES[code], code };
+}
+
+function waitForCodexDrain(res, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => finishReject(new CodexGatewayError(
+      'Codex response write timed out',
+      { status: 504, code: CODEX_RESPONSE_BACKPRESSURE_TIMEOUT }
+    )), codexResponseWriteTimeoutMs());
+    const cleanup = () => {
+      clearTimeout(timeout);
+      res.removeListener('drain', onDrain);
+      res.removeListener('close', onClose);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const finishResolve = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(true);
+    };
+    const finishReject = error => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onDrain = () => finishResolve();
+    const onClose = () => finishReject(new CodexGatewayError(
+      'Codex request cancelled',
+      { status: 499, code: 'CODEX_GATEWAY_ABORTED' }
+    ));
+    const onAbort = () => finishReject(new CodexGatewayError(
+      'Codex request cancelled',
+      { status: 499, code: 'CODEX_GATEWAY_ABORTED' }
+    ));
+    res.once('drain', onDrain);
+    res.once('close', onClose);
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function writeCodexGatewayChunk(res, chunk, signal) {
+  if (res.destroyed || res.writableEnded) return false;
+  const accepted = res.write(chunk);
+  if (!accepted) await waitForCodexDrain(res, signal);
+  return true;
+}
+
+function writeCodexGatewaySse(res, event, payload, signal) {
+  return writeCodexGatewayChunk(res, `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`, signal);
+}
+
+function writeCodexGatewayHeartbeat(res, signal) {
+  return writeCodexGatewayChunk(res, ': heartbeat\n\n', signal);
 }
 
 // ==================== WEB PUSH SETUP ====================
@@ -2164,6 +2268,135 @@ function mergeUsageSnapshots(current, next) {
 }
 
 // ==================== CHAT ENDPOINTS ====================
+app.post('/api/codex/stream', async (req, res) => {
+  const body = req.body || {};
+  const keys = Object.keys(body);
+  if (keys.some(key => key !== 'prompt' && key !== 'sessionId')) {
+    return res.status(400).json({ error: CODEX_ERROR_MESSAGES.CODEX_INVALID_REQUEST, code: 'CODEX_INVALID_REQUEST' });
+  }
+
+  let request;
+  try {
+    request = JSON.parse(serializeCodexRequest(body.prompt, body.sessionId));
+  } catch (error) {
+    const payload = codexErrorPayload(error);
+    return res.status(codexErrorStatus(error, payload.code)).json(payload);
+  }
+
+  let client;
+  try {
+    client = getCodexGatewayClient();
+  } catch (error) {
+    const payload = codexErrorPayload(error);
+    return res.status(codexErrorStatus(error, payload.code)).json(payload);
+  }
+
+  const clientAbortContext = createClientAbortContext(req, res);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.removeHeader('Content-Length');
+  res.flushHeaders();
+
+  let completionStatus = null;
+  let pendingCompletion = null;
+  let completionSent = false;
+  let emittedError = false;
+  const handleGatewayEvent = async event => {
+    if (event.type === 'error') {
+      emittedError = true;
+      return writeCodexGatewaySse(res, 'error', {
+        code: CODEX_PUBLIC_ERROR_CODES.has(event.code) ? event.code : 'CODEX_GATEWAY_REJECTED'
+      }, clientAbortContext.signal);
+    }
+    if (event.type === 'completion') {
+      completionStatus = event.payload.status;
+      pendingCompletion = event.payload;
+      return true;
+    }
+    return writeCodexGatewaySse(res, event.type, event.payload, clientAbortContext.signal);
+  };
+
+  try {
+    const result = await client.run({
+      prompt: request.prompt,
+      sessionId: request.sessionId,
+      signal: clientAbortContext.signal,
+      onEvent: handleGatewayEvent,
+      onHeartbeat: () => writeCodexGatewayHeartbeat(res, clientAbortContext.signal)
+    });
+    if (clientAbortContext.isDisconnected() || res.destroyed) return;
+    if (!result?.completed || completionStatus !== 'completed') {
+      throw new CodexGatewayError(CODEX_ERROR_MESSAGES.CODEX_GATEWAY_INCOMPLETE, {
+        status: 502,
+        code: 'CODEX_GATEWAY_INCOMPLETE'
+      });
+    }
+    await writeCodexGatewaySse(res, 'completion', pendingCompletion, clientAbortContext.signal);
+    completionSent = true;
+    if (!res.writableEnded) res.end();
+  } catch (error) {
+    if (clientAbortContext.isDisconnected() || error?.code === 'CODEX_GATEWAY_ABORTED') return;
+    if (error?.code === CODEX_RESPONSE_BACKPRESSURE_TIMEOUT) {
+      if (!res.destroyed) res.destroy();
+      return;
+    }
+    if (res.destroyed || res.writableEnded) return;
+    const payload = codexErrorPayload(error);
+    if (res.headersSent) {
+      try {
+        if (pendingCompletion?.status === 'failed') {
+          if (!completionSent) {
+            await writeCodexGatewaySse(res, 'completion', { status: 'failed' }, clientAbortContext.signal);
+            completionSent = true;
+          }
+        } else {
+          if (!emittedError) {
+            await writeCodexGatewaySse(res, 'error', { code: payload.code }, clientAbortContext.signal);
+          }
+          if (!completionSent) {
+            completionStatus = 'failed';
+            await writeCodexGatewaySse(res, 'completion', { status: 'failed' }, clientAbortContext.signal);
+            completionSent = true;
+          }
+        }
+      } catch (_writeError) {
+        if (!res.destroyed) res.destroy();
+      }
+      if (!res.writableEnded) res.end();
+    } else {
+      res.status(codexErrorStatus(error, payload.code)).json(payload);
+    }
+  } finally {
+    clientAbortContext.cleanup();
+  }
+});
+
+app.delete('/api/codex/sessions/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  if (!CODEX_SESSION_ID_PATTERN.test(sessionId || '')) {
+    const payload = { error: CODEX_ERROR_MESSAGES.CODEX_INVALID_SESSION, code: 'CODEX_INVALID_SESSION' };
+    return res.status(400).json(payload);
+  }
+
+  let client;
+  let clientAbortContext;
+  try {
+    client = getCodexGatewayClient();
+    clientAbortContext = createClientAbortContext(req, res);
+    await client.deleteSession(sessionId, { signal: clientAbortContext.signal });
+    if (clientAbortContext.isDisconnected() || res.destroyed) return;
+    return res.status(200).json({ deleted: true });
+  } catch (error) {
+    if (clientAbortContext?.isDisconnected() || error?.code === 'CODEX_GATEWAY_ABORTED') return;
+    const payload = codexErrorPayload(error);
+    return res.status(codexErrorStatus(error, payload.code)).json(payload);
+  } finally {
+    clientAbortContext?.cleanup();
+  }
+});
+
 app.post('/api/agent/stream', async (req, res) => {
   const body = req.body || {};
   const { projectId, windowId, messages } = body;

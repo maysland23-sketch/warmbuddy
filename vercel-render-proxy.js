@@ -207,8 +207,12 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
     const abortIfDisconnected = () => {
       if (!req.complete) controller.abort();
     };
+    const abortIfResponseClosed = () => {
+      if (!res.writableFinished && !res.writableEnded) controller.abort();
+    };
     req.once('aborted', abortIfDisconnected);
     req.once('close', abortIfDisconnected);
+    res.once('close', abortIfResponseClosed);
 
     let upstream;
     try {
@@ -222,6 +226,7 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
     } catch (_error) {
       req.removeListener('aborted', abortIfDisconnected);
       req.removeListener('close', abortIfDisconnected);
+      res.removeListener('close', abortIfResponseClosed);
       logFailure(logger, pathname, targetPathname);
       return sendJson(res, 502, { error: 'Upstream unavailable', code: 'UPSTREAM_UNAVAILABLE' });
     }
@@ -247,6 +252,7 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
     } finally {
       req.removeListener('aborted', abortIfDisconnected);
       req.removeListener('close', abortIfDisconnected);
+      res.removeListener('close', abortIfResponseClosed);
     }
   };
 }

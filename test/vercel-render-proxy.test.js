@@ -191,3 +191,69 @@ test('proxy streams upstream response before upstream body closes', async () => 
     assert.equal((await reader.read()).done, true);
   });
 });
+
+test('proxy aborts Render when the client closes an incomplete SSE response', async () => {
+  let upstreamResponseClosed = false;
+  let upstreamSocketClosed = false;
+  const upstream = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write('first');
+    response.once('close', () => { upstreamResponseClosed = true; });
+    response.socket?.once('close', () => { upstreamSocketClosed = true; });
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const handler = createVercelRenderProxy({
+    renderOrigin: `http://127.0.0.1:${upstream.address().port}`,
+    proxySecret: TEST_SECRET,
+    logger: { info() {}, error() {} }
+  });
+  const proxy = http.createServer(handler);
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  const clientRequest = http.get(`http://127.0.0.1:${proxy.address().port}/api/codex/stream`);
+  try {
+    await new Promise((resolve, reject) => {
+      clientRequest.once('error', error => {
+        if (error.code !== 'ECONNRESET') reject(error);
+      });
+      clientRequest.once('response', response => {
+        response.once('data', chunk => {
+          assert.equal(chunk.toString(), 'first');
+          clientRequest.destroy();
+          resolve();
+        });
+      });
+    });
+    const started = Date.now();
+    while ((!upstreamResponseClosed || !upstreamSocketClosed) && Date.now() - started < 2000) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(upstreamResponseClosed, true);
+    assert.equal(upstreamSocketClosed, true);
+  } finally {
+    clientRequest.destroy();
+    await new Promise(resolve => proxy.close(resolve));
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test('proxy does not abort Render after a normal SSE response completes', async () => {
+  let upstreamAborted = false;
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example', proxySecret: TEST_SECRET,
+    fetchImpl: async (_url, init) => {
+      init.signal.addEventListener('abort', () => { upstreamAborted = true; }, { once: true });
+      return new Response(new TextEncoder().encode('data: [DONE]\n\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' }
+      });
+    },
+    logger: { info() {}, error() {} }
+  });
+
+  await withProxy(handler, async baseUrl => {
+    const response = await fetch(baseUrl + '/api/codex/stream');
+    assert.equal(await response.text(), 'data: [DONE]\n\n');
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(upstreamAborted, false);
+});
