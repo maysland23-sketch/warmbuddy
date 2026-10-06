@@ -429,6 +429,8 @@ var SyncModule = (function() {
   function mergeCloudMessages(proj, rows) {
     var store = AppCore.getStore();
     var changed = false;
+    var chatTime = (typeof ChatTimeModule !== 'undefined' && ChatTimeModule) ||
+      (AppCore.getModule && AppCore.getModule('chatTime'));
     (rows || []).forEach(function(row) {
       var localMessage = cloudMessageToLocal(row);
       var chat = proj.chats.find(function(c) { return c.id === row.windowId; });
@@ -444,19 +446,13 @@ var SyncModule = (function() {
           changed = true;
         }
       } else {
-        chat.messages.push(localMessage);
+        chat.messages = chatTime && chatTime.mergeNewMessages
+          ? chatTime.mergeNewMessages(chat.messages, [localMessage])
+          : chat.messages.concat([localMessage]);
         changed = true;
       }
     });
     if (changed) {
-      var chatTime = (typeof ChatTimeModule !== 'undefined' && ChatTimeModule) ||
-        (AppCore.getModule && AppCore.getModule('chatTime'));
-      var fallbackDate = AppCore.fmtDate ? AppCore.fmtDate().iso : '';
-      proj.chats.forEach(function(chat) {
-        if (chatTime && chatTime.sortMessages) {
-          chat.messages = chatTime.sortMessages(chat.messages, fallbackDate);
-        }
-      });
       AppCore.saveStore();
       if (proj.id === store.activeProject && typeof renderChatMessages === 'function') renderChatMessages(true);
     }

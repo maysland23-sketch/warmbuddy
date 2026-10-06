@@ -77,7 +77,7 @@ test('pullChatMessages restores a closed-page proactive message with trigger tim
   assert.match(requestedUrls[1], /since=/);
 });
 
-test('pullChatMessages orders legacy local system prompts before later prompts from cloud', async () => {
+test('pullChatMessages keeps an untrusted legacy message in place when merging cloud history', async () => {
   const store = {
     activeProject: 'p1',
     activeChat: 'c1',
@@ -95,8 +95,53 @@ test('pullChatMessages orders legacy local system prompts before later prompts f
   await sync.pullChatMessages('p1');
 
   assert.deepEqual(store.projects[0].chats[0].messages.map(message => message.text), [
-    '猫砂盆好像需要铲一铲', '确认欲'
+    '确认欲', '猫砂盆好像需要铲一铲'
   ]);
+});
+
+test('pullChatMessages inserts trusted cloud history around existing trusted messages and preserves ties', async () => {
+  const store = {
+    activeProject: 'p1',
+    activeChat: 'c1',
+    projects: [{ id: 'p1', chats: [{ id: 'c1', messages: [
+      { id: 'local-late', role: 'system', text: '晚', date: '2026-10-04', time: '21:00' },
+      { id: 'legacy', role: 'system', text: '旧消息', time: '21:30' }
+    ] }] }]
+  };
+  const rows = [
+    { projectId: 'p1', windowId: 'c1', messageId: 'cloud-early', role: 'assistant', content: '早', createdAt: '2026-10-04T20:00:00.000', metadata: {} },
+    { projectId: 'p1', windowId: 'c1', messageId: 'cloud-tie-a', role: 'assistant', content: '同刻A', createdAt: '2026-10-04T21:00:00.000', metadata: {} },
+    { projectId: 'p1', windowId: 'c1', messageId: 'cloud-tie-b', role: 'assistant', content: '同刻B', createdAt: '2026-10-04T21:00:00.000', metadata: {} }
+  ];
+  const sync = loadSyncModule(store, [rows], []);
+
+  await sync.pullChatMessages('p1');
+
+  assert.deepEqual(store.projects[0].chats[0].messages.map(message => message.id), [
+    'cloud-early', 'local-late', 'cloud-tie-a', 'cloud-tie-b', 'legacy'
+  ]);
+});
+
+test('pullChatMessages keeps sessions separate and a repeated pull does not reorder or duplicate', async () => {
+  const store = {
+    activeProject: 'p1',
+    activeChat: 'c1',
+    projects: [{ id: 'p1', chats: [
+      { id: 'c1', messages: [{ id: 'c1-old', role: 'user', text: '一', date: '2026-10-04', time: '20:00' }] },
+      { id: 'c2', messages: [{ id: 'c2-old', role: 'user', text: '二', date: '2026-10-05', time: '20:00' }] }
+    ] }]
+  };
+  const rows = [
+    { projectId: 'p1', windowId: 'c2', messageId: 'c2-new', role: 'assistant', content: '只属于二', createdAt: '2026-10-05T21:00:00.000', metadata: {} }
+  ];
+  const sync = loadSyncModule(store, [rows, rows], []);
+
+  await sync.pullChatMessages('p1');
+  const firstOrder = store.projects[0].chats.map(chat => chat.messages.map(message => message.id));
+  await sync.pullChatMessages('p1');
+
+  assert.deepEqual(store.projects[0].chats.map(chat => chat.messages.map(message => message.id)), firstOrder);
+  assert.deepEqual(firstOrder, [['c1-old'], ['c2-old', 'c2-new']]);
 });
 
 test('pollSystemEvents applies canonical status events while restoring the proactive message', async () => {

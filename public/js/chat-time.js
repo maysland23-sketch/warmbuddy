@@ -50,12 +50,11 @@ var ChatTimeModule = (function() {
     return pad(date.getHours()) + ':' + pad(date.getMinutes());
   }
 
-  function getTimeInfo(message, fallbackDate) {
+  function getTimeInfo(message) {
     message = message || {};
     var parsed = parseDateTime(message.createdAt);
     if (!parsed) parsed = parseLocalParts(message.date, message.time);
     if (!parsed) parsed = parseFullTime(message.time);
-    if (!parsed && fallbackDate) parsed = parseLocalParts(fallbackDate, message.time);
     if (!parsed) return null;
 
     return {
@@ -79,22 +78,118 @@ var ChatTimeModule = (function() {
     return message;
   }
 
-  function sortMessages(messages, fallbackDate) {
-    return (Array.isArray(messages) ? messages : [])
-      .map(function(message, index) {
-        return { message: message, index: index, info: getTimeInfo(message, fallbackDate) };
-      })
-      .sort(function(a, b) {
-        if (!a.info || !b.info) return a.index - b.index;
-        return a.info.sortValue - b.info.sortValue || a.index - b.index;
-      })
-      .map(function(entry) { return entry.message; });
+  function isOrderBarrier(message) {
+    return !message || message.contentType === 'dateDivider' || !getTimeInfo(message);
+  }
+
+  function sortTrustedRun(messages, start, end) {
+    if (end - start < 2) return;
+    var run = messages.slice(start, end).map(function(message, index) {
+      return { message: message, index: index, info: getTimeInfo(message) };
+    });
+    run.sort(function(a, b) {
+      return a.info.sortValue - b.info.sortValue || a.index - b.index;
+    });
+    run.forEach(function(entry, index) {
+      messages[start + index] = entry.message;
+    });
+  }
+
+  // Sort only contiguous messages with trusted complete timestamps. Legacy
+  // HH:mm rows and date-divider rows are order barriers, so no message can
+  // cross them as a side effect of a later cloud pull or date normalization.
+  function sortMessages(messages) {
+    var result = Array.isArray(messages) ? messages.slice() : [];
+    var runStart = 0;
+    for (var i = 0; i <= result.length; i++) {
+      if (i === result.length || isOrderBarrier(result[i])) {
+        sortTrustedRun(result, runStart, i);
+        runStart = i + 1;
+      }
+    }
+    return result;
+  }
+
+  function findTrustedRuns(messages) {
+    var runs = [];
+    var start = 0;
+    for (var i = 0; i <= messages.length; i++) {
+      if (i === messages.length || isOrderBarrier(messages[i])) {
+        if (i > start) {
+          var values = messages.slice(start, i).map(function(message) {
+            return getTimeInfo(message).sortValue;
+          });
+          runs.push({
+            start: start,
+            end: i,
+            min: Math.min.apply(Math, values),
+            max: Math.max.apply(Math, values)
+          });
+        }
+        start = i + 1;
+      }
+    }
+    return runs;
+  }
+
+  function insertionCandidate(messages, run, sortValue) {
+    if (sortValue < run.min) {
+      return { index: run.start, distance: run.min - sortValue };
+    }
+    if (sortValue > run.max) {
+      return { index: run.end, distance: sortValue - run.max };
+    }
+
+    // The run may itself be old/scrambled. Do not repair it here; insert the
+    // new row at the stable position before the first strictly later row.
+    var index = run.start;
+    while (index < run.end && getTimeInfo(messages[index]).sortValue <= sortValue) index++;
+    return { index: index, distance: 0 };
+  }
+
+  // Existing rows are authoritative: this helper never sorts or rewrites
+  // them. A trusted new row is inserted into the nearest trusted contiguous
+  // run; unknown/date-divider barriers are never crossed. If no trusted run
+  // exists, the row is appended in cloud response order.
+  function mergeNewMessages(existingMessages, newMessages) {
+    var result = Array.isArray(existingMessages) ? existingMessages.slice() : [];
+    var incoming = Array.isArray(newMessages) ? newMessages : [];
+    var knownIds = Object.create(null);
+    result.forEach(function(message) {
+      if (message && message.id) knownIds[message.id] = true;
+    });
+
+    incoming.forEach(function(message) {
+      if (!message || (message.id && knownIds[message.id])) return;
+      var info = getTimeInfo(message);
+      if (!info || message.contentType === 'dateDivider') {
+        result.push(message);
+      } else {
+        var runs = findTrustedRuns(result);
+        if (!runs.length) {
+          result.push(message);
+        } else {
+          var selected = null;
+          runs.forEach(function(run) {
+            var candidate = insertionCandidate(result, run, info.sortValue);
+            if (!selected || candidate.distance < selected.distance ||
+              (candidate.distance === selected.distance && candidate.index < selected.index)) {
+              selected = candidate;
+            }
+          });
+          result.splice(selected ? selected.index : result.length, 0, message);
+        }
+      }
+      if (message && message.id) knownIds[message.id] = true;
+    });
+    return result;
   }
 
   return {
     createMessage: createMessage,
     getTimeInfo: getTimeInfo,
-    sortMessages: sortMessages
+    sortMessages: sortMessages,
+    mergeNewMessages: mergeNewMessages
   };
 })();
 
