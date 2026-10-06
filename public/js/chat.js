@@ -839,7 +839,7 @@ var ChatModule = (function() {
     visibleMessages.forEach(function(entry) {
       var m = entry.message;
       var i = entry.index;
-      var timeInfo = chatTime && chatTime.getTimeInfo ? chatTime.getTimeInfo(m, todayIso) : null;
+      var timeInfo = chatTime && chatTime.getTimeInfo ? chatTime.getTimeInfo(m) : null;
       var msgDate = timeInfo ? timeInfo.date : '';
       if (msgDate && msgDate !== shownDate) {
         var d = new Date(msgDate + 'T00:00:00');

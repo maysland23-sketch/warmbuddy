@@ -127,12 +127,9 @@ test('prefers createdAt and parses date plus time for display and sorting', () =
   assert.equal(fromParts.time, '20:00');
 });
 
-test('resolves a legacy same-day HH:mm message only with an explicit fallback date', () => {
+test('does not assign a date to a legacy HH:mm message from a fallback date', () => {
   const chatTime = loadChatTimeModule();
-  const info = chatTime.getTimeInfo({ time: '21:00' }, '2026-10-04');
-
-  assert.equal(info.date, '2026-10-04');
-  assert.equal(info.time, '21:00');
+  assert.equal(chatTime.getTimeInfo({ time: '21:00' }, '2026-10-04'), null);
   assert.equal(chatTime.getTimeInfo({ time: '21:00' }), null);
 });
 
@@ -151,6 +148,62 @@ test('sorts local and cloud messages chronologically without mutating input and 
 
   assert.deepEqual(sorted.map(message => message.id), ['early', 'late', 'tie-a', 'tie-b']);
   assert.deepEqual(messages.map(message => message.id), ['late', 'early', 'tie-a', 'tie-b']);
+});
+
+test('sorts only trusted contiguous runs and keeps legacy/time-divider barriers fixed', () => {
+  const chatTime = loadChatTimeModule();
+  const messages = [
+    { id: 'known-late', date: '2026-10-04', time: '21:00' },
+    { id: 'legacy-a', time: '20:00' },
+    { id: 'known-second-late', date: '2026-10-04', time: '22:00' },
+    { id: 'known-second-early', date: '2026-10-04', time: '21:30' },
+    { id: 'divider', contentType: 'dateDivider', date: '2026-10-05', time: '00:00' },
+    { id: 'legacy-b', time: '00:05' },
+    { id: 'known-next', date: '2026-10-05', time: '01:00' }
+  ];
+
+  const sorted = chatTime.sortMessages(messages, '2026-10-06');
+
+  assert.deepEqual(sorted.map(message => message.id), [
+    'known-late', 'legacy-a', 'known-second-early', 'known-second-late',
+    'divider', 'legacy-b', 'known-next'
+  ]);
+  assert.deepEqual(messages.map(message => message.id), [
+    'known-late', 'legacy-a', 'known-second-late', 'known-second-early',
+    'divider', 'legacy-b', 'known-next'
+  ]);
+  assert.equal(sorted[1].id, 'legacy-a');
+  assert.equal(sorted[4].id, 'divider');
+  assert.equal(sorted[5].id, 'legacy-b');
+});
+
+test('merges new trusted cloud messages without reordering existing history', () => {
+  const chatTime = loadChatTimeModule();
+  const existing = [
+    { id: 'known-late', date: '2026-10-04', time: '21:00' },
+    { id: 'legacy', time: '21:30' },
+    { id: 'divider', contentType: 'dateDivider', date: '2026-10-05', time: '00:00' },
+    { id: 'known-next', date: '2026-10-05', time: '01:00' }
+  ];
+  const incoming = [
+    { id: 'cloud-early', date: '2026-10-04', time: '20:00' },
+    { id: 'cloud-tie', date: '2026-10-04', time: '21:00' },
+    { id: 'cloud-next', date: '2026-10-05', time: '02:00' }
+  ];
+
+  const merged = chatTime.mergeNewMessages(existing, incoming);
+
+  assert.deepEqual(merged.map(message => message.id), [
+    'cloud-early', 'known-late', 'cloud-tie', 'legacy', 'divider',
+    'known-next', 'cloud-next'
+  ]);
+  assert.deepEqual(existing.map(message => message.id), [
+    'known-late', 'legacy', 'divider', 'known-next'
+  ]);
+  assert.deepEqual(
+    merged.filter(message => existing.some(item => item.id === message.id)).map(message => message.id),
+    existing.map(message => message.id)
+  );
 });
 
 test('batch draft command creates timestamped user, system, and AI messages', async () => {
