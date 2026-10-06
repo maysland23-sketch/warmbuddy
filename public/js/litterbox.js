@@ -192,14 +192,15 @@ var LitterBoxModule = (function() {
 
     /** Main-chat write path — AI outputs <!--LITTER:type-->...<!--/LITTER--> directly in chat.
      *  No 30min cooldown; reuses the daily 5-item cap; does NOT touch _lastLitterTime. */
-    ingestFromMainChat: function(content, type, chat) {
+    ingestFromMainChat: function(content, type, chat, owner) {
+      owner = owner || {};
       var store = AppCore.getStore();
       if (!content || !content.trim()) return false;
       if (countTodayLitter() >= LITTER_MAX_PER_DAY) return false;
       var validationErr = validateLitterContent(content);
       if (validationErr) { console.log('[litter] Main-chat content rejected:', validationErr, content.slice(0, 50)); return false; }
       if (!store.litterThoughts) store.litterThoughts = [];
-      var proj = AppCore.getActiveProject();
+      var proj = AppCore.getStore().projects.find(function(item) { return item.id === (owner.projectId || AppCore.getStore().activeProject); });
       var winName = (proj && chat) ? proj.name + ' / ' + chat.name : (chat && chat.name ? chat.name : 'unknown');
       var thoughtType = (type && type.trim()) ? type.trim().slice(0, 4) : 'unclear';
       store.litterThoughts.unshift({
@@ -210,7 +211,7 @@ var LitterBoxModule = (function() {
         context_snapshot: '',
         date: AppCore.fmtDate().iso,
         time: AppCore.nowTime(),
-        sourceChatId: store.activeChat,
+        sourceChatId: owner.chatId || store.activeChat,
         sourceWindow: winName,
         revealed: false
       });

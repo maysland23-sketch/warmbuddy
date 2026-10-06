@@ -59,6 +59,10 @@ var ChatModule = (function() {
     return !!project && project.id === 'claude-code-test';
   }
 
+  function isCodexProject(project) {
+    return !!project && project.id === 'codex-code-test' && project.runtime === 'codex-gateway';
+  }
+
   function getActiveChatObjForProject(pid) {
     var store = AppCore.getStore();
     var proj = store.projects.find(function(p) { return p.id === pid; });
@@ -78,7 +82,7 @@ var ChatModule = (function() {
     var store = AppCore.getStore();
     var proj = getActiveProject();
     if (!proj) return;
-    if (isAgentGatewayProject(proj)) return;
+    if (isAgentGatewayProject(proj) || isCodexProject(proj)) return;
     if (!proj.apiConfig) proj.apiConfig = {};
     proj.apiConfig.model = modelId;
     AppCore.saveStore();
@@ -157,6 +161,8 @@ var ChatModule = (function() {
     if (p) p._lastActiveChat = store.activeChat || '';
     renderProjectList(); updateCurrentProjectLabel(); renderChatMessages();
     toggleProjectSidebar(); updateChatInputEnabledState();
+    if (typeof updateSettingsUI === 'function') updateSettingsUI();
+    if (AppCore.getModule('codex') && AppCore.getModule('codex').updateUi) AppCore.getModule('codex').updateUi();
     if (typeof SyncModule !== 'undefined') {
       SyncModule.syncProjectConfigToBackend();
       SyncModule.pullChatMessages(pid);
@@ -172,6 +178,8 @@ var ChatModule = (function() {
     if (project) project._lastActiveChat = cid;
     renderProjectList(); updateCurrentProjectLabel(); renderChatMessages();
     toggleProjectSidebar(); updateChatInputEnabledState();
+    if (typeof updateSettingsUI === 'function') updateSettingsUI();
+    if (AppCore.getModule('codex') && AppCore.getModule('codex').updateUi) AppCore.getModule('codex').updateUi();
     if (typeof SyncModule !== 'undefined') {
       SyncModule.syncProjectConfigToBackend();
       SyncModule.pullChatMessages(pid);
@@ -547,16 +555,20 @@ var ChatModule = (function() {
     return prefix + '\n' + visible.slice(0, limit).map(formatDiaryContext).join('\n');
   }
 
-  function buildDynamicContextBlock() {
+  function buildDynamicContextBlock(contextProject, contextChat) {
     var store = AppCore.getStore();
-    var fp = getDynamicCtxFingerprint();
+    var explicitContext = !!(contextProject || contextChat);
+    var fp = explicitContext
+      ? [contextProject && contextProject.id || '', contextChat && contextChat.id || '', contextChat && contextChat._messageCount || 0,
+        contextProject && contextProject.preference || '', contextProject && contextProject._userStatus || '', contextProject && contextProject._aiStatus || ''].join('|')
+      : getDynamicCtxFingerprint();
     var nowTs = Date.now();
-    if (_dynCtxCache.fp === fp && _dynCtxCache.content && (nowTs - _dynCtxCache.ts) < 60000) {
+    if (!explicitContext && _dynCtxCache.fp === fp && _dynCtxCache.content && (nowTs - _dynCtxCache.ts) < 60000) {
       return _dynCtxCache.content;
     }
 
-    var proj = getActiveProject();
-    var chat = getActiveChatObj();
+    var proj = contextProject || getActiveProject();
+    var chat = contextChat || getActiveChatObj();
     var today = AppCore.fmtDate();
     var parts = [];
     var roundNum = chat ? (chat._messageCount || 0) : 0;
@@ -565,7 +577,7 @@ var ChatModule = (function() {
     if (chat && !chat._dynCtxSnapshot) chat._dynCtxSnapshot = {};
     var snap = chat ? chat._dynCtxSnapshot : {};
 
-    var ais = getActiveChatAiSettings();
+    var ais = chat && chat.aiSettings ? chat.aiSettings : getActiveChatAiSettings();
 
     // ── 核心身份（每次必注入）：用户偏好 + 核心概述 ──
     if (proj && proj.preference && proj.preference.trim()) {
@@ -602,7 +614,7 @@ var ChatModule = (function() {
     }
     var activeTodos = store.todos.filter(function(t) {
       if (t.done) return false;
-      if (t.creator === 'ai' && t.chatId && t.chatId !== store.activeChat) return false;
+      if (t.creator === 'ai' && t.chatId && t.chatId !== (chat ? chat.id : store.activeChat)) return false;
       return true;
     });
     if (activeTodos.length > 0) {
@@ -690,7 +702,7 @@ var ChatModule = (function() {
     fSnapshotInject(parts, snap, 'status', statusText);
 
     var result = parts.join('\n');
-    _dynCtxCache = { fp: fp, content: result, ts: nowTs };
+    if (!explicitContext) _dynCtxCache = { fp: fp, content: result, ts: nowTs };
     return result;
   }
 
@@ -710,6 +722,105 @@ var ChatModule = (function() {
 
   function buildSystemPrompt() {
     return SYSTEM_PROMPT_STATIC + '\n\n' + buildDynamicContextBlock();
+  }
+
+  function getChatForContext(projectId, chatId) {
+    var project = getProjectById(projectId);
+    if (!project || !Array.isArray(project.chats)) return null;
+    return project.chats.find(function(chat) { return chat.id === chatId; }) || null;
+  }
+
+  function formatCodexHistoryMessage(message, chat) {
+    if (!message || (message.role !== 'user' && message.role !== 'ai' && message.role !== 'assistant')) return '';
+    var role = message.role === 'user' ? '用户' : '暖伴';
+    var content = message.text || '';
+    if (message.replyTo && message.role === 'user' && chat) {
+      var quoted = chat.messages.find(function(item) { return item.id === message.replyTo; });
+      if (quoted) content = '[引用' + (quoted.role === 'user' ? AppCore.USER_NAME : '暖伴') + '的消息：「' + (quoted.text || '').slice(0, 150) + '」]\n' + content;
+    }
+    return role + ': ' + content;
+  }
+
+  function groupCodexRounds(messages) {
+    if (typeof groupMessagesIntoRounds === 'function') return groupMessagesIntoRounds(messages);
+    if (typeof MemoryModule !== 'undefined' && MemoryModule.groupMessagesIntoRounds) return MemoryModule.groupMessagesIntoRounds(messages);
+    var rounds = [];
+    var current = null;
+    (messages || []).forEach(function(message) {
+      if (message.role === 'user' || !current) {
+        current = { msgs: [] };
+        rounds.push(current);
+      }
+      current.msgs.push(message);
+    });
+    return rounds;
+  }
+
+  function buildCodexPromptContext(options) {
+    options = options || {};
+    var project = getProjectById(options.projectId);
+    var chat = getChatForContext(options.projectId, options.chatId);
+    if (!project || !chat) throw new Error('CODEX_CONTEXT_NOT_FOUND');
+    var currentIds = {};
+    (options.currentMessageIds || []).forEach(function(id) { currentIds[id] = true; });
+    var currentMessages = (options.currentMessages || chat.messages.filter(function(message) { return currentIds[message.id]; }));
+    var currentLines = currentMessages.map(function(message) { return formatCodexHistoryMessage(message, chat); }).filter(Boolean);
+    if (currentLines.length === 0 && options.currentUserText) currentLines.push('用户: ' + options.currentUserText);
+
+    var dynamicBlock = buildDynamicContextBlock(project, chat);
+    var customPromptContext = options.customPromptContext || '';
+    if (!customPromptContext && options.beginCustomPrompt !== false) {
+      var customPromptModule = AppCore.getModule('customPrompts');
+      if (customPromptModule && customPromptModule.beginAiRound) {
+        var customPromptRound = customPromptModule.beginAiRound(chat);
+        customPromptContext = customPromptRound && customPromptRound.content || '';
+      }
+    }
+
+    var historyMessages = chat.messages.filter(function(message) {
+      if (currentIds[message.id]) return false;
+      if (message.role !== 'user' && message.role !== 'ai' && message.role !== 'assistant') return false;
+      if (message._isHandoffNote || message._searchResult) return false;
+      if (message._codexTurnStatus === 'failed' || message._codexTurnStatus === 'canceled' || message._codexTurnStatus === 'unknown') return false;
+      return true;
+    });
+    var historyLines = [];
+    if (!options.continuation) {
+      var rounds = groupCodexRounds(historyMessages);
+      var l1Rounds = rounds.slice(-6);
+      var l2Rounds = rounds.slice(Math.max(0, rounds.length - 30), Math.max(0, rounds.length - 6));
+      if (l2Rounds.length > 0 && chat._roundSummaries && chat._roundSummaries.length > 0) {
+        var summary = chat._roundSummaries[chat._roundSummaries.length - 1];
+        if (summary && summary.summary) historyLines.push('【较早对话摘要】' + summary.summary);
+      } else if (l2Rounds.length >= 5 && typeof queueRoundCompression === 'function') {
+        queueRoundCompression(chat, l2Rounds);
+      }
+      l2Rounds.forEach(function(round) { (round.msgs || []).forEach(function(message) { var line = formatCodexHistoryMessage(message, chat); if (line) historyLines.push(line); }); });
+      l1Rounds.forEach(function(round) { (round.msgs || []).forEach(function(message) { var line = formatCodexHistoryMessage(message, chat); if (line) historyLines.push(line); }); });
+    }
+
+    var preference = (project.preference || '').trim();
+    var sharedDiaryBlock = pendingSharedDiaryContext(chat);
+    var sections = [
+      'WARM BUDDY APPLICATION CONTEXT',
+      '以下内容是应用层上下文和当前回合资料，不替换 Codex CLI 的原生 system prompt。',
+      '【系统设定】\n' + SYSTEM_PROMPT_STATIC,
+      '【项目偏好】\n' + (preference || '当前无额外项目偏好。'),
+      '【动态上下文当前快照】\n' + (dynamicBlock || '当前没有可注入的动态上下文。')
+    ];
+    if (customPromptContext) sections.push(customPromptContext);
+    if (sharedDiaryBlock) sections.push(sharedDiaryBlock);
+    if (currentLines.some(function(line) { return line.indexOf('[[FILE:') >= 0; })) {
+      sections.push('【附件处理】当前消息中的 [[FILE:id]] 仅是应用 artifact 引用；本阶段不向 Codex 发送二进制或 Data URL，不能据此声称已经读取文件。');
+    }
+    if (historyLines.length > 0) sections.push('【历史对话（沿用现有 L1/L2 规则）】\n' + historyLines.join('\n'));
+    else if (options.continuation) sections.push('【历史对话】Gateway session 已保留历史，本次不重复灌入完整历史。');
+    sections.push('【当前用户消息（本轮只出现一次）】\n' + (currentLines.join('\n') || '用户: ' + (options.currentUserText || '')));
+    return {
+      prompt: sections.join('\n\n'),
+      customPromptContext: customPromptContext,
+      currentMessageIds: Object.keys(currentIds)
+    };
   }
 
   function invalidateDynamicContext() {
@@ -908,6 +1019,11 @@ var ChatModule = (function() {
         console.error('[render] 第', i, '条消息渲染失败，已降级为纯文本:', e && e.message, 'role=', m.role);
         displayText = AppCore.escapeHtml(m.text || '');
       }
+      var codexStatusHtml = '';
+      if (m._codexRuntime === 'codex-gateway' && m._codexTurnStatus && m._codexTurnStatus !== 'completed') {
+        var codexStatusLabels = { running: 'Codex 生成中', failed: 'Codex 失败', canceled: 'Codex 已停止', unknown: 'Codex 结果未知' };
+        codexStatusHtml = '<span class="codex-turn-status">' + (codexStatusLabels[m._codexTurnStatus] || 'Codex 状态未知') + '</span>';
+      }
 
       html += '<div class="chat-row ' + m.role + '" id="msg-' + msgId + '">' +
         '<div class="chat-avatar ' + m.role + ('' + (!isUser && proj && proj._aiStatusChanged ? ' status-changed' : '')) + '" ' + (isUser ? '' : 'ondblclick="handleAIAvatarDblClick()" title="双击戳一戳"') + ' style="' + (isUser ? '' : 'cursor:pointer;') + '">' + (isUser ? 'MY' : '✦') + '</div>' +
@@ -919,7 +1035,7 @@ var ChatModule = (function() {
                ' ontouchstart="bubbleTouchStart(event,\'' + msgId + '\')"' +
                ' ontouchend="bubbleTouchEnd(event,\'' + msgId + '\')"' +
                ' ontouchmove="bubbleTouchMove(event)">' +
-            (m.replyTo ? renderReplyBlock(m.replyTo) : '') + displayText +
+            (m.replyTo ? renderReplyBlock(m.replyTo) : '') + displayText + codexStatusHtml +
           '</div>' +
           '<div class="bubble-time-row">' +
           (isUser ?
@@ -1313,6 +1429,134 @@ var ChatModule = (function() {
     if (typeof updateDesireDrives === 'function') updateDesireDrives(reflection);
   }
 
+  // Codex completion actions are deliberately separate from the legacy Claude
+  // response parser.  They run once, only after the whole Codex turn succeeds,
+  // and always resolve the original project/chat rather than the active view.
+  async function commitCodexResponse(options) {
+    options = options || {};
+    var project = getProjectById(options.projectId);
+    var chat = getChatForContext(options.projectId, options.chatId);
+    if (!project || !chat || !options.turnId) throw new Error('CODEX_CONTEXT_NOT_FOUND');
+    if (chat._codexGeneration !== undefined && chat._codexGeneration !== options.generation) return false;
+    if (!chat._codexActionTurns) chat._codexActionTurns = {};
+    if (chat._codexActionTurns[options.turnId]) return false;
+    chat._codexActionTurns[options.turnId] = true;
+    var store = AppCore.getStore();
+    var userMessage = (options.userMessageIds || []).map(function(id) {
+      return chat.messages.find(function(message) { return message.id === id; });
+    }).filter(Boolean).map(function(message) { return message.text || ''; }).join('\n');
+    var finalMessages = options.assistantMessages || chat.messages.filter(function(message) {
+      return message._codexTurnId === options.turnId && message.role === 'ai';
+    });
+    var projectName = project.name || '';
+    var chatName = chat.name || '';
+    for (var i = 0; i < finalMessages.length; i++) {
+      var message = finalMessages[i];
+      var raw = String(message.text || '');
+      var reflectionResult = extractReflection(raw);
+      var display = reflectionResult.cleanText || raw;
+      if (reflectionResult.reflection) {
+        var reflection = reflectionResult.reflection;
+        if (!store.memorySystem) store.memorySystem = { reflections: [], reflectionMax: 50, affectGraph: { edges: {} } };
+        if (!Array.isArray(store.memorySystem.reflections)) store.memorySystem.reflections = [];
+        store.memorySystem.reflections.unshift({
+          timestamp: new Date().toISOString(),
+          ai_affect_label: reflection.ai_affect_label,
+          ai_affect_intensity: reflection.ai_affect_intensity,
+          user_affect_label: reflection.user_affect_label,
+          user_affect_intensity: reflection.user_affect_intensity,
+          signal_source: reflection.signal_source,
+          sourceProjectId: options.projectId,
+          sourceChatId: options.chatId
+        });
+        store.memorySystem.reflections.splice(store.memorySystem.reflectionMax || 50);
+        updateAffectGraph(reflection.ai_affect_label, reflection.user_affect_label);
+        var memMarker = extractMemoryMarker(raw);
+        if (memMarker && (reflection.ai_affect_intensity >= 7 || reflection.user_affect_intensity >= 7) && typeof MemoryModule !== 'undefined' && MemoryModule.createAEMFromMarkers) {
+          MemoryModule.createAEMFromMarkers(reflection, userMessage, display, chat, memMarker, { projectId: options.projectId, chatId: options.chatId });
+        }
+        if (typeof updateDesireDrives === 'function' && AppCore.getStore().activeProject === options.projectId) updateDesireDrives(reflection);
+      }
+      display = display.replace(/\[\[SEARCH:[^\]]+\]\]/gi, '').trim();
+
+      var diaryStructured = display.match(/\[\[DIARY:([^\]|]*)\|([^\]|]*)\|([\s\S]*?)\]\]/i);
+      if (diaryStructured && diaryStructured[3].trim()) {
+        var diaryNow = new Date();
+        var diaryEntry = {
+          id: 'd' + (AppCore.gid ? AppCore.gid('') : Date.now().toString(36)),
+          date: AppCore.fmtDate().iso,
+          time: AppCore.nowTime(),
+          title: diaryStructured[1].trim().slice(0, 15) || diaryStructured[3].trim().slice(0, 15),
+          content: diaryStructured[3].trim(), mood: diaryStructured[2].trim() || 'calm', author: 'ai', replies: [],
+          sourceChatId: options.chatId, sourceProjectId: options.projectId,
+          sourceWindow: projectName + ' / ' + chatName, visibilityMode: 'selected', visibleChatIds: [options.chatId],
+          createdAt: diaryNow.toISOString(), _syncPending: true
+        };
+        store.diaries.unshift(diaryEntry);
+        var diaryModule = AppCore.getModule('diary');
+        if (diaryModule && diaryModule.addDelivery) diaryModule.addDelivery(diaryEntry.id, options.projectId, options.chatId, 'visibility');
+        if (diaryModule && diaryModule.syncEntry) diaryModule.syncEntry(diaryEntry);
+        display = display.replace(diaryStructured[0], '').trim();
+      }
+      display = display.replace(/<!--\s*\/?DIARY:?\w*\s*-->[\s\S]*?<!--\s*\/DIARY\s*-->/gi, '').trim();
+
+      var litterMatch = display.match(/<!--\s*LITTER(?::([^>]*?))?\s*-->([\s\S]*?)<!--\s*\/LITTER\s*-->/i);
+      if (litterMatch) {
+        var litterModule = AppCore.getModule('litterbox');
+        if (litterModule && litterModule.ingestFromMainChat) litterModule.ingestFromMainChat(litterMatch[2].trim(), (litterMatch[1] || '').trim(), chat, { projectId: options.projectId, chatId: options.chatId });
+        display = display.replace(litterMatch[0], '').trim();
+      }
+
+      var core = display.match(/\[\[CORE_OVERVIEW:([\s\S]*?)\]\]/i);
+      if (core) {
+        var memoryModule = AppCore.getModule('memory');
+        if (memoryModule && memoryModule.setCoreOverviewLocal) memoryModule.setCoreOverviewLocal(core[1].trim().slice(0, 500), project.aiName || 'warmbuddy', options.projectId);
+        display = display.replace(core[0], '').trim();
+      }
+
+      var todos = extractTodosFromResponse(display);
+      if (todos.length) {
+        for (var t = 0; t < Math.min(todos.length, 2); t++) {
+          if (!store.todos.some(function(todo) { return String(todo.text || '').toLowerCase() === todos[t].title.toLowerCase() && todo.projectId === options.projectId; })) {
+            store.todos.unshift({ id: 't' + AppCore.gid(''), text: todos[t].title, done: false, time: todos[t].deadline, type: 'short', creator: 'ai', chatId: options.chatId, projectId: options.projectId });
+          }
+        }
+        display = display.replace(/\[\[TODO:[^\]]+\]\]/g, '').trim();
+        var syncModule = AppCore.getModule('sync');
+        if (syncModule && syncModule.syncTodosToBackend) syncModule.syncTodosToBackend();
+      }
+      display = display.replace(/<!--\s*MEMORY\s*\{[\s\S]*?\}\s*-->/gi, '').trim();
+
+      var emailMatch = display.match(/\[\[EMAIL:([^\]|]+)(?:\|([\s\S]*?))?\]\]/i);
+      if (emailMatch) {
+        if (typeof handleEmailSend === 'function' && AppCore.getStore().activeProject === options.projectId) {
+          await handleEmailSend(chat, emailMatch[1].trim(), (emailMatch[2] || '').trim());
+        } else if (typeof UIModule !== 'undefined' && UIModule.toast) {
+          UIModule.toast('Codex 邮件动作需要在原项目中确认后执行，当前未发送。');
+        }
+        display = display.replace(emailMatch[0], '').trim();
+      }
+
+      var poke = display.match(/\[\[POKE(?:\:[^\]]*)?\]\]/i);
+      if (poke) {
+        display = display.replace(poke[0], '').trim();
+        chat.messages.push({ id: AppCore.generateMsgId(), role: 'system', contentType: 'poke_notification', text: '暖伴戳了戳 mays。', _codexTurnId: options.turnId, _codexTurnStatus: 'completed' });
+      }
+      var status = display.match(/\[\[STATUS:([^\]]+)\]\]/i);
+      if (status) {
+        project._aiStatus = status[1].trim().slice(0, 15);
+        project._aiStatusChanged = true;
+        display = display.replace(status[0], '').trim();
+      }
+      message.text = display;
+      message._codexActionCommitted = true;
+      message._syncDirty = true;
+    }
+    chat._codexActionTurns[options.turnId] = true;
+    AppCore.saveStore();
+    return true;
+  }
+
   function updateAffectGraph(aiLabel, userLabel) {
     if (!aiLabel || !userLabel) return;
     var store = AppCore.getStore();
@@ -1462,6 +1706,12 @@ var ChatModule = (function() {
   function execDeleteProject() {
     var store = AppCore.getStore();
     var pid = AppCore.$('delProjPid').value;
+    var deletingProject = getProjectById(pid);
+    var codexForDelete = AppCore.getModule('codex');
+    if (deletingProject && isCodexProject(deletingProject) && codexForDelete) {
+      (deletingProject.chats || []).forEach(function(chat) { if (codexForDelete.cancelActive) codexForDelete.cancelActive(pid, chat.id); });
+      if (codexForDelete.invalidateAll) codexForDelete.invalidateAll();
+    }
     store.projects = store.projects.filter(function(p) { return p.id !== pid; });
     if (store.activeProject === pid) {
       store.activeProject = store.projects.length > 0 ? store.projects[0].id : '';
@@ -1488,6 +1738,14 @@ var ChatModule = (function() {
   function execDeleteChat() {
     var store = AppCore.getStore();
     var cid = AppCore.$('delChatCid').value;
+    var codexForDelete = AppCore.getModule('codex');
+    for (var cpi = 0; cpi < store.projects.length; cpi++) {
+      if (isCodexProject(store.projects[cpi]) && store.projects[cpi].chats.some(function(chat) { return chat.id === cid; })) {
+        if (codexForDelete && codexForDelete.cancelActive) codexForDelete.cancelActive(store.projects[cpi].id, cid);
+        if (codexForDelete && codexForDelete.invalidateAll) codexForDelete.invalidateAll();
+        break;
+      }
+    }
     for (var pi = 0; pi < store.projects.length; pi++) {
       store.projects[pi].chats = store.projects[pi].chats.filter(function(c) { return c.id !== cid; });
     }
@@ -1899,6 +2157,7 @@ var ChatModule = (function() {
     var typingArea = AppCore.$('chatTypingArea');
     var messagesEl = AppCore.$('chatMessages');
 
+    var sentMessageIds = [];
     for (var i = 0; i < bubbles.length; i++) {
       var bubble = bubbles[i];
       if (i > 0) {
@@ -1910,6 +2169,7 @@ var ChatModule = (function() {
       var msg = createChatMessage({ role: 'ai', text: bubble.text, id: AppCore.generateMsgId() }, createdAt);
       if (bubble.replyTo) msg.replyTo = bubble.replyTo;
       chat.messages.push(msg);
+      sentMessageIds.push(msg.id);
       renderChatMessages();
 
       if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -1923,7 +2183,22 @@ var ChatModule = (function() {
   // ═══════════════════════════════════════════
   //  Block 10b: triggerAIResponse (the big one)
   // ═══════════════════════════════════════════
-  async function triggerAIResponse(chat, userText, diaryIntent) {
+  async function triggerAIResponse(chat, userText, diaryIntent, options) {
+    options = options || {};
+    var routeProjectId = options.projectId || AppCore.getStore().activeProject;
+    var routeProject = getProjectById(routeProjectId);
+    if (isCodexProject(routeProject)) {
+      var codex = (typeof CodexModule !== 'undefined' ? CodexModule : AppCore.getModule('codex'));
+      if (!codex || !codex.sendChatTurn) throw new Error('CODEX_NOT_READY');
+      return codex.sendChatTurn({
+        projectId: routeProjectId,
+        chatId: options.chatId || chat.id,
+        userMessageIds: options.currentMessageIds || [],
+        userText: userText,
+        diaryIntent: diaryIntent,
+        replyTo: options.replyTo
+      });
+    }
     var store = AppCore.getStore();
     var typingArea = AppCore.$('chatTypingArea');
     var cfg = getActiveApiConfig();
@@ -2643,6 +2918,7 @@ var ChatModule = (function() {
 
   async function sendAllDraftBubbles() {
     var store = AppCore.getStore();
+    var proj = getActiveProject();
     var chat = getActiveChatObj();
     if (!chat) {
       var p = getActiveProject();
@@ -2667,6 +2943,7 @@ var ChatModule = (function() {
         _sharedMemoryLoadedAt: new Date().toISOString()
       });
       store.activeChat = cid;
+      proj = p;
       chat = getActiveChatObj();
     }
 
@@ -2683,6 +2960,7 @@ var ChatModule = (function() {
       window._pendingFiles = [];
       renderFileAttachmentPreview();
     }
+    var sentMessageIds = [];
     for (var i = 0; i < bubbles.length; i++) {
       var bubble = bubbles[i];
       var msg = createChatMessage({ role: 'user', text: bubble.text, id: AppCore.generateMsgId() }, createdAt);
@@ -2690,6 +2968,7 @@ var ChatModule = (function() {
         msg.replyTo = bubble.replyTo;
       }
       chat.messages.push(msg);
+      sentMessageIds.push(msg.id);
       chat._messageCount = (chat._messageCount || 0) + 1;
     }
 
@@ -2732,7 +3011,11 @@ var ChatModule = (function() {
       typingArea2.innerHTML = '<div class="typing-indicator">对方正在输入中<span class="streaming-cursor">|</span></div>';
     }
 
-    await triggerAIResponse(chat, lastText, diaryIntent);
+    await triggerAIResponse(chat, lastText, diaryIntent, {
+      projectId: proj && proj.id,
+      chatId: chat.id,
+      currentMessageIds: sentMessageIds
+    });
   }
 
   function shakeInputBar() {
@@ -2904,6 +3187,7 @@ var ChatModule = (function() {
       renderReplyPreview();
     }
     chat.messages.push(userMsg);
+    var sentMessageIds = [userMsg.id];
     chat._messageCount = (chat._messageCount || 0) + 1;
 
     var lastMsg = chat.messages.length >= 2 ? chat.messages[chat.messages.length - 2] : null;
@@ -2967,7 +3251,12 @@ var ChatModule = (function() {
       proj._aiStatusChanged = false;
       AppCore.saveStore();
     }
-    await triggerAIResponse(chat, sendText, diaryIntent);
+    await triggerAIResponse(chat, sendText, diaryIntent, {
+      projectId: proj && proj.id,
+      chatId: chat.id,
+      currentMessageIds: sentMessageIds,
+      replyTo: userMsg.replyTo
+    });
   }
 
   // ═══════════════════════════════════════════
@@ -3023,6 +3312,10 @@ var ChatModule = (function() {
     buildSystemPrompt: buildSystemPrompt,
     buildDynamicContextBlock: buildDynamicContextBlock,
     buildRecentMsgIdBlock: buildRecentMsgIdBlock,
+    buildCodexPromptContext: buildCodexPromptContext,
+    getChatForContext: getChatForContext,
+    getSystemPromptStatic: function() { return SYSTEM_PROMPT_STATIC; },
+    commitCodexResponse: commitCodexResponse,
     invalidateDynamicContext: invalidateDynamicContext,
 
     // Self-reflection

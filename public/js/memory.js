@@ -1114,7 +1114,11 @@
       return idx === 0 || idx === sorted.length - 1;
     },
 
-    createAEMFromMarkers: function(reflection, userMsg, aiResponse, chat, memMarker) {
+    createAEMFromMarkers: function(reflection, userMsg, aiResponse, chat, memMarker, owner) {
+      owner = owner || {};
+      var ownerStore = AppCore.getStore();
+      var ownerProjectId = owner.projectId || ownerStore.activeProject;
+      var ownerChatId = owner.chatId || ownerStore.activeChat;
       var id = 'aem' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       var ts = new Date().toISOString();
       var rawDialogue = [];
@@ -1137,7 +1141,7 @@
       if (reflection.user_affect_label && emotionalLabels.indexOf(reflection.user_affect_label) === -1) emotionalLabels.push(reflection.user_affect_label);
       var aem = {
         id: id, timestamp: ts,
-        sourceChatId: AppCore.getStore().activeChat, sourceWindowId: AppCore.getStore().activeChat, sourceProjectId: AppCore.getStore().activeProject,
+        sourceChatId: ownerChatId, sourceWindowId: ownerChatId, sourceProjectId: ownerProjectId,
         aiSelfEval: { label: reflection.ai_affect_label, intensity: reflection.ai_affect_intensity || 5, internalNote: memMarker.internalNote || memMarker.summary },
         userStateAtTime: { label: reflection.user_affect_label, intensity: reflection.user_affect_intensity || 5 },
         summary: memMarker.summary, rawDialogue: rawDialogue, context: context, triggerSource: 'high_intensity',
@@ -1145,8 +1149,8 @@
         emotionalLabels: emotionalLabels,
         relatedMemoryIds: []
       };
-      MemoryModule.addAEM(AppCore.getStore().activeProject, aem);
-      MemoryModule.buildRelatedEdges(AppCore.getStore().activeProject, aem);
+      MemoryModule.addAEM(ownerProjectId, aem);
+      MemoryModule.buildRelatedEdges(ownerProjectId, aem);
       if (chat) chat.messages.push(ChatTimeModule.createMessage({ role: 'system', text: '有什么被记住了' }, new Date()));
     },
 
@@ -1375,9 +1379,9 @@
      * Save core overview locally (cache + localForage) without LLM roundtrip.
      * Used when the overview content is already available, e.g. [[CORE_OVERVIEW:...]] in chat.
      */
-    setCoreOverviewLocal: function(text, updatedBy) {
+    setCoreOverviewLocal: function(text, updatedBy, projectIdOverride) {
       var store = AppCore.getStore();
-      var projectId = store.activeProject;
+      var projectId = projectIdOverride || store.activeProject;
       if (!projectId || !text || text.length < 20) return;
       ensureCacheEntry(projectId);
       var co = _cache[projectId].coreOverview;
@@ -1393,7 +1397,7 @@
       co.text = text;
       co.updatedAt = new Date().toISOString();
       co.updatedBy = updatedBy || 'warmbuddy';
-      var proj = AppCore.getActiveProject();
+      var proj = store.projects.find(function(item) { return item.id === projectId; });
       if (proj) { proj.coreOverview = Object.assign({}, co); }
       MemoryModule.save(projectId);
       AppCore.saveStore();
@@ -1403,7 +1407,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: store.password, projectId: projectId, content: text, updatedBy: updatedBy || 'warmbuddy', source: 'main_chat', metadata: { triggered_by: 'marker', source: 'main_chat' } })
       }).catch(function() {});
-      if (typeof renderMemoryPanelBody === 'function') renderMemoryPanelBody();
+      if (projectId === store.activeProject && typeof renderMemoryPanelBody === 'function') renderMemoryPanelBody();
       console.log('[core-overview] Local save (' + text.length + ' chars)');
     },
 

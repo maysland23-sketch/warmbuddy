@@ -43,6 +43,13 @@ const {
   sanitizeProjectConfigForClient,
   sanitizeToolDefinitionsForClient
 } = require('./render-api-security');
+const {
+  CODEX_PROJECT_ID,
+  CODEX_MAX_PAGE_SIZE,
+  buildCodexConversationQuery,
+  normalizeCodexMessage,
+  shouldApplyCodexUpdate
+} = require('./codex-message-sync');
 
 // Proxy for outbound API calls (set HTTPS_PROXY in .env, e.g. http://127.0.0.1:7897)
 const OUTBOUND_PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
@@ -3367,6 +3374,83 @@ app.get('/api/projects/configs', async (req, res) => {
   } catch (e) {
     console.error('[api] GET /api/projects/configs error:', e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Codex conversation sync (separate from the proactive-only Claude path) ──
+// Session IDs, Gateway credentials, and Gateway URLs are intentionally not
+// accepted by this contract.  The existing chat_messages table is reused;
+// no schema migration is needed for the allowlisted metadata sidecar.
+app.post('/api/codex/sync-messages', async (req, res) => {
+  try {
+    const rawMessages = req.body && req.body.messages;
+    if (!Array.isArray(rawMessages) || rawMessages.length > CODEX_MAX_PAGE_SIZE) {
+      return res.status(400).json({ error: 'CODEX_SYNC_INVALID_REQUEST', code: 'CODEX_SYNC_INVALID_REQUEST' });
+    }
+    if (rawMessages.length === 0) return res.json({ synced: 0 });
+    const messages = rawMessages.map(normalizeCodexMessage);
+    if (messages.some(message => !message)) {
+      return res.status(400).json({ error: 'CODEX_SYNC_INVALID_REQUEST', code: 'CODEX_SYNC_INVALID_REQUEST' });
+    }
+    const database = app.locals.codexSupabase || supabase;
+    if (!database) return res.json({ synced: 0, note: 'sync unavailable' });
+
+    let synced = 0;
+    for (const message of messages) {
+      const existingResult = await database.from('chat_messages')
+        .select('project_id, window_id, message_id, role, content, token_usage, created_at, metadata')
+        .eq('message_id', message.message_id)
+        .maybeSingle();
+      if (existingResult.error) throw existingResult.error;
+      if (existingResult.data && !shouldApplyCodexUpdate(existingResult.data, message)) continue;
+      const result = await database.from('chat_messages').upsert(message, { onConflict: 'message_id' });
+      if (result.error) throw result.error;
+      synced++;
+    }
+    return res.json({ synced });
+  } catch (error) {
+    console.error('[codex-sync] upload failed:', error?.code || 'database_error');
+    return res.status(500).json({ error: 'CODEX_SYNC_UNAVAILABLE', code: 'CODEX_SYNC_UNAVAILABLE' });
+  }
+});
+
+app.get('/api/codex/conversation-messages', async (req, res) => {
+  try {
+    const query = buildCodexConversationQuery({
+      projectId: req.query.projectId,
+      windowId: req.query.windowId || '',
+      cursor: req.query.cursor || '',
+      limit: req.query.limit === undefined ? CODEX_MAX_PAGE_SIZE : req.query.limit
+    });
+    const database = app.locals.codexSupabase || supabase;
+    if (!database) return res.json({ messages: [], nextCursor: null });
+    const offset = query.cursor === '' ? 0 : Number(query.cursor);
+    let dbQuery = database.from('chat_messages')
+      .select('project_id, window_id, message_id, role, content, token_usage, created_at, metadata')
+      .eq('project_id', CODEX_PROJECT_ID)
+      .order('created_at', { ascending: true })
+      .order('message_id', { ascending: true })
+      .range(offset, offset + query.limit - 1);
+    if (query.windowId) dbQuery = dbQuery.eq('window_id', query.windowId);
+    const result = await dbQuery;
+    if (result.error) throw result.error;
+    const rows = (result.data || []).map(row => ({
+      projectId: row.project_id,
+      windowId: row.window_id,
+      messageId: row.message_id,
+      role: row.role,
+      content: row.content || '',
+      tokenUsage: row.token_usage || 0,
+      createdAt: row.created_at,
+      metadata: row.metadata || {}
+    }));
+    return res.json({ messages: rows, nextCursor: rows.length === query.limit ? String(offset + rows.length) : null });
+  } catch (error) {
+    if (error?.code === 'CODEX_SYNC_INVALID_REQUEST') {
+      return res.status(400).json({ error: 'CODEX_SYNC_INVALID_REQUEST', code: 'CODEX_SYNC_INVALID_REQUEST' });
+    }
+    console.error('[codex-sync] conversation read failed:', error?.code || 'database_error');
+    return res.status(500).json({ error: 'CODEX_SYNC_UNAVAILABLE', code: 'CODEX_SYNC_UNAVAILABLE' });
   }
 });
 

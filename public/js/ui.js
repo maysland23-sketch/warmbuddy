@@ -234,6 +234,17 @@ var UIModule = (function() {
         // Chat
         case 'sendMessage': var c = AppCore.getModule('chat'); if (c) c.sendMessage(); break;
         case 'cancelReply': var c2 = AppCore.getModule('chat'); if (c2) c2.cancelReply(); break;
+        case 'stopCodex':
+          var cxStop = AppCore.getModule('codex');
+          var cxStore = AppCore.getStore();
+          if (cxStop && cxStore) cxStop.cancelActive(cxStore.activeProject, cxStore.activeChat);
+          break;
+        case 'codexNewSession':
+          var cxNew = AppCore.getModule('codex'); if (cxNew) cxNew.startNewActiveSession();
+          break;
+        case 'codexDisconnect':
+          var cxDisconnect = AppCore.getModule('codex'); if (cxDisconnect) cxDisconnect.disconnectActiveSession();
+          break;
         case 'stageDraftBubble': var c3 = AppCore.getModule('chat'); if (c3) c3.stageDraftBubble(); break;
         case 'toggleMoreMenu': var c4 = AppCore.getModule('chat'); if (c4) c4.toggleMoreMenu(); break;
         case 'exitBatchSelectMode': var c5 = AppCore.getModule('chat'); if (c5) c5.exitBatchSelectMode(); break;

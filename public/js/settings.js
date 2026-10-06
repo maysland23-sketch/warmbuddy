@@ -21,9 +21,19 @@ var SettingsModule = (function() {
     return !!proj && proj.id === 'claude-code-test';
   }
 
+  function isCodexProject(proj) {
+    return !!proj && proj.id === 'codex-code-test' && proj.runtime === 'codex-gateway';
+  }
+
   function showAgentGatewayInfo() {
     UIModule.showModal('Claude Code Test',
       '<div style="font-size:12px;color:var(--text-light);line-height:1.6;">此项目使用 Agent Gateway 连接 Claude Code。API Key、Endpoint 和模型由后端固定管理，当前测试项目不需要单独配置。</div>',
+      [{ label: 'close', cls: 'cancel', onclick: UIModule.closeModal }]);
+  }
+
+  function showCodexInfo() {
+    UIModule.showModal('Codex Local',
+      '<div style="font-size:12px;color:var(--text-light);line-height:1.6;">此项目通过同源 Codex Gateway 运行。Gateway URL、token 和模型配置仅由服务端管理，浏览器不持有 API Key、Endpoint 或模型设置。</div>',
       [{ label: 'close', cls: 'cancel', onclick: UIModule.closeModal }]);
   }
 
@@ -77,6 +87,7 @@ var SettingsModule = (function() {
   function showApiModal() {
     var store = AppCore.getStore();
     if (isAgentGatewayProject(AppCore.getActiveProject())) { showAgentGatewayInfo(); return; }
+    if (isCodexProject(AppCore.getActiveProject())) { showCodexInfo(); return; }
     var presets = store.providerPresets;
     var presetHtml = presets.length > 0 ?
       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">' +
@@ -105,6 +116,7 @@ var SettingsModule = (function() {
   function saveApiConfig() {
     var store = AppCore.getStore();
     if (isAgentGatewayProject(AppCore.getActiveProject())) { showAgentGatewayInfo(); return; }
+    if (isCodexProject(AppCore.getActiveProject())) { showCodexInfo(); return; }
     store.apiKey = AppCore.$('apiKeyInput').value;
     store.apiEndpoint = AppCore.$('apiEndpointInput').value;
     var matchedPreset = store.providerPresets.find(function(p) { return p.endpoint === store.apiEndpoint; });
@@ -126,6 +138,7 @@ var SettingsModule = (function() {
     var proj = AppCore.getProjectById(pid) || AppCore.getActiveProject();
     if (!proj) return;
     if (isAgentGatewayProject(proj)) { showAgentGatewayInfo(); return; }
+    if (isCodexProject(proj)) { showCodexInfo(); return; }
     var ac = proj.apiConfig || { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true };
     var presets = store.providerPresets;
     var presetHtml = presets.length > 0 ? presets.map(function(p) {
@@ -151,6 +164,7 @@ var SettingsModule = (function() {
     var proj = AppCore.getProjectById(pid);
     if (!proj) return;
     if (isAgentGatewayProject(proj)) { showAgentGatewayInfo(); return; }
+    if (isCodexProject(proj)) { showCodexInfo(); return; }
     if (!proj.apiConfig) proj.apiConfig = { apiKey: '', endpoint: 'https://api.deepseek.com/v1/chat/completions', model: 'deepseek-chat', enabled: true };
     proj.apiConfig.apiKey = (document.getElementById('pjApiKey') && document.getElementById('pjApiKey').value) || '';
     proj.apiConfig.endpoint = (document.getElementById('pjApiEndpoint') && document.getElementById('pjApiEndpoint').value) || 'https://api.deepseek.com/v1/chat/completions';
@@ -168,6 +182,7 @@ var SettingsModule = (function() {
 
   async function testProjectConnection(pid) {
     if (isAgentGatewayProject(AppCore.getProjectById(pid))) { showAgentGatewayInfo(); return; }
+    if (isCodexProject(AppCore.getProjectById(pid))) { showCodexInfo(); return; }
     var apiKey = (document.getElementById('pjApiKey') && document.getElementById('pjApiKey').value || '').trim();
     var endpoint = (document.getElementById('pjApiEndpoint') && document.getElementById('pjApiEndpoint').value || '').trim();
     var model = (document.getElementById('pjApiModel') && document.getElementById('pjApiModel').value || '').trim() || 'deepseek-chat';
@@ -193,6 +208,7 @@ var SettingsModule = (function() {
   async function testConnection() {
     var store = AppCore.getStore();
     if (isAgentGatewayProject(AppCore.getActiveProject())) { showAgentGatewayInfo(); return; }
+    if (isCodexProject(AppCore.getActiveProject())) { showCodexInfo(); return; }
     var apiKey = AppCore.$('apiKeyInput').value.trim();
     var endpoint = AppCore.$('apiEndpointInput').value.trim();
     var proj = AppCore.getActiveProject();
@@ -238,6 +254,7 @@ var SettingsModule = (function() {
   async function fetchModelsFromAPI() {
     var store = AppCore.getStore();
     if (isAgentGatewayProject(AppCore.getActiveProject())) { showAgentGatewayInfo(); return; }
+    if (isCodexProject(AppCore.getActiveProject())) { showCodexInfo(); return; }
     var cfg = AppCore.getActiveApiConfig();
     if (!cfg.apiKey) { UIModule.toast('Please configure API key first'); return; }
     try {
@@ -259,6 +276,7 @@ var SettingsModule = (function() {
   function showModelModal() {
     var store = AppCore.getStore();
     if (isAgentGatewayProject(AppCore.getActiveProject())) { showAgentGatewayInfo(); return; }
+    if (isCodexProject(AppCore.getActiveProject())) { showCodexInfo(); return; }
     var models = store.availableModels;
     var groups = {};
     for (var i = 0; i < models.length; i++) {
@@ -293,9 +311,10 @@ var SettingsModule = (function() {
     var ais = AppCore.getActiveChatAiSettings();
     var ac = AppCore.getActiveApiConfig();
     var agentGatewayProject = isAgentGatewayProject(proj);
+    var codexProject = isCodexProject(proj);
     var providerControls = document.querySelectorAll('[data-action="showModelModal"], [data-action="showProjectApiModal"]');
     for (var pci = 0; pci < providerControls.length; pci++) {
-      providerControls[pci].style.display = agentGatewayProject ? 'none' : '';
+      providerControls[pci].style.display = (agentGatewayProject || codexProject) ? 'none' : '';
     }
     var toggle = function(id, on) { var el = AppCore.$('toggle' + id); if (el) { if (on) el.classList.add('on'); else el.classList.remove('on'); } };
     toggle('DateTime', ais.autoDateTime);
@@ -303,15 +322,15 @@ var SettingsModule = (function() {
     toggle('Voice', ais.aiVoice);
     toggle('Search', ais.webSearch);
     var mv = AppCore.$('modelVal');
-    if (mv) mv.textContent = agentGatewayProject ? 'Claude Code' : (ac.model || 'deepseek-chat');
+    if (mv) mv.textContent = agentGatewayProject ? 'Claude Code' : (codexProject ? 'Codex Local' : (ac.model || 'deepseek-chat'));
     var av = AppCore.$('aiNameVal');
     if (av) av.textContent = (proj && proj.aiName) ? proj.aiName : (store.aiName || 'warmbuddy');
     var pv = AppCore.$('prefVal');
     if (pv) pv.textContent = (proj && proj.preference) ? proj.preference.slice(0, 20) + (proj.preference.length > 20 ? '…' : '') : 'edit';
     var aks = AppCore.$('apiKeyStatus');
-    if (aks) aks.textContent = agentGatewayProject ? 'Gateway' : (ac.apiKey ? '●●●●●●●●' + ac.apiKey.slice(-4) : '●●●●●●●●');
+    if (aks) aks.textContent = agentGatewayProject ? 'Gateway' : (codexProject ? 'Gateway' : (ac.apiKey ? '●●●●●●●●' + ac.apiKey.slice(-4) : '●●●●●●●●'));
     var aev = AppCore.$('apiEndpointVal');
-    if (aev) aev.textContent = agentGatewayProject ? 'Agent Gateway' : (ac.model || 'not set');
+    if (aev) aev.textContent = agentGatewayProject ? 'Agent Gateway' : (codexProject ? 'Codex Gateway' : (ac.model || 'not set'));
     // Toolkit list
     var tkm = AppCore.getModule('toolkit');
     if (tkm && tkm.renderToolkitList) tkm.renderToolkitList();

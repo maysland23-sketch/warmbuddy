@@ -347,6 +347,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 
 .chat-messages { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex; flex-direction: column; gap: 4px; }
 .chat-messages::-webkit-scrollbar { width: 0; }
+.codex-turn-status { display:block; margin-top:6px; font-size:10px; color:var(--text-lighter); }
 
 /* Chat avatar */
 .chat-row { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 2px; }
@@ -977,6 +978,10 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
       <button class="chat-project-tag" data-action="toggleProjectSidebar" oncontextmenu="event.preventDefault();editProjectName(store.activeProject)" title="tap to switch · long-press to rename"><span class="chat-project-dot"></span><span id="currentProjectLabel">project</span></button>
     </div>
     <div class="chat-header-right">
+      <div id="codexControls" style="display:none;align-items:center;gap:4px;">
+        <button class="chat-header-btn" data-action="codexNewSession" title="保留聊天并开始新的 Codex 会话">new session</button>
+        <button class="chat-header-btn" data-action="codexDisconnect" title="删除当前远程 Codex 会话映射">disconnect</button>
+      </div>
       <button class="chat-header-btn" data-action="openMemoryPanel">memory</button>
       <button class="chat-header-btn" data-action="toggleSettings">settings</button>
       <button class="chat-header-btn" data-action="showWindowToolsModal">tools</button>
@@ -1003,6 +1008,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
     <textarea class="chat-input" id="chatInput" placeholder="type a message..." rows="1"></textarea>
     <button class="chat-send-plus" id="chatSendPlus" data-action="stageDraftBubble" title="暂存为草稿" style="display:none;">+</button>
     <button class="chat-attach-btn" id="chatAttachBtn" data-action="toggleMoreMenu" title="更多">···</button>
+    <button class="chat-header-btn" id="codexStopBtn" data-action="stopCodex" title="停止 Codex 生成" style="display:none;color:var(--danger);">stop</button>
     <button class="chat-send" id="chatSendBtn" data-action="sendMessage">↑</button>
     <div class="more-menu" id="moreMenu" style="display:none;">
       <button class="more-menu-item" onclick="event.stopPropagation();document.getElementById('chatFileInput').click();toggleMoreMenu();" title="添加附件">📎</button>
@@ -1203,6 +1209,7 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
 <script src="js/chat-time.js"></script>
 <script src="js/sync.js"></script>
 <script src="js/chat.js"></script>
+<script src="js/codex.js"></script>
 <script src="js/desire.js"></script>
 <script src="js/todo.js"></script>
 <script src="js/settings.js"></script>

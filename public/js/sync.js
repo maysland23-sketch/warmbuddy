@@ -11,6 +11,40 @@ var SyncModule = (function() {
   // ═══════════════════════════════════════════
   var _syncMessagesTimer = null;
   var SYNC_BATCH_SIZE = 20;
+  var CODEX_PROJECT_ID = 'codex-code-test';
+  var CODEX_RUNTIME = 'codex-gateway';
+  var CODEX_SYNC_STATUSES = { running: true, completed: true, failed: true, canceled: true, unknown: true };
+  var CODEX_TERMINAL_STATUSES = { completed: true, failed: true, canceled: true, unknown: true };
+  var CODEX_PULL_MAX_PAGES = 20;
+  var CODEX_PULL_MAX_ROWS = 2000;
+
+  function isCodexProject(project) {
+    return !!project && project.id === CODEX_PROJECT_ID && project.runtime === CODEX_RUNTIME;
+  }
+
+  function codexMessageStatus(message) {
+    return message && message._codexTurnStatus && CODEX_SYNC_STATUSES[message._codexTurnStatus]
+      ? message._codexTurnStatus : 'unknown';
+  }
+
+  function codexMetadata(message) {
+    return {
+      runtime: CODEX_RUNTIME,
+      turnId: String(message._codexTurnId || message.id),
+      turnStatus: codexMessageStatus(message),
+      messageIndex: Number.isInteger(message._codexMessageIndex) ? message._codexMessageIndex : 0,
+      updatedAt: message._codexUpdatedAt || message.createdAt || new Date().toISOString(),
+      contentType: message.contentType || ''
+    };
+  }
+
+  function isNewerCodexRow(existing, incoming) {
+    var oldStatus = existing && existing._codexTurnStatus;
+    var nextStatus = incoming && incoming._codexTurnStatus;
+    if (CODEX_TERMINAL_STATUSES[oldStatus] && !CODEX_TERMINAL_STATUSES[nextStatus]) return false;
+    if (!CODEX_TERMINAL_STATUSES[oldStatus] && CODEX_TERMINAL_STATUSES[nextStatus]) return true;
+    return new Date(incoming._codexUpdatedAt || incoming.createdAt || 0).getTime() >= new Date(existing._codexUpdatedAt || existing.createdAt || 0).getTime();
+  }
 
   // ═══════════════════════════════════════════
   //  Todo sync
@@ -116,7 +150,7 @@ var SyncModule = (function() {
   function syncProjectConfigToBackend(updateChatTime) {
     var store = AppCore.getStore();
     var proj = getActiveProject(); if (!proj) return;
-    if (proj.id === 'claude-code-test' || proj.runtime === 'agent-gateway') return;
+    if (proj.id === 'claude-code-test' || proj.runtime === 'agent-gateway' || proj.id === 'codex-code-test' || proj.runtime === 'codex-gateway') return;
     var chat = getActiveChatObj();
     var cfg = getActiveApiConfig();
     var apiKey = cfg.apiKey || store.apiKey || '';
@@ -159,9 +193,138 @@ var SyncModule = (function() {
   // ═══════════════════════════════════════════
   //  Message sync
   // ═══════════════════════════════════════════
+  function syncCodexMessagesToBackend(projectId, chatId) {
+    var store = AppCore.getStore();
+    var project = store.projects.find(function(item) { return item.id === projectId; });
+    var chat = project && project.chats.find(function(item) { return item.id === chatId; });
+    if (!isCodexProject(project) || !chat || !Array.isArray(chat.messages)) return Promise.resolve();
+    var pending = chat.messages.filter(function(message) {
+      return (message.role === 'user' || message.role === 'ai' || message.role === 'assistant') &&
+        message._codexRuntime === CODEX_RUNTIME && message._codexTurnId &&
+        (!message._synced || message._syncDirty);
+    });
+    if (!pending.length) return Promise.resolve();
+    var batches = [];
+    for (var i = 0; i < pending.length; i += SYNC_BATCH_SIZE) batches.push(pending.slice(i, i + SYNC_BATCH_SIZE));
+    var chain = Promise.resolve();
+    batches.forEach(function(batch) {
+      chain = chain.then(function() {
+        var rows = batch.map(function(message) {
+          return {
+            project_id: projectId,
+            window_id: chatId,
+            message_id: message.id,
+            role: message.role === 'ai' || message.role === 'assistant' ? 'assistant' : 'user',
+            content: message.text || '',
+            token_usage: message._tokenUsage || 0,
+            created_at: message.createdAt || new Date().toISOString(),
+            metadata: codexMetadata(message)
+          };
+        });
+        return fetch(AppCore.BACKEND_URL + '/api/codex/sync-messages', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: rows })
+        }).then(function(response) {
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+          return response.json();
+        }).then(function(data) {
+          if (data && data.synced !== undefined) {
+            batch.forEach(function(message) { message._synced = true; message._syncDirty = false; });
+            AppCore.saveStore();
+          }
+        });
+      });
+    });
+    return chain.catch(function(error) { console.warn('[codex-sync] upload failed:', error.message); });
+  }
+
+  function scheduleCodexMessageSync(projectId, chatId) {
+    if (_syncMessagesTimer) clearTimeout(_syncMessagesTimer);
+    _syncMessagesTimer = setTimeout(function() { syncCodexMessagesToBackend(projectId, chatId); }, 500);
+  }
+
+  function codexCloudMessageToLocal(row) {
+    var metadata = row.metadata || {};
+    var parts = getLocalTimestampParts(row.createdAt);
+    return {
+      id: row.messageId, role: row.role === 'assistant' ? 'ai' : 'user', text: row.content || '',
+      date: parts.date, time: parts.time, createdAt: row.createdAt,
+      _codexRuntime: CODEX_RUNTIME, _codexTurnId: metadata.turnId || row.messageId,
+      _codexTurnStatus: CODEX_SYNC_STATUSES[metadata.turnStatus] ? metadata.turnStatus : 'unknown',
+      _codexMessageIndex: Number.isInteger(metadata.messageIndex) ? metadata.messageIndex : 0,
+      _codexUpdatedAt: metadata.updatedAt || row.createdAt, _synced: true, _syncDirty: false,
+      _codexRemote: true
+    };
+  }
+
+  function ensureCodexCloudChat(project, windowId) {
+    var chat = project.chats.find(function(item) { return item.id === windowId; });
+    if (chat) return chat;
+    chat = {
+      id: windowId, name: 'Codex Local · ' + String(windowId).slice(0, 20),
+      aiSettings: { autoDateTime: true, autoWeather: false, aiVoice: false, webSearch: false },
+      emailEnabled: false, enabledTools: [], customPromptRound: 0, customPromptStates: {},
+      sharedMemoryIds: [], weeklyExports: [], artifacts: [], messages: [], chatTokens: 0,
+      lastConversationDate: null, lastActiveDate: null, lastInteractionTime: null,
+      _messageCount: 0, _lastSummaryIdx: 0, _sharedMemoryLoaded: true
+    };
+    project.chats.push(chat);
+    return chat;
+  }
+
+  function mergeCodexCloudMessages(project, rows) {
+    var changed = false;
+    (rows || []).forEach(function(row) {
+      if (row.projectId !== CODEX_PROJECT_ID || !row.windowId || !row.messageId) return;
+      var incoming = codexCloudMessageToLocal(row);
+      var chat = ensureCodexCloudChat(project, row.windowId);
+      var existing = chat.messages.find(function(message) { return message.id === incoming.id; });
+      if (existing) {
+        if (!isNewerCodexRow(existing, incoming)) return;
+        var wasLocal = existing._codexLocalDevice === true;
+        Object.assign(existing, incoming);
+        if (wasLocal && incoming._codexTurnStatus === 'running') existing._codexLocalDevice = true;
+      } else {
+        chat.messages.push(incoming);
+      }
+      chat._messageCount = chat.messages.length;
+      changed = true;
+    });
+    if (changed) {
+      project.chats.forEach(function(chat) {
+        chat.messages.sort(function(a, b) { return String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.id).localeCompare(String(b.id)); });
+      });
+      AppCore.saveStore();
+      var store = AppCore.getStore();
+      if (store.activeProject === project.id && typeof renderChatMessages === 'function') renderChatMessages(true);
+    }
+    return changed;
+  }
+
+  async function pullCodexConversationMessages(projectId) {
+    var store = AppCore.getStore();
+    var project = store.projects.find(function(item) { return item.id === projectId; });
+    if (!isCodexProject(project)) return;
+    var cursor = '';
+    var rowsSeen = 0;
+    for (var page = 0; page < CODEX_PULL_MAX_PAGES && rowsSeen < CODEX_PULL_MAX_ROWS; page++) {
+      var url = AppCore.BACKEND_URL + '/api/codex/conversation-messages?projectId=' + encodeURIComponent(CODEX_PROJECT_ID) + '&limit=100';
+      if (cursor) url += '&cursor=' + encodeURIComponent(cursor);
+      var response = await fetch(url);
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      var data = await response.json();
+      var rows = Array.isArray(data.messages) ? data.messages : [];
+      mergeCodexCloudMessages(project, rows);
+      rowsSeen += rows.length;
+      if (!data.nextCursor || rows.length === 0) break;
+      cursor = String(data.nextCursor);
+    }
+  }
+
   function syncMessagesToBackend() {
     var store = AppCore.getStore();
     var proj = getActiveProject(); if (!proj) return;
+    if (isCodexProject(proj)) return syncCodexMessagesToBackend(proj.id, store.activeChat);
     var chat = getActiveChatObj(); if (!chat || !chat.messages) return;
     var unsynced = [];
     for (var i = 0; i < chat.messages.length; i++) {
@@ -215,7 +378,11 @@ var SyncModule = (function() {
 
   function scheduleMessageSync() {
     if (_syncMessagesTimer) clearTimeout(_syncMessagesTimer);
-    _syncMessagesTimer = setTimeout(syncMessagesToBackend, 2000);
+    _syncMessagesTimer = setTimeout(function() {
+      var project = getActiveProject();
+      if (isCodexProject(project)) syncCodexMessagesToBackend(project.id, AppCore.getStore().activeChat);
+      else syncMessagesToBackend();
+    }, 2000);
   }
 
   function getLocalTimestampParts(isoString) {
@@ -301,6 +468,9 @@ var SyncModule = (function() {
     var store = AppCore.getStore();
     var proj = store.projects.find(function(p) { return p.id === projectId; });
     if (!proj) return Promise.resolve();
+    if (isCodexProject(proj)) return pullCodexConversationMessages(projectId).catch(function(e) {
+      console.warn('[codex-sync] conversation read failed:', e.message);
+    });
     var targetChatId = projectId === store.activeProject
       ? store.activeChat
       : (proj._lastActiveChat || (proj.chats.length ? proj.chats[proj.chats.length - 1].id : ''));
@@ -651,6 +821,10 @@ var SyncModule = (function() {
     syncProjectConfigToBackend: syncProjectConfigToBackend,
     syncMessagesToBackend: syncMessagesToBackend,
     scheduleMessageSync: scheduleMessageSync,
+    syncCodexMessagesToBackend: syncCodexMessagesToBackend,
+    scheduleCodexMessageSync: scheduleCodexMessageSync,
+    pullCodexConversationMessages: pullCodexConversationMessages,
+    mergeCodexCloudMessages: mergeCodexCloudMessages,
     pullChatMessages: pullChatMessages,
     pullAllProjectEnabledStates: pullAllProjectEnabledStates,
     reconcileFromBackend: reconcileFromBackend,

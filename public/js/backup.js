@@ -8,6 +8,16 @@ var BackupModule = (function() {
 
   var pendingImportData = null;
 
+  function isCodexSidecarKey(key) {
+    var value = String(key || '');
+    return (typeof CodexModule !== 'undefined' && CodexModule.isCodexSidecarKey && CodexModule.isCodexSidecarKey(value)) ||
+      value.indexOf('codex-session-v1:') === 0 || value.indexOf('codex-pending-disconnect-v1:') === 0;
+  }
+
+  function isBackupDataKey(key) {
+    return !!key && !isCodexSidecarKey(key) && (key.startsWith('warmbuddy-') || key === 'userLocation');
+  }
+
   // ── Local helpers ──
 
   function getChatObjById(cid) {
@@ -28,7 +38,7 @@ var BackupModule = (function() {
     var allKeys = await localforage.keys();
     for (var i = 0; i < allKeys.length; i++) {
       var key = allKeys[i];
-      if (key && (key.startsWith('warmbuddy-') || key === 'userLocation')) {
+      if (isBackupDataKey(key)) {
         try {
           var val = await localforage.getItem(key);
           data[key] = typeof val === 'string' ? val : JSON.stringify(val);
@@ -80,18 +90,19 @@ var BackupModule = (function() {
     console.log('[import] executeImport called');
     var store = AppCore.getStore();
     store._importLock = true;
+    if (typeof CodexModule !== 'undefined' && CodexModule.invalidateAll) CodexModule.invalidateAll();
     UIModule.closeModal();
 
     var allKeys = await localforage.keys();
     for (var ki = 0; ki < allKeys.length; ki++) {
       var k = allKeys[ki];
-      if (k && (k.startsWith('warmbuddy-') || k === 'userLocation')) {
+      if (isBackupDataKey(k) || isCodexSidecarKey(k)) {
         await localforage.removeItem(k);
       }
     }
     for (var li = 0; li < localStorage.length; li++) {
       var lk = localStorage.key(li);
-      if (lk && (lk.startsWith('warmbuddy-') || lk === 'userLocation')) {
+      if (isBackupDataKey(lk) || isCodexSidecarKey(lk)) {
         localStorage.removeItem(lk);
       }
     }
@@ -99,6 +110,7 @@ var BackupModule = (function() {
     var entries = Object.entries(pendingImportData);
     for (var ei = 0; ei < entries.length; ei++) {
       var key = entries[ei][0];
+      if (isCodexSidecarKey(key) || !isBackupDataKey(key)) continue;
       var v = entries[ei][1];
       var value = (typeof v === 'string') ? JSON.parse(v) : v;
       await localforage.setItem(key, value);
@@ -116,6 +128,10 @@ var BackupModule = (function() {
       [
         { label: 'cancel', cls: 'cancel', onclick: UIModule.closeModal },
         { label: 'clear all', cls: 'confirm', onclick: function() {
+          if (typeof CodexModule !== 'undefined' && CodexModule.invalidateAll) CodexModule.invalidateAll();
+          localforage.keys().then(function(keys) {
+            return Promise.all(keys.filter(isCodexSidecarKey).map(function(key) { return localforage.removeItem(key); }));
+          }).catch(function() {});
           store.todos = [];
           store.litterThoughts = [];
           store.books = [];

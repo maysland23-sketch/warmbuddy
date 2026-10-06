@@ -76,3 +76,46 @@ The user has authorized creating the local M6A checkpoint commit after these che
 ## M6A Boundary and Remaining Work
 
 M6A is complete for the reviewed backend and proxy scope. M6B frontend work has not been implemented. The real Gateway and production end-to-end chain have not been verified, and production console/environment configuration remains outside this checkpoint. The overall M6 effort must not be marked complete until those later scopes are addressed.
+
+## M6B Implementation Plan (uncommitted)
+
+M6B is the separately authorized frontend and message-synchronization phase. It must remain uncommitted in this work session and must not modify `codex-gateway.js`, `vercel-render-proxy.js`, the existing Claude client/protocol, or production configuration. M6A remains the committed backend checkpoint; M6B is not complete until the implementation, review, offline tests, and loopback browser evidence below are complete.
+
+### M6B architecture and contracts
+
+- Keep `codex-code-test` (`Codex Local`, runtime `codex-gateway`) as an isolated WarmBuddy project. It reuses the existing WarmBuddy context rules without sharing Claude project data, handoff, caches, or session mappings.
+- Add a dedicated `public/js/codex.js` transport/lifecycle adapter. It calls only same-origin `/api/codex/stream` and `/api/codex/sessions/:sessionId`, parses only the five named M6A events, and stores session sidecars only on the current device.
+- Extract only explicit project/chat context helpers needed by Codex from `public/js/chat.js`; retain the existing Claude/ordinary request construction and parser unchanged in behavior.
+- Use the existing L1/L2 round and summary rules. Exclude the current send batch before appending the current user message and quote once. Continuations send current rules/settings/dynamic snapshots but not the full Gateway-session history.
+- Preflight the final UTF-8 prompt and serialized `{prompt, sessionId?}` body against the M6A byte limits. Over-limit input is a visible failure with no truncation, reset, retry, or replay.
+- Use one per-chat Codex lock and generation-bound `AbortController`. A temporary session is committed only after successful completion and valid session confirmation; continuation failures retain the old session, and `UNKNOWN_SESSION` marks it invalid without replaying the prompt.
+- Persist uploaded messages and turn states without session IDs. The sync protocol uses stable message IDs, dirty/upsert status updates, bounded cursor/page reads, terminal-state precedence, and exact `windowId` restoration. A separate Codex conversation-read route preserves `/api/chat-messages` as the proactive-only endpoint.
+
+### M6B tasks
+
+1. **Project and explicit-context seams**
+   - Modify `public/js/app-core.js` to ensure the independent Codex project and expose project-scoped lookup without changing Claude defaults.
+   - Modify `public/js/chat.js` only to expose explicit context/marker helpers and route Codex chats to the new adapter; old Claude/ordinary branches keep their existing request body and SSE parser.
+   - Add failing frontend source/VM tests for project isolation, context scope, L1/L2/current-message de-duplication, preference clearing, and no cross-runtime handoff.
+
+2. **Codex frontend adapter and UI lifecycle**
+   - Create `public/js/codex.js` with prompt serialization, UTF-8/body preflight, named SSE parsing, session sidecar storage, lock/generation state, cancellation, temporary-session commit, delete/disconnect handling, and controlled status transitions.
+   - Modify `public/index.html`, `public/js/ui.js`, and `public/js/settings.js` to load/register the module, hide invalid API settings for Codex, and expose stop/new-session/disconnect states without reusing `cancelReply`.
+   - Add tests for fragmented Unicode/heartbeat/multiple messages, failure/unknown/timeout/cancel, reload and chat-switch generations, and session sidecar exclusion.
+
+3. **Search, markers, and attachments**
+   - Adapt the existing WarmBuddy search marker flow to call `/api/search` once and continue the same Codex session with bounded external-results context; do not call `/api/chat/stream`, recurse, or replay the user prompt.
+   - Apply diary/memory/core/todo/email/poke/status/artifact markers only at the authorized successful final commit point, with original project/chat/generation and action dedupe. Failed, canceled, or unknown turns cannot execute actions.
+   - Preserve artifact and `[[FILE:id]]` references without binary/Data URL extraction and show the reference-only limitation.
+   - Add tests for search failure/cancel, multi-marker bounds, action commit points, and non-idempotent dedupe.
+
+4. **Message synchronization and backup isolation**
+   - Modify `server.js` only for a Codex-scoped conversation upload/read contract and metadata allowlist. Do not alter M6A routes or unrelated proactive semantics. Reuse the existing `chat_messages` metadata JSON; do not add a migration.
+   - Modify `public/js/sync.js` to upload user/running/terminal states, re-upload dirty updates, read updates with a bounded version/cursor strategy, create missing chats by exact `windowId`, and merge terminal states without defaulting missing status to completed.
+   - Modify `public/js/backup.js` and import/clear paths so Codex session sidecars and pending-disconnect records are never exported, imported, synced, or silently retried; chats and turn states remain backed up.
+   - Add server contract tests and VM tests for pagination, state updates, terminal precedence, observation-device behavior, project/chat restoration, and session-field rejection.
+
+5. **Review and validation**
+   - Run focused M6B tests first, then the full repository suite, syntax/diff checks, and a loopback-only fake Gateway/search/database smoke test.
+   - If the installed browser capability is available, exercise the actual page with temporary fake data: send, stream multiple messages, stop, switch chat, reload, new session, disconnect, search continuation, action dedupe, and cross-device message merge. Do not load user browser data.
+   - Generate a non-secret `m6b-code-review.txt` in an independent Windows temporary directory containing the actual diff, changed module/test contents, review findings, exact commands/results, browser evidence, and cleanup. Do not commit, push, deploy, or call a real Gateway.

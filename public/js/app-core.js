@@ -20,6 +20,8 @@ var AppCore = (function() {
   var USER_NAME = 'mays';
   var CLAUDE_CODE_TEST_PROJECT_ID = 'claude-code-test';
   var AGENT_GATEWAY_RUNTIME = 'agent-gateway';
+  var CODEX_CODE_TEST_PROJECT_ID = 'codex-code-test';
+  var CODEX_GATEWAY_RUNTIME = 'codex-gateway';
 
   // ═══════════════════════════════════════════
   //  Private state
@@ -346,6 +348,56 @@ var AppCore = (function() {
         aiSettings: { autoDateTime: true, autoWeather: false, aiVoice: false, webSearch: false },
         emailEnabled: false,
         enabledTools: [],
+        sharedMemoryIds: [],
+        weeklyExports: [],
+        artifacts: [],
+        messages: [],
+        chatTokens: 0,
+        lastConversationDate: null,
+        lastActiveDate: null,
+        lastInteractionTime: null,
+        _messageCount: 0,
+        _lastSummaryIdx: 0,
+        _sharedMemoryLoaded: true,
+        _sharedMemoryLoadedAt: new Date().toISOString()
+      });
+      changed = true;
+    }
+    if (changed) saveStore();
+    return project;
+  }
+
+  function ensureCodexCodeTestProject() {
+    var project = _store.projects.find(function(p) { return p.id === CODEX_CODE_TEST_PROJECT_ID; });
+    var changed = false;
+    if (!project) {
+      project = {
+        id: CODEX_CODE_TEST_PROJECT_ID,
+        name: 'Codex Local',
+        runtime: CODEX_GATEWAY_RUNTIME,
+        preference: '',
+        aiName: 'warmbuddy',
+        apiConfig: { apiKey: '', endpoint: '', model: '', enabled: true },
+        memories: [],
+        chats: []
+      };
+      _store.projects.push(project);
+      changed = true;
+    }
+    if (project.runtime !== CODEX_GATEWAY_RUNTIME) { project.runtime = CODEX_GATEWAY_RUNTIME; changed = true; }
+    if (!Array.isArray(project.memories)) { project.memories = []; changed = true; }
+    if (!Array.isArray(project.chats)) { project.chats = []; changed = true; }
+    if (!project.apiConfig) { project.apiConfig = { apiKey: '', endpoint: '', model: '', enabled: true }; changed = true; }
+    if (project.apiConfig.enabled !== true) { project.apiConfig.enabled = true; changed = true; }
+    if (project.chats.length === 0) {
+      project.chats.push({
+        id: 'codex-code-test-chat',
+        name: 'main',
+        aiSettings: { autoDateTime: true, autoWeather: false, aiVoice: false, webSearch: false },
+        emailEnabled: false,
+        enabledTools: [],
+        customPromptRound: 0,
+        customPromptStates: {},
         sharedMemoryIds: [],
         weeklyExports: [],
         artifacts: [],
@@ -808,6 +860,7 @@ var AppCore = (function() {
       }
     }
     ensureClaudeCodeTestProject();
+    ensureCodexCodeTestProject();
   }
 
   // ═══════════════════════════════════════════
@@ -821,6 +874,8 @@ var AppCore = (function() {
     USER_NAME: USER_NAME,
     CLAUDE_CODE_TEST_PROJECT_ID: CLAUDE_CODE_TEST_PROJECT_ID,
     AGENT_GATEWAY_RUNTIME: AGENT_GATEWAY_RUNTIME,
+    CODEX_CODE_TEST_PROJECT_ID: CODEX_CODE_TEST_PROJECT_ID,
+    CODEX_GATEWAY_RUNTIME: CODEX_GATEWAY_RUNTIME,
 
     // Utilities
     gid: gid,
@@ -850,6 +905,7 @@ var AppCore = (function() {
     getActiveChatObj: getActiveChatObj,
     getActiveChatAiSettings: getActiveChatAiSettings,
     ensureClaudeCodeTestProject: ensureClaudeCodeTestProject,
+    ensureCodexCodeTestProject: ensureCodexCodeTestProject,
 
     // Module registry
     register: register,
@@ -1093,6 +1149,8 @@ var AppCore = (function() {
       await AppCore.loadStore();
       store._importing = false;
       store._importLock = false;
+      var codex = AppCore.getModule('codex');
+      if (codex && codex.markReloadedTurnsUnknown) codex.markReloadedTurnsUnknown();
 
       var ui = AppCore.getModule('ui');
       if (ui && ui.initTheme) ui.initTheme();
@@ -1110,6 +1168,7 @@ var AppCore = (function() {
 
       var chat = AppCore.getModule('chat');
       if (chat && chat.updateChatInputEnabledState) chat.updateChatInputEnabledState();
+      if (codex && codex.updateUi) codex.updateUi();
       if (sync && sync.reconcileFromBackend) await sync.reconcileFromBackend();
       if (sync && sync.syncProjectConfigToBackend) sync.syncProjectConfigToBackend();
 
