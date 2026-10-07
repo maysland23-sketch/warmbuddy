@@ -51,6 +51,35 @@ const {
   shouldApplyCodexUpdate
 } = require('./codex-message-sync');
 
+async function conditionallyStoreCodexMessage(database, message) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const existingResult = await database.from('chat_messages')
+      .select('project_id, window_id, message_id, role, content, token_usage, created_at, metadata')
+      .eq('message_id', message.message_id)
+      .maybeSingle();
+    if (existingResult.error) throw existingResult.error;
+    if (existingResult.data && !shouldApplyCodexUpdate(existingResult.data, message)) return false;
+
+    if (existingResult.data) {
+      const updateResult = await database.from('chat_messages')
+        .update(message)
+        .eq('message_id', message.message_id)
+        .eq('metadata', JSON.stringify(existingResult.data.metadata))
+        .select('message_id')
+        .maybeSingle();
+      if (updateResult.error) throw updateResult.error;
+      if (updateResult.data) return true;
+      continue;
+    }
+
+    const insertResult = await database.from('chat_messages').insert(message);
+    if (!insertResult.error) return true;
+    if (insertResult.error.code === '23505') continue;
+    throw insertResult.error;
+  }
+  return false;
+}
+
 // Proxy for outbound API calls (set HTTPS_PROXY in .env, e.g. http://127.0.0.1:7897)
 const OUTBOUND_PROXY = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
 if (OUTBOUND_PROXY) {
@@ -3396,18 +3425,14 @@ app.post('/api/codex/sync-messages', async (req, res) => {
     if (!database) return res.json({ synced: 0, note: 'sync unavailable' });
 
     let synced = 0;
+    const syncedMessageIds = [];
     for (const message of messages) {
-      const existingResult = await database.from('chat_messages')
-        .select('project_id, window_id, message_id, role, content, token_usage, created_at, metadata')
-        .eq('message_id', message.message_id)
-        .maybeSingle();
-      if (existingResult.error) throw existingResult.error;
-      if (existingResult.data && !shouldApplyCodexUpdate(existingResult.data, message)) continue;
-      const result = await database.from('chat_messages').upsert(message, { onConflict: 'message_id' });
-      if (result.error) throw result.error;
-      synced++;
+      if (await conditionallyStoreCodexMessage(database, message)) {
+        synced++;
+        syncedMessageIds.push(message.message_id);
+      }
     }
-    return res.json({ synced });
+    return res.json({ synced, syncedMessageIds });
   } catch (error) {
     console.error('[codex-sync] upload failed:', error?.code || 'database_error');
     return res.status(500).json({ error: 'CODEX_SYNC_UNAVAILABLE', code: 'CODEX_SYNC_UNAVAILABLE' });

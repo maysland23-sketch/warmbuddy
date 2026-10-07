@@ -15,8 +15,7 @@ var SyncModule = (function() {
   var CODEX_RUNTIME = 'codex-gateway';
   var CODEX_SYNC_STATUSES = { running: true, completed: true, failed: true, canceled: true, unknown: true };
   var CODEX_TERMINAL_STATUSES = { completed: true, failed: true, canceled: true, unknown: true };
-  var CODEX_PULL_MAX_PAGES = 20;
-  var CODEX_PULL_MAX_ROWS = 2000;
+  var CODEX_PULL_MAX_PAGES = 1000;
 
   function isCodexProject(project) {
     return !!project && project.id === CODEX_PROJECT_ID && project.runtime === CODEX_RUNTIME;
@@ -28,7 +27,7 @@ var SyncModule = (function() {
   }
 
   function codexMetadata(message) {
-    return {
+    var metadata = {
       runtime: CODEX_RUNTIME,
       turnId: String(message._codexTurnId || message.id),
       turnStatus: codexMessageStatus(message),
@@ -36,22 +35,41 @@ var SyncModule = (function() {
       updatedAt: message._codexUpdatedAt || message.createdAt || new Date().toISOString(),
       contentType: message.contentType || ''
     };
+    if (Number.isInteger(message._codexVersion)) metadata.version = message._codexVersion;
+    if (message._codexWriterId) metadata.writerId = String(message._codexWriterId);
+    return metadata;
   }
 
   function isNewerCodexRow(existing, incoming) {
     var oldStatus = existing && existing._codexTurnStatus;
     var nextStatus = incoming && incoming._codexTurnStatus;
+    var oldVersion = Number.isInteger(existing && existing._codexVersion) ? existing._codexVersion : 0;
+    var nextVersion = Number.isInteger(incoming && incoming._codexVersion) ? incoming._codexVersion : 0;
+    if (nextVersion !== oldVersion && (oldVersion > 0 || nextVersion > 0)) return nextVersion > oldVersion;
     if (CODEX_TERMINAL_STATUSES[oldStatus] && !CODEX_TERMINAL_STATUSES[nextStatus]) return false;
     if (!CODEX_TERMINAL_STATUSES[oldStatus] && CODEX_TERMINAL_STATUSES[nextStatus]) return true;
-    return new Date(incoming._codexUpdatedAt || incoming.createdAt || 0).getTime() >= new Date(existing._codexUpdatedAt || existing.createdAt || 0).getTime();
+    if (oldVersion === 0 && nextVersion === 0) {
+      var oldTime = new Date(existing._codexUpdatedAt || existing.createdAt || 0).getTime();
+      var nextTime = new Date(incoming._codexUpdatedAt || incoming.createdAt || 0).getTime();
+      if (nextTime !== oldTime) return nextTime > oldTime;
+    }
+    var rank = function(status) { return status === 'completed' ? 5 : status === 'failed' ? 4 : status === 'canceled' ? 3 : status === 'unknown' ? 2 : 1; };
+    var oldRank = rank(oldStatus), nextRank = rank(nextStatus);
+    if (nextRank !== oldRank) return nextRank > oldRank;
+    var oldKey = JSON.stringify([existing.role || '', existing.text || '', existing._codexWriterId || '']);
+    var nextKey = JSON.stringify([incoming.role || '', incoming.text || '', incoming._codexWriterId || '']);
+    return nextKey > oldKey;
   }
 
   // ═══════════════════════════════════════════
   //  Todo sync
   // ═══════════════════════════════════════════
-  function syncTodosToBackend() {
+  function syncTodosToBackend(projectId) {
     var store = AppCore.getStore();
-    var proj = getActiveProject(); if (!proj) return;
+    var proj = projectId
+      ? (store.projects || []).find(function(item) { return item.id === projectId; })
+      : getActiveProject();
+    if (!proj) return;
     fetch(AppCore.BACKEND_URL + '/api/todos/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -209,16 +227,32 @@ var SyncModule = (function() {
     var chain = Promise.resolve();
     batches.forEach(function(batch) {
       chain = chain.then(function() {
-        var rows = batch.map(function(message) {
+        var snapshots = batch.map(function(message) {
+          return {
+            message: message,
+            id: message.id,
+            role: message.role,
+            text: message.text || '',
+            createdAt: message.createdAt || new Date().toISOString(),
+            version: Number.isInteger(message._codexVersion) ? message._codexVersion : 0,
+            status: codexMessageStatus(message),
+            updatedAt: message._codexUpdatedAt || message.createdAt || '',
+            writerId: message._codexWriterId || '',
+            tokenUsage: message._tokenUsage || 0,
+            metadata: codexMetadata(message)
+          };
+        });
+        var rows = snapshots.map(function(snapshot) {
+          var message = snapshot.message;
           return {
             project_id: projectId,
             window_id: chatId,
-            message_id: message.id,
-            role: message.role === 'ai' || message.role === 'assistant' ? 'assistant' : 'user',
-            content: message.text || '',
-            token_usage: message._tokenUsage || 0,
-            created_at: message.createdAt || new Date().toISOString(),
-            metadata: codexMetadata(message)
+            message_id: snapshot.id,
+            role: snapshot.role === 'ai' || snapshot.role === 'assistant' ? 'assistant' : 'user',
+            content: snapshot.text,
+            token_usage: snapshot.tokenUsage,
+            created_at: snapshot.createdAt,
+            metadata: snapshot.metadata
           };
         });
         return fetch(AppCore.BACKEND_URL + '/api/codex/sync-messages', {
@@ -228,10 +262,21 @@ var SyncModule = (function() {
           if (!response.ok) throw new Error('HTTP ' + response.status);
           return response.json();
         }).then(function(data) {
-          if (data && data.synced !== undefined) {
-            batch.forEach(function(message) { message._synced = true; message._syncDirty = false; });
-            AppCore.saveStore();
-          }
+          var accepted = data && Array.isArray(data.syncedMessageIds) ? data.syncedMessageIds : [];
+          var changed = false;
+          accepted.forEach(function(id) {
+            var snapshot = snapshots.find(function(item) { return item.id === id; });
+            var current = chat.messages.find(function(item) { return item.id === id; });
+            if (!snapshot || !current) return;
+            if (current.text !== snapshot.text || codexMessageStatus(current) !== snapshot.status ||
+                (Number.isInteger(current._codexVersion) ? current._codexVersion : 0) !== snapshot.version ||
+                (current._codexUpdatedAt || current.createdAt || '') !== snapshot.updatedAt ||
+                (current._codexWriterId || '') !== snapshot.writerId) return;
+            current._synced = true;
+            current._syncDirty = false;
+            changed = true;
+          });
+          if (changed) AppCore.saveStore();
         });
       });
     });
@@ -252,7 +297,9 @@ var SyncModule = (function() {
       _codexRuntime: CODEX_RUNTIME, _codexTurnId: metadata.turnId || row.messageId,
       _codexTurnStatus: CODEX_SYNC_STATUSES[metadata.turnStatus] ? metadata.turnStatus : 'unknown',
       _codexMessageIndex: Number.isInteger(metadata.messageIndex) ? metadata.messageIndex : 0,
-      _codexUpdatedAt: metadata.updatedAt || row.createdAt, _synced: true, _syncDirty: false,
+      _codexUpdatedAt: metadata.updatedAt || row.createdAt,
+      _codexVersion: Number.isInteger(metadata.version) ? metadata.version : 0,
+      _codexWriterId: metadata.writerId || '', _synced: true, _syncDirty: false,
       _codexRemote: true
     };
   }
@@ -272,12 +319,69 @@ var SyncModule = (function() {
     return chat;
   }
 
+  function mergeCodexNewMessage(chat, incoming, appendState) {
+    var sameTurn = chat.messages.filter(function(message) {
+      return message && message._codexTurnId === incoming._codexTurnId;
+    });
+    if (sameTurn.length > 0) {
+      var targetIndex = chat.messages.length;
+      for (var i = 0; i < chat.messages.length; i++) {
+        if (chat.messages[i]._codexTurnId === incoming._codexTurnId &&
+            Number(chat.messages[i]._codexMessageIndex || 0) > Number(incoming._codexMessageIndex || 0)) {
+          targetIndex = i;
+          break;
+        }
+      }
+      if (targetIndex === chat.messages.length) {
+        for (var j = chat.messages.length - 1; j >= 0; j--) {
+          if (chat.messages[j]._codexTurnId === incoming._codexTurnId) {
+            targetIndex = j + 1;
+            break;
+          }
+        }
+      }
+      chat.messages.splice(targetIndex, 0, incoming);
+      return;
+    }
+    var chatTime = (typeof ChatTimeModule !== 'undefined' && ChatTimeModule) ||
+      (AppCore.getModule && AppCore.getModule('chatTime'));
+    if (chatTime && chatTime.getTimeInfo && appendState && appendState.allTrusted) {
+      var incomingInfo = chatTime.getTimeInfo(incoming);
+      if (!appendState.lastInfo && incomingInfo) {
+        chat.messages.push(incoming);
+        appendState.lastInfo = incomingInfo;
+        return;
+      }
+      if (appendState.lastInfo && incomingInfo && incomingInfo.sortValue >= appendState.lastInfo.sortValue) {
+        chat.messages.push(incoming);
+        appendState.lastInfo = incomingInfo;
+        return;
+      }
+      appendState.allTrusted = false;
+    }
+    if (chatTime && chatTime.mergeNewMessages) chat.messages = chatTime.mergeNewMessages(chat.messages, [incoming]);
+    else chat.messages.push(incoming);
+  }
+
   function mergeCodexCloudMessages(project, rows) {
     var changed = false;
+    var chatTime = (typeof ChatTimeModule !== 'undefined' && ChatTimeModule) ||
+      (AppCore.getModule && AppCore.getModule('chatTime'));
+    var appendStates = Object.create(null);
     (rows || []).forEach(function(row) {
       if (row.projectId !== CODEX_PROJECT_ID || !row.windowId || !row.messageId) return;
       var incoming = codexCloudMessageToLocal(row);
       var chat = ensureCodexCloudChat(project, row.windowId);
+      var appendState = appendStates[chat.id];
+      if (!appendState) {
+        var allTrusted = !!(chatTime && chatTime.getTimeInfo && chat.messages.every(function(message) {
+          return message && message.contentType !== 'dateDivider' && chatTime.getTimeInfo(message);
+        }));
+        appendState = appendStates[chat.id] = {
+          allTrusted: allTrusted,
+          lastInfo: allTrusted && chat.messages.length ? chatTime.getTimeInfo(chat.messages[chat.messages.length - 1]) : null
+        };
+      }
       var existing = chat.messages.find(function(message) { return message.id === incoming.id; });
       if (existing) {
         if (!isNewerCodexRow(existing, incoming)) return;
@@ -285,15 +389,12 @@ var SyncModule = (function() {
         Object.assign(existing, incoming);
         if (wasLocal && incoming._codexTurnStatus === 'running') existing._codexLocalDevice = true;
       } else {
-        chat.messages.push(incoming);
+        mergeCodexNewMessage(chat, incoming, appendState);
       }
       chat._messageCount = chat.messages.length;
       changed = true;
     });
     if (changed) {
-      project.chats.forEach(function(chat) {
-        chat.messages.sort(function(a, b) { return String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || String(a.id).localeCompare(String(b.id)); });
-      });
       AppCore.saveStore();
       var store = AppCore.getStore();
       if (store.activeProject === project.id && typeof renderChatMessages === 'function') renderChatMessages(true);
@@ -304,10 +405,11 @@ var SyncModule = (function() {
   async function pullCodexConversationMessages(projectId) {
     var store = AppCore.getStore();
     var project = store.projects.find(function(item) { return item.id === projectId; });
-    if (!isCodexProject(project)) return;
+    if (!isCodexProject(project)) return { complete: true, rows: 0 };
     var cursor = '';
     var rowsSeen = 0;
-    for (var page = 0; page < CODEX_PULL_MAX_PAGES && rowsSeen < CODEX_PULL_MAX_ROWS; page++) {
+    var complete = false;
+    for (var page = 0; page < CODEX_PULL_MAX_PAGES; page++) {
       var url = AppCore.BACKEND_URL + '/api/codex/conversation-messages?projectId=' + encodeURIComponent(CODEX_PROJECT_ID) + '&limit=100';
       if (cursor) url += '&cursor=' + encodeURIComponent(cursor);
       var response = await fetch(url);
@@ -316,9 +418,12 @@ var SyncModule = (function() {
       var rows = Array.isArray(data.messages) ? data.messages : [];
       mergeCodexCloudMessages(project, rows);
       rowsSeen += rows.length;
-      if (!data.nextCursor || rows.length === 0) break;
+      if (!data.nextCursor || rows.length === 0) { complete = true; break; }
+      if (String(data.nextCursor) === cursor) throw new Error('CODEX_SYNC_INVALID_CURSOR');
       cursor = String(data.nextCursor);
     }
+    if (!complete) console.warn('[codex-sync] conversation pagination reached its safety bound before completion');
+    return { complete: complete, rows: rowsSeen };
   }
 
   function syncMessagesToBackend() {

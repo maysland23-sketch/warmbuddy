@@ -1150,7 +1150,7 @@ var AppCore = (function() {
       store._importing = false;
       store._importLock = false;
       var codex = AppCore.getModule('codex');
-      if (codex && codex.markReloadedTurnsUnknown) codex.markReloadedTurnsUnknown();
+      if (codex && codex.markReloadedTurnsUnknown) await codex.markReloadedTurnsUnknown();
 
       var ui = AppCore.getModule('ui');
       if (ui && ui.initTheme) ui.initTheme();

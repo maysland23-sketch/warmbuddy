@@ -7,7 +7,7 @@ const CODEX_SYNC_STATUSES = new Set(['running', 'completed', 'failed', 'canceled
 const CODEX_ROLES = new Set(['user', 'assistant']);
 const CODEX_MAX_PAGE_SIZE = 100;
 const CODEX_MAX_CONTENT_BYTES = 4 * 1024 * 1024;
-const CODEX_METADATA_KEYS = new Set(['runtime', 'turnId', 'turnStatus', 'messageIndex', 'updatedAt', 'contentType']);
+const CODEX_METADATA_KEYS = new Set(['runtime', 'turnId', 'turnStatus', 'messageIndex', 'updatedAt', 'contentType', 'version', 'writerId']);
 const CODEX_TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled', 'unknown']);
 
 function invalid(message = CODEX_SYNC_ERROR) {
@@ -39,6 +39,11 @@ function normalizeCodexMetadata(metadata) {
     }
     if (key === 'turnStatus') {
       if (!CODEX_SYNC_STATUSES.has(metadata[key])) throw invalid();
+      result[key] = metadata[key];
+      continue;
+    }
+    if (key === 'version') {
+      if (!Number.isInteger(metadata[key]) || metadata[key] < 0 || metadata[key] > 1000000000) throw invalid();
       result[key] = metadata[key];
       continue;
     }
@@ -90,15 +95,37 @@ function isTerminal(status) {
   return CODEX_TERMINAL_STATUSES.has(status);
 }
 
-function shouldApplyCodexUpdate(existing, incoming) {
+function statusRank(status) {
+  return status === 'completed' ? 5 : status === 'failed' ? 4 : status === 'canceled' ? 3 : status === 'unknown' ? 2 : 1;
+}
+
+function compareCodexUpdates(existing, incoming) {
+  if (!existing) return -1;
   const oldStatus = statusOf(existing);
   const nextStatus = statusOf(incoming);
-  if (!oldStatus) return true;
-  if (isTerminal(oldStatus) && !isTerminal(nextStatus)) return false;
-  if (!isTerminal(oldStatus) && isTerminal(nextStatus)) return true;
-  const oldTime = Date.parse(existing.metadata.updatedAt) || 0;
-  const nextTime = Date.parse(incoming.metadata.updatedAt) || 0;
-  return nextTime >= oldTime;
+  const oldVersion = Number.isInteger(existing.metadata && existing.metadata.version) ? existing.metadata.version : 0;
+  const nextVersion = Number.isInteger(incoming.metadata && incoming.metadata.version) ? incoming.metadata.version : 0;
+  if (nextVersion !== oldVersion && (oldVersion > 0 || nextVersion > 0)) {
+    return nextVersion > oldVersion ? -1 : 1;
+  }
+  if (isTerminal(oldStatus) && !isTerminal(nextStatus)) return 1;
+  if (!isTerminal(oldStatus) && isTerminal(nextStatus)) return -1;
+
+  const oldTime = Date.parse(existing.metadata && existing.metadata.updatedAt) || 0;
+  const nextTime = Date.parse(incoming.metadata && incoming.metadata.updatedAt) || 0;
+  if (oldVersion === 0 && nextVersion === 0 && nextTime !== oldTime) return nextTime > oldTime ? -1 : 1;
+
+  const oldRank = statusRank(oldStatus);
+  const nextRank = statusRank(nextStatus);
+  if (nextRank !== oldRank) return nextRank > oldRank ? -1 : 1;
+  const oldKey = JSON.stringify([existing.role || '', existing.content || '', existing.metadata && existing.metadata.writerId || '']);
+  const nextKey = JSON.stringify([incoming.role || '', incoming.content || '', incoming.metadata && incoming.metadata.writerId || '']);
+  if (nextKey === oldKey) return 0;
+  return nextKey > oldKey ? -1 : 1;
+}
+
+function shouldApplyCodexUpdate(existing, incoming) {
+  return compareCodexUpdates(existing, incoming) < 0;
 }
 
 function buildCodexConversationQuery({ projectId, windowId = '', cursor = '', limit = 100 } = {}) {
@@ -123,5 +150,6 @@ module.exports = {
   buildCodexConversationQuery,
   normalizeCodexMessage,
   normalizeCodexMetadata,
+  compareCodexUpdates,
   shouldApplyCodexUpdate
 };

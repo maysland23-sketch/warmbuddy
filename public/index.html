@@ -981,7 +981,9 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
       <div id="codexControls" style="display:none;align-items:center;gap:4px;">
         <button class="chat-header-btn" data-action="codexNewSession" title="保留聊天并开始新的 Codex 会话">new session</button>
         <button class="chat-header-btn" data-action="codexDisconnect" title="删除当前远程 Codex 会话映射">disconnect</button>
+        <button class="chat-header-btn" id="codexPendingDisconnectBtn" data-action="codexRetryDisconnect" title="重试断开待处理的远程 Codex 会话映射" style="display:none;color:var(--danger);">pending disconnect</button>
       </div>
+      <button class="chat-header-btn" id="codexPendingDisconnectListBtn" data-action="codexRetryPendingDisconnects" title="查看并手动处理设备上的待断开 Codex 会话映射" style="display:none;color:var(--danger);">pending disconnect</button>
       <button class="chat-header-btn" data-action="openMemoryPanel">memory</button>
       <button class="chat-header-btn" data-action="toggleSettings">settings</button>
       <button class="chat-header-btn" data-action="showWindowToolsModal">tools</button>
@@ -2773,31 +2775,35 @@ function extractEmailFromResponse(text){
   return{subject:m[1].trim(),body:(m[2]||'').trim()};
 }
 
-async function handleEmailSend(chat, subject, body){
+async function handleEmailSend(chat, subject, body, actionContext){
+  const isCodexAction = !!(actionContext && actionContext.runtime === 'codex-gateway');
+  const actionResult = (status, extra) => isCodexAction ? Object.assign({status:status}, extra || {}) : status === 'succeeded';
   var typingArea=$('chatTypingArea');
-  if(typingArea)typingArea.innerHTML='<div class="typing-indicator">正在写邮件……<span class="streaming-cursor">|</span></div>';
-  var cfg=getActiveApiConfig();
-  if(!cfg||!cfg.apiKey){UIModule.toast('请先配置API Key');return false;}
+  if(typingArea && (!actionContext || !actionContext.isCurrent || actionContext.isCurrent())) typingArea.innerHTML='<div class="typing-indicator">正在写邮件……<span class="streaming-cursor">|</span></div>';
+  var cfg=isCodexAction ? null : getActiveApiConfig();
+  if(!isCodexAction && (!cfg||!cfg.apiKey)){UIModule.toast('请先配置API Key');return false;}
+  if(isCodexAction && (!actionContext.projectId || !actionContext.chatId)) return actionResult('not_executed');
   try{
     var resp=await fetch(AppCore.BACKEND_URL+'/api/email/send',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({subject:subject,body:body||subject})
+      body:JSON.stringify({subject:subject,body:body||subject,projectId:isCodexAction ? actionContext.projectId : undefined,chatId:isCodexAction ? actionContext.chatId : undefined,sourceRuntime:isCodexAction ? 'codex-gateway' : undefined})
     });
     var data=await resp.json();
     if(data.ok&&data.emailId){
+      if(isCodexAction && actionContext.isCurrent && !actionContext.isCurrent()) return actionResult('unknown');
       chat.messages.push(ChatTimeModule.createMessage({role:'system',contentType:'email_notification',text:'邮件已发送'}, new Date()));
-      if(typingArea)typingArea.innerHTML='';
-      return true;
+      if(typingArea && (!actionContext || !actionContext.isCurrent || actionContext.isCurrent()))typingArea.innerHTML='';
+      return actionResult('succeeded',{emailId:data.emailId});
     }else{
-     UIModule.toast('邮件发送失败: '+(data.error||'未知错误'));
-      if(typingArea)typingArea.innerHTML='';
-      return false;
+     UIModule.toast(isCodexAction ? 'Codex 邮件动作未成功。' : '邮件发送失败: '+(data.error||'未知错误'));
+      if(typingArea && (!actionContext || !actionContext.isCurrent || actionContext.isCurrent()))typingArea.innerHTML='';
+      return actionResult('failed');
     }
   }catch(e){
     console.error('[email]',e.message);
-   UIModule.toast('邮件发送失败: '+e.message);
-    if(typingArea)typingArea.innerHTML='';
-    return false;
+   UIModule.toast(isCodexAction ? 'Codex 邮件动作结果未知。' : '邮件发送失败: '+e.message);
+    if(typingArea && (!actionContext || !actionContext.isCurrent || actionContext.isCurrent()))typingArea.innerHTML='';
+    return actionResult(isCodexAction ? 'unknown' : 'failed');
   }
 }
 function showBookshelfAddMenu(){

@@ -19,7 +19,7 @@ function loadSyncModule(store, responses, requestedUrls, renderCalls = [], reque
       requestedRequests.push({ url, init });
       const response = responses.shift();
       const body = Array.isArray(response) ? { messages: response } : (response || { messages: [] });
-      return Promise.resolve({ json: () => Promise.resolve(body) });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
     },
     renderChatMessages: () => { renderCalls.push(true); },
     toLocalDisplayTime: iso => iso,
@@ -168,6 +168,47 @@ test('pollSystemEvents applies canonical status events while restoring the proac
   assert.equal(project._aiStatusChanged, true);
   assert.equal(project.chats[0].messages[0].text, '有一点想和你说');
   assert.ok(renderCalls.length > 0);
+});
+
+test('Codex cloud merge inserts new messages without globally reordering existing barriers', async () => {
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'chat-1',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'chat-1', messages: [
+      { id: 'known-late', role: 'user', text: 'late', createdAt: '2026-10-06T21:00:00.000Z' },
+      { id: 'legacy', role: 'system', text: 'legacy', time: '20:00' },
+      { id: 'divider', role: 'system', contentType: 'dateDivider', text: 'divider', createdAt: '2026-10-06T20:00:00.000Z' },
+      { id: 'known-early', role: 'ai', text: 'early', createdAt: '2026-10-06T20:30:00.000Z' }
+    ] }] }]
+  };
+  const rows = [{
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: 'cloud-new', role: 'assistant',
+    content: 'new', createdAt: '2026-10-06T20:45:00.000Z',
+    metadata: { runtime: 'codex-gateway', turnId: 't', turnStatus: 'completed', messageIndex: 0, updatedAt: '2026-10-06T20:45:00.000Z' }
+  }];
+  const sync = loadSyncModule(store, [rows], []);
+
+  await sync.pullChatMessages('codex-code-test');
+
+  assert.deepEqual(store.projects[0].chats[0].messages.map(message => message.id), [
+    'cloud-new', 'known-late', 'legacy', 'divider', 'known-early'
+  ]);
+});
+
+test('Codex cloud merge preserves messageIndex order for same-turn equal timestamps', async () => {
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'chat-1',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'chat-1', messages: [] }] }]
+  };
+  const rows = [1, 0].map(index => ({
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: index === 1 ? 'turn-a' : 'turn-z',
+    role: 'assistant', content: 'message-' + index, createdAt: '2026-10-06T20:00:00.000Z',
+    metadata: { runtime: 'codex-gateway', turnId: 'turn-1', turnStatus: 'completed', messageIndex: index, updatedAt: '2026-10-06T20:00:00.000Z' }
+  }));
+  const sync = loadSyncModule(store, [rows], []);
+
+  await sync.pullChatMessages('codex-code-test');
+
+  assert.deepEqual(store.projects[0].chats[0].messages.map(message => message.id), ['turn-z', 'turn-a']);
 });
 
 test('pollSystemEvents keeps historical ai_status_change events readable', async () => {

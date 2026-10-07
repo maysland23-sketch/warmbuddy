@@ -121,7 +121,8 @@ test('Codex frontend loopback reads chunked SSE, performs one same-session searc
     assert.deepEqual(state.searches, [{ query: '天气' }]);
     assert.equal(store.projects[0].chats[0].messages.filter(message => message.role === 'ai').length, 2);
     assert.equal(state.commits.length, 1);
-    await codex.disconnect({ projectId: 'codex-code-test', chatId: 'chat-1' });
+    const activeSession = await codex.getSession('codex-code-test', 'chat-1');
+    await codex.disconnect({ projectId: 'codex-code-test', chatId: 'chat-1', sessionId: activeSession });
     assert.equal(state.deletes.length, 1);
     assert.equal(await storage.getItem(codex.sessionKey('codex-gateway', 'codex-code-test', 'chat-1')), null);
   } finally {

@@ -245,6 +245,31 @@ var UIModule = (function() {
         case 'codexDisconnect':
           var cxDisconnect = AppCore.getModule('codex'); if (cxDisconnect) cxDisconnect.disconnectActiveSession();
           break;
+        case 'codexRetryDisconnect':
+          var cxRetryDisconnect = AppCore.getModule('codex');
+          var retryStore = AppCore.getStore();
+          if (cxRetryDisconnect && cxRetryDisconnect.disconnectPendingSessions && retryStore) {
+            cxRetryDisconnect.disconnectPendingSessions({ projectId: retryStore.activeProject, chatId: retryStore.activeChat }).then(function(results) {
+              var failed = results.filter(function(item) { return item.status !== 'deleted'; }).length;
+              if (typeof UIModule !== 'undefined' && UIModule.toast) UIModule.toast(failed ? '仍有 Codex 映射待处理。' : 'Codex 远程映射已断开。');
+              if (cxRetryDisconnect.updateUi) cxRetryDisconnect.updateUi();
+            }).catch(function() {
+              if (typeof UIModule !== 'undefined' && UIModule.toast) UIModule.toast('读取待断开的 Codex 映射失败。');
+            });
+          }
+          break;
+        case 'codexRetryPendingDisconnects':
+          var cxRetryPending = AppCore.getModule('codex');
+          if (cxRetryPending && cxRetryPending.disconnectPendingSessions) {
+            cxRetryPending.disconnectPendingSessions().then(function(results) {
+              var failed = results.filter(function(item) { return item.status !== 'deleted'; }).length;
+              if (typeof UIModule !== 'undefined' && UIModule.toast) UIModule.toast(failed ? ('仍有 ' + failed + ' 个 Codex 映射待处理。') : '待断开的 Codex 远程映射已处理。');
+              if (cxRetryPending.updateUi) cxRetryPending.updateUi();
+            }).catch(function() {
+              if (typeof UIModule !== 'undefined' && UIModule.toast) UIModule.toast('读取待断开的 Codex 映射失败。');
+            });
+          }
+          break;
         case 'stageDraftBubble': var c3 = AppCore.getModule('chat'); if (c3) c3.stageDraftBubble(); break;
         case 'toggleMoreMenu': var c4 = AppCore.getModule('chat'); if (c4) c4.toggleMoreMenu(); break;
         case 'exitBatchSelectMode': var c5 = AppCore.getModule('chat'); if (c5) c5.exitBatchSelectMode(); break;

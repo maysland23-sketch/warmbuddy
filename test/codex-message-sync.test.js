@@ -29,6 +29,22 @@ test('Codex sync terminal status wins over stale running updates', () => {
   const stale = { metadata: { runtime: 'codex-gateway', turnId: 't1', turnStatus: 'running', updatedAt: '2026-10-05T00:00:04.000Z' } };
   assert.equal(sync.shouldApplyCodexUpdate(completed, stale), false);
   assert.equal(sync.shouldApplyCodexUpdate(stale, completed), true);
+  const versionedCompleted = { metadata: { runtime: 'codex-gateway', turnId: 't1', turnStatus: 'completed', version: 2, updatedAt: '2026-10-05T00:00:03.000Z' } };
+  const oldRunning = { metadata: { runtime: 'codex-gateway', turnId: 't1', turnStatus: 'running', version: 1, updatedAt: '2026-10-05T00:00:04.000Z' } };
+  assert.equal(sync.shouldApplyCodexUpdate(versionedCompleted, oldRunning), false);
+});
+
+test('Codex sync rejects an equal-version conflicting terminal update deterministically', () => {
+  const completed = { role: 'assistant', content: 'done', metadata: {
+    runtime: 'codex-gateway', turnId: 't1', turnStatus: 'completed', version: 2,
+    writerId: 'writer-a', updatedAt: '2026-10-05T00:00:03.000Z'
+  } };
+  const failed = { role: 'assistant', content: 'done', metadata: {
+    runtime: 'codex-gateway', turnId: 't1', turnStatus: 'failed', version: 2,
+    writerId: 'writer-b', updatedAt: '2026-10-05T00:00:03.000Z'
+  } };
+  assert.equal(sync.shouldApplyCodexUpdate(completed, failed), false);
+  assert.equal(sync.shouldApplyCodexUpdate(failed, completed), true);
 });
 
 test('Codex conversation query is project-scoped, exact-window, sorted, and bounded', () => {

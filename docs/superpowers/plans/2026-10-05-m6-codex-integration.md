@@ -75,11 +75,11 @@ The user has authorized creating the local M6A checkpoint commit after these che
 
 ## M6A Boundary and Remaining Work
 
-M6A is complete for the reviewed backend and proxy scope. M6B frontend work has not been implemented. The real Gateway and production end-to-end chain have not been verified, and production console/environment configuration remains outside this checkpoint. The overall M6 effort must not be marked complete until those later scopes are addressed.
+M6A is complete for the reviewed backend and proxy scope. M6B frontend implementation, code review, offline validation, and isolated real-page acceptance are now complete for this local checkpoint. The real Gateway and production end-to-end chain have not been verified, and production console/environment configuration remains outside this checkpoint. The overall M6 effort must not be marked complete until those later scopes are addressed.
 
-## M6B Implementation Plan (uncommitted)
+## M6B Implementation and Review Record
 
-M6B is the separately authorized frontend and message-synchronization phase. It must remain uncommitted in this work session and must not modify `codex-gateway.js`, `vercel-render-proxy.js`, the existing Claude client/protocol, or production configuration. M6A remains the committed backend checkpoint; M6B is not complete until the implementation, review, offline tests, and loopback browser evidence below are complete.
+M6B is the separately authorized frontend and message-synchronization phase. Its implementation, review fixes, offline validation, and isolated page acceptance are complete and are included in this local checkpoint. The work did not modify `codex-gateway.js`, `vercel-render-proxy.js`, the existing Claude client/protocol, or production configuration. M6A remains the committed backend checkpoint.
 
 ### M6B architecture and contracts
 
@@ -118,4 +118,33 @@ M6B is the separately authorized frontend and message-synchronization phase. It 
 5. **Review and validation**
    - Run focused M6B tests first, then the full repository suite, syntax/diff checks, and a loopback-only fake Gateway/search/database smoke test.
    - If the installed browser capability is available, exercise the actual page with temporary fake data: send, stream multiple messages, stop, switch chat, reload, new session, disconnect, search continuation, action dedupe, and cross-device message merge. Do not load user browser data.
-   - Generate a non-secret `m6b-code-review.txt` in an independent Windows temporary directory containing the actual diff, changed module/test contents, review findings, exact commands/results, browser evidence, and cleanup. Do not commit, push, deploy, or call a real Gateway.
+   - Generate a non-secret external-review report in an independent Windows temporary directory if requested. Do not commit during implementation or review; after acceptance, a local checkpoint commit may be created under explicit user authorization. Push, deployment, and real Gateway calls remain outside this scope.
+
+### M6B final patch status
+
+- Implemented and reviewed: final-stage-only marker actions with per-action keys; one shared Codex/search/integration controller, generation, lock, and cancellation path; storage/sidecar cleanup; WarmBuddy L1/summary context without Codex-triggered compression or L2 replay; versioned immutable message-sync snapshots; terminal-state conflict handling and conditional server writes; continued Codex pagination; boundary-aware Codex message insertion; and visible pending-disconnect retry state.
+- Added isolated regression coverage for search action boundaries, search cancellation, context selection, storage failures, invalidation, action status filtering, sync acknowledgements and races, pagination, same-turn ordering, and legacy barriers. Existing M6A, Claude, ordinary-chat, and proxy tests remain in the verification set.
+- The available validation includes VM/module tests, loopback HTTP fake-Gateway smoke coverage, and isolated real `public/index.html` interaction evidence using a local fake service and synthetic browser data. No user browser storage, real Gateway, Supabase, or production API was used.
+- Implementation, code review, offline validation, and isolated page acceptance are complete for this patch. Real Gateway/production end-to-end validation, production secret configuration, deployment, and push are not complete or authorized. The overall M6 effort must not be marked complete until those later scopes are separately accepted.
+
+### M6B final repair pass
+
+- Added per-session-key sidecar write serialization so a set already in flight is followed by an invalidating remove; newer mappings are not removed by an unconditional stale cleanup. invalidateAll, new-session, disconnect, and deleted-chat/project preservation use the same coordination path.
+- Enforced one page-level Codex turn lock across initial generation, application search, same-session integration, and final marker actions. Cross-chat sends return controlled BUSY; old-finally cleanup is ownership- and original-chat-bound.
+- Deferred Codex dynamic snapshot mutation until request-body preflight has accepted the prompt. New sessions force the current dynamic snapshot; continuation injection keeps the existing cadence.
+- Added terminal-content version advancement after marker cleanup, original project/chat action context, explicit action outcomes, project-scoped TODO synchronization, and Codex email handling that does not consult the active ordinary-chat API key.
+- Preserved multiple device-local pending disconnect records, added a visible list entry independent of the active/deleted chat, and treated not_connected as no remote deletion confirmation. Manual pending processing does not become background retry.
+- Added race regressions for sidecar writes, page locks and typing cleanup, dynamic snapshot acceptance, post-upload marker cleanup, original-context email/TODO actions, pending disconnect preservation, and deleted-chat pending mapping. The existing sort/barrier patch remains unchanged.
+
+### M6B session-target and scope repair pass
+
+- Bound every disconnect operation to the explicitly selected session ID. Pending records use their own source key, while active disconnect reads only the active sidecar; no operation falls back from one record type to another.
+- Added per-session pending-disconnect keys with legacy-key parsing, target-conditional cleanup after success or `UNKNOWN_SESSION`, and target-conditional failure preservation. New active or pending mappings survive delayed responses, and multiple pending mappings remain independently processable.
+- Split Codex invalidation into chat- and project-scoped operations. Deleting one chat no longer clears other chat sidecars or requests; project deletion is limited to that project, and pending preservation precedes invalidation.
+- Added regressions for pending A versus active B, delayed delete/unknown responses followed by a new B session, stale failure versus a newer pending record, multiple pending records in one chat, and deleting chat A while chat B remains active. Existing cancellation, sorting, synchronization, and M6A regressions remain in the verification set.
+
+### M6B async-context and deletion-order repair pass
+
+- `disconnectActiveSession` and `startNewActiveSession` capture project/chat/key context before their first await; later storage, DELETE, cleanup, state reset, and operation feedback remain bound to that original context even if the UI switches chats.
+- Chat/project deletion now cancels and invalidates the affected Codex requests before awaiting pending-sidecar preservation. Sidecar preservation and cleanup then run in the coordination queue; save/cleanup failure aborts deletion with a controlled notice instead of silently losing a mapping.
+- Added regressions for switched-chat disconnect success/failure, switched-chat start-new-session state, stale Codex action delivery while pending preservation is delayed, and project-wide invalidation before preservation. Unrelated chat/session protections remain covered.
