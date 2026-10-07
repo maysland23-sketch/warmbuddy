@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const serverSync = require('../codex-message-sync');
 
 function loadSync(store, fetchImpl) {
   const timeSource = fs.readFileSync('public/js/chat-time.js', 'utf8');
@@ -112,6 +113,91 @@ test('Codex sync marks only server-confirmed message IDs in a partial response',
   assert.equal(messages[0]._syncDirty, false);
   assert.equal(messages[1]._synced, false);
   assert.equal(messages[1]._syncDirty, true);
+});
+
+test('Codex frontend metadata omits empty contentType and remains accepted by the server contract', async () => {
+  const messages = [
+    {
+      id: 'user-no-content-type', role: 'user', text: 'question', createdAt: '2026-10-06T00:00:00.000Z',
+      _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-meta', _codexTurnStatus: 'running',
+      _codexVersion: 1, _codexUpdatedAt: '2026-10-06T00:00:01.000Z', _codexWriterId: 'writer-a',
+      _synced: false, _syncDirty: true
+    },
+    {
+      id: 'assistant-with-content-type', role: 'ai', text: 'answer', contentType: 'plain-text', createdAt: '2026-10-06T00:00:02.000Z',
+      _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-meta', _codexTurnStatus: 'completed',
+      _codexVersion: 2, _codexUpdatedAt: '2026-10-06T00:00:03.000Z', _codexWriterId: 'writer-a',
+      _synced: false, _syncDirty: true
+    },
+    {
+      id: 'assistant-empty-content-type', role: 'ai', text: 'failed', contentType: '', createdAt: '2026-10-06T00:00:04.000Z',
+      _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-meta', _codexTurnStatus: 'failed',
+      _codexVersion: 3, _codexUpdatedAt: '2026-10-06T00:00:05.000Z', _codexWriterId: 'writer-a',
+      _synced: false, _syncDirty: true
+    },
+    {
+      id: 'user-whitespace-content-type', role: 'user', text: 'follow-up', contentType: '   ', createdAt: '2026-10-06T00:00:06.000Z',
+      _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-meta', _codexTurnStatus: 'completed',
+      _codexVersion: 4, _codexUpdatedAt: '2026-10-06T00:00:07.000Z', _codexWriterId: 'writer-a',
+      _synced: false, _syncDirty: true
+    },
+    {
+      id: 'assistant-null-content-type', role: 'ai', text: 'unknown', contentType: null, createdAt: '2026-10-06T00:00:08.000Z',
+      _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-meta', _codexTurnStatus: 'completed',
+      _codexVersion: 5, _codexUpdatedAt: '2026-10-06T00:00:09.000Z', _codexWriterId: 'writer-a',
+      _synced: false, _syncDirty: true
+    }
+  ];
+  const store = makeStore(messages);
+  let requestBody;
+  const sync = loadSync(store, async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ synced: messages.length, syncedMessageIds: messages.map(message => message.id) }) };
+  });
+
+  await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+
+  assert.equal(Object.prototype.hasOwnProperty.call(requestBody.messages[0].metadata, 'contentType'), false);
+  assert.equal(requestBody.messages[1].metadata.contentType, 'plain-text');
+  for (const index of [2, 3, 4]) assert.equal(Object.prototype.hasOwnProperty.call(requestBody.messages[index].metadata, 'contentType'), false);
+  for (const row of requestBody.messages) assert.ok(serverSync.normalizeCodexMessage(row));
+  for (const message of messages) assert.equal(message._synced, true);
+});
+
+test('Codex sync preserves terminal updates while invalid contentType values remain rejected', () => {
+  const base = {
+    project_id: 'codex-code-test', window_id: 'chat-1', message_id: 'terminal-invalid-content-type',
+    role: 'assistant', content: 'failed', created_at: '2026-10-06T00:00:04.000Z',
+    metadata: { runtime: 'codex-gateway', turnId: 'turn-meta', turnStatus: 'failed', version: 3, updatedAt: '2026-10-06T00:00:04.000Z' }
+  };
+  assert.ok(serverSync.normalizeCodexMessage(base));
+  assert.equal(serverSync.normalizeCodexMessage({ ...base, metadata: { ...base.metadata, contentType: '' } }), null);
+  assert.equal(serverSync.normalizeCodexMessage({ ...base, metadata: { ...base.metadata, contentType: '   ' } }), null);
+  assert.equal(serverSync.normalizeCodexMessage({ ...base, metadata: { ...base.metadata, contentType: null } }), null);
+  assert.equal(serverSync.normalizeCodexMessage({ ...base, metadata: { ...base.metadata, contentType: 7 } }), null);
+  assert.equal(serverSync.normalizeCodexMessage({ ...base, metadata: { ...base.metadata, unexpected: 'reject-me' } }).metadata.unexpected, undefined);
+});
+
+test('Codex frontend preserves an invalid non-string contentType for strict server rejection', async () => {
+  const message = {
+    id: 'assistant-invalid-content-type', role: 'ai', text: 'invalid', contentType: 7, createdAt: '2026-10-06T00:00:10.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-invalid-content-type', _codexTurnStatus: 'failed',
+    _codexVersion: 1, _codexUpdatedAt: '2026-10-06T00:00:11.000Z', _codexWriterId: 'writer-a',
+    _synced: false, _syncDirty: true
+  };
+  const store = makeStore([message]);
+  let requestBody;
+  const sync = loadSync(store, async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return { ok: false, status: 400, json: async () => ({ error: 'CODEX_SYNC_INVALID_REQUEST' }) };
+  });
+
+  await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+
+  assert.equal(requestBody.messages[0].metadata.contentType, 7);
+  assert.equal(serverSync.normalizeCodexMessage(requestBody.messages[0]), null);
+  assert.equal(message._synced, false);
+  assert.equal(message._syncDirty, true);
 });
 
 test('Codex conversation pagination continues beyond the former 2000-row cap', async () => {

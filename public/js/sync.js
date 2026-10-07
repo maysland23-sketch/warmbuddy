@@ -32,9 +32,10 @@ var SyncModule = (function() {
       turnId: String(message._codexTurnId || message.id),
       turnStatus: codexMessageStatus(message),
       messageIndex: Number.isInteger(message._codexMessageIndex) ? message._codexMessageIndex : 0,
-      updatedAt: message._codexUpdatedAt || message.createdAt || new Date().toISOString(),
-      contentType: message.contentType || ''
+      updatedAt: message._codexUpdatedAt || message.createdAt || new Date().toISOString()
     };
+    if (typeof message.contentType === 'string' && message.contentType.trim()) metadata.contentType = message.contentType;
+    else if (message.contentType !== undefined && message.contentType !== null && typeof message.contentType !== 'string') metadata.contentType = message.contentType;
     if (Number.isInteger(message._codexVersion)) metadata.version = message._codexVersion;
     if (message._codexWriterId) metadata.writerId = String(message._codexWriterId);
     return metadata;
