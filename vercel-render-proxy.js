@@ -89,7 +89,7 @@ function copyRequestHeaders(req, proxySecret) {
   return headers;
 }
 
-function readRequestBody(req, maxBytes) {
+function readRequestBody(req, maxBytes, signal) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let total = 0;
@@ -100,8 +100,10 @@ function readRequestBody(req, maxBytes) {
       req.removeListener('end', onEnd);
       req.removeListener('error', onError);
       req.removeListener('aborted', onAborted);
+      signal?.removeEventListener('abort', onSignalAbort);
     }
     function onData(chunk) {
+      if (settled) return;
       total += chunk.length;
       if (total > maxBytes) {
         settled = true;
@@ -114,6 +116,10 @@ function readRequestBody(req, maxBytes) {
     }
     function onEnd() {
       if (settled) return;
+      if (signal?.aborted) {
+        onAborted();
+        return;
+      }
       settled = true;
       cleanup();
       resolve(Buffer.concat(chunks));
@@ -127,12 +133,76 @@ function readRequestBody(req, maxBytes) {
     function onAborted() {
       onError(Object.assign(new Error('Request aborted'), { code: 'REQUEST_ABORTED' }));
     }
+    function onSignalAbort() {
+      onAborted();
+    }
+
+    if (signal?.aborted) {
+      onSignalAbort();
+      return;
+    }
+    signal?.addEventListener('abort', onSignalAbort, { once: true });
 
     req.on('data', onData);
     req.on('end', onEnd);
     req.on('error', onError);
     req.on('aborted', onAborted);
   });
+}
+
+function createUpstreamAbortContext(req, res, cancellationMode) {
+  const controller = new AbortController();
+  const platformCancellation = cancellationMode === 'platform';
+  const abort = () => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+  const abortIfDisconnected = () => {
+    if (platformCancellation ? (!req.complete || req.aborted) : !req.complete) abort();
+  };
+  const abortOnPlatformRequestAborted = () => abort();
+  const abortOnPlatformRequestError = () => abort();
+  const abortIfResponseClosed = () => {
+    if (!res.writableFinished && !res.writableEnded) abort();
+  };
+
+  req.once('aborted', platformCancellation ? abortOnPlatformRequestAborted : abortIfDisconnected);
+  req.once('close', abortIfDisconnected);
+  if (platformCancellation) req.once('error', abortOnPlatformRequestError);
+  res.once('close', abortIfResponseClosed);
+
+  return {
+    signal: controller.signal,
+    platformCancellation,
+    abort,
+    isCancelled() {
+      if (platformCancellation && req.aborted) abort();
+      return controller.signal.aborted;
+    },
+    cleanup() {
+      req.removeListener('aborted', platformCancellation ? abortOnPlatformRequestAborted : abortIfDisconnected);
+      req.removeListener('close', abortIfDisconnected);
+      if (platformCancellation) req.removeListener('error', abortOnPlatformRequestError);
+      res.removeListener('close', abortIfResponseClosed);
+    }
+  };
+}
+
+function closeDownstreamResponse(res) {
+  if (!res || res.destroyed || res.writableEnded || res.writableFinished) return;
+  if (typeof res.destroy === 'function') {
+    res.destroy();
+    return;
+  }
+  if (typeof res.end === 'function') res.end();
+}
+
+async function cancelUpstreamBody(upstream) {
+  if (!upstream?.body || typeof upstream.body.cancel !== 'function') return;
+  try {
+    await upstream.body.cancel();
+  } catch (_error) {
+    // pipeline() may already own and have destroyed the Web stream.
+  }
 }
 
 function logRequest(logger, incomingPathname, resolvedTargetPathname, upstreamStatus) {
@@ -153,7 +223,14 @@ function logFailure(logger, incomingPathname, resolvedTargetPathname) {
   });
 }
 
-function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = globalThis.fetch, logger = console } = {}) {
+function createVercelRenderProxy({
+  renderOrigin,
+  proxySecret,
+  fetchImpl = globalThis.fetch,
+  logger = console,
+  fixedPathname = null,
+  cancellationMode = 'legacy'
+} = {}) {
   let origin;
   let secret;
   let configurationError = null;
@@ -176,7 +253,7 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
     const target = origin ? new URL(pathname + search, origin) : null;
     const targetPathname = target ? target.pathname : null;
 
-    if (!isApiPath(pathname)) {
+    if (!isApiPath(pathname) || (fixedPathname && (pathname !== fixedPathname || search))) {
       logRequest(logger, pathname, targetPathname, null);
       return sendJson(res, 404, { error: 'Not found', code: 'NOT_FOUND' });
     }
@@ -189,70 +266,83 @@ function createVercelRenderProxy({ renderOrigin, proxySecret, fetchImpl = global
       return sendJson(res, 503, { error: 'Proxy not configured', code: 'PROXY_NOT_CONFIGURED' });
     }
 
-    let body;
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-      try {
-        body = await readRequestBody(req, MAX_BODY_BYTES);
-      } catch (error) {
-        if (error.code === 'REQUEST_TOO_LARGE') {
-          return sendJson(res, 413, { error: 'Request too large', code: 'REQUEST_TOO_LARGE' });
-        }
-        if (error.code === 'REQUEST_ABORTED') return;
-        logFailure(logger, pathname, targetPathname);
-        return sendJson(res, 400, { error: 'Invalid request', code: 'REQUEST_READ_FAILED' });
-      }
-    }
-
-    const controller = new AbortController();
-    const abortIfDisconnected = () => {
-      if (!req.complete) controller.abort();
-    };
-    const abortIfResponseClosed = () => {
-      if (!res.writableFinished && !res.writableEnded) controller.abort();
-    };
-    req.once('aborted', abortIfDisconnected);
-    req.once('close', abortIfDisconnected);
-    res.once('close', abortIfResponseClosed);
-
+    const abortContext = createUpstreamAbortContext(req, res, cancellationMode);
     let upstream;
+    let upstreamBodyCleanupStarted = false;
+    const cleanupUpstreamBody = async () => {
+      if (upstreamBodyCleanupStarted) return;
+      upstreamBodyCleanupStarted = true;
+      await cancelUpstreamBody(upstream);
+    };
     try {
-      const fetchOptions = {
-        method,
-        headers: copyRequestHeaders(req, secret),
-        signal: controller.signal
-      };
-      if (body !== undefined && body.length > 0) fetchOptions.body = body;
-      upstream = await fetchImpl(target.toString(), fetchOptions);
-    } catch (_error) {
-      req.removeListener('aborted', abortIfDisconnected);
-      req.removeListener('close', abortIfDisconnected);
-      res.removeListener('close', abortIfResponseClosed);
-      logFailure(logger, pathname, targetPathname);
-      return sendJson(res, 502, { error: 'Upstream unavailable', code: 'UPSTREAM_UNAVAILABLE' });
-    }
+      if (abortContext.isCancelled() || res.destroyed) return;
 
-    res.statusCode = upstream.status;
-    for (const [name, value] of upstream.headers.entries()) {
-      if (RESPONSE_HEADERS.has(name.toLowerCase())) res.setHeader(name, value);
-    }
-    res.setHeader('cache-control', 'no-store');
-
-    try {
-      if (method === 'HEAD' || !upstream.body) {
-        res.end();
-      } else {
-        await pipeline(Readable.fromWeb(upstream.body), res);
+      let body;
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+        try {
+          body = await readRequestBody(req, MAX_BODY_BYTES, abortContext.signal);
+        } catch (error) {
+          if (error.code === 'REQUEST_TOO_LARGE') {
+            return sendJson(res, 413, { error: 'Request too large', code: 'REQUEST_TOO_LARGE' });
+          }
+          if (error.code === 'REQUEST_ABORTED' || abortContext.isCancelled() || res.destroyed) return;
+          logFailure(logger, pathname, targetPathname);
+          return sendJson(res, 400, { error: 'Invalid request', code: 'REQUEST_READ_FAILED' });
+        }
       }
-      logRequest(logger, pathname, targetPathname, upstream.status);
-    } catch (_error) {
-      if (!res.headersSent && !res.destroyed) {
+
+      if (abortContext.isCancelled() || res.destroyed) return;
+
+      try {
+        const fetchOptions = {
+          method,
+          headers: copyRequestHeaders(req, secret),
+          signal: abortContext.signal
+        };
+        if (body !== undefined && body.length > 0) fetchOptions.body = body;
+        upstream = await fetchImpl(target.toString(), fetchOptions);
+      } catch (_error) {
+        if (abortContext.isCancelled() || res.destroyed) return;
         logFailure(logger, pathname, targetPathname);
         return sendJson(res, 502, { error: 'Upstream unavailable', code: 'UPSTREAM_UNAVAILABLE' });
       }
+
+      if (abortContext.isCancelled() || res.destroyed) {
+        await cleanupUpstreamBody();
+        return;
+      }
+
+      res.statusCode = upstream.status;
+      for (const [name, value] of upstream.headers.entries()) {
+        if (RESPONSE_HEADERS.has(name.toLowerCase())) res.setHeader(name, value);
+      }
+      res.setHeader('cache-control', 'no-store');
+
+      try {
+        if (method === 'HEAD' || !upstream.body) {
+          res.end();
+        } else {
+          await pipeline(Readable.fromWeb(upstream.body), res);
+        }
+        if (abortContext.signal.aborted) return;
+        logRequest(logger, pathname, targetPathname, upstream.status);
+      } catch (_error) {
+        if (abortContext.platformCancellation) {
+          abortContext.abort();
+          await cleanupUpstreamBody();
+        }
+        if (!res.headersSent && !res.destroyed) {
+          logFailure(logger, pathname, targetPathname);
+          return sendJson(res, 502, { error: 'Upstream unavailable', code: 'UPSTREAM_UNAVAILABLE' });
+        }
+      }
     } finally {
-      req.removeListener('aborted', abortIfDisconnected);
-      req.removeListener('close', abortIfDisconnected);
-      res.removeListener('close', abortIfResponseClosed);
+      if (abortContext.platformCancellation && abortContext.signal.aborted) {
+        abortContext.abort();
+        await cleanupUpstreamBody();
+        closeDownstreamResponse(res);
+      }
+      abortContext.cleanup();
     }
   };
 }

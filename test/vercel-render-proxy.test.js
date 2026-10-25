@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const http = require('node:http');
 
 const {
@@ -8,6 +9,69 @@ const {
 } = require('../vercel-render-proxy');
 
 const TEST_SECRET = 'proxy-secret-at-least-32-bytes-long';
+
+function createSyntheticRequest({
+  method = 'POST',
+  emitBody = true,
+  afterEnd = null
+} = {}) {
+  const request = new EventEmitter();
+  request.method = method;
+  request.url = '/api/codex-stream?__warmbuddy_path=%2Fapi%2Fcodex%2Fstream';
+  request.headers = { 'content-type': 'application/json' };
+  request.complete = false;
+  request.aborted = false;
+  if (emitBody) {
+    process.nextTick(() => {
+      request.complete = true;
+      request.emit('data', Buffer.from('{"prompt":"cancel"}'));
+      request.emit('end');
+      afterEnd?.(request);
+    });
+  }
+  return request;
+}
+
+function createSyntheticResponse() {
+  const response = new EventEmitter();
+  response.statusCode = 200;
+  response.headersSent = false;
+  response.destroyed = false;
+  response.writableEnded = false;
+  response.writableFinished = false;
+  response.setHeader = () => {};
+  response.removeHeader = () => {};
+  response.write = () => {
+    response.headersSent = true;
+    return true;
+  };
+  response.end = () => {
+    response.headersSent = true;
+    response.writableEnded = true;
+    response.writableFinished = true;
+  };
+  response.destroyCount = 0;
+  response.destroy = () => {
+    response.destroyCount += 1;
+    response.destroyed = true;
+    response.writableEnded = true;
+    response.writableFinished = true;
+    response.emit('close');
+  };
+  return response;
+}
+
+function waitFor(predicate, timeoutMs = 1000) {
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (predicate()) return resolve();
+      if (Date.now() - started >= timeoutMs) return reject(new Error('timed out waiting for condition'));
+      setTimeout(check, 5);
+    };
+    check();
+  });
+}
 
 async function withProxy(handler, callback) {
   const server = http.createServer(handler);
@@ -236,6 +300,56 @@ test('proxy aborts Render when the client closes an incomplete SSE response', as
   }
 });
 
+test('platform proxy aborts Render when a completed POST body is followed by client SSE disconnect', async () => {
+  let upstreamResponseClosed = false;
+  let upstreamSocketClosed = false;
+  const upstream = http.createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write('first');
+    response.once('close', () => { upstreamResponseClosed = true; });
+    response.socket?.once('close', () => { upstreamSocketClosed = true; });
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const handler = createVercelRenderProxy({
+    renderOrigin: `http://127.0.0.1:${upstream.address().port}`,
+    proxySecret: TEST_SECRET,
+    cancellationMode: 'platform',
+    fixedPathname: '/api/codex/stream',
+    logger: { info() {}, error() {} }
+  });
+  const proxy = http.createServer(handler);
+  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
+  const clientRequest = http.request({
+    hostname: '127.0.0.1',
+    port: proxy.address().port,
+    path: '/api/codex-stream?__warmbuddy_path=%2Fapi%2Fcodex%2Fstream',
+    method: 'POST',
+    headers: { 'content-type': 'application/json' }
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      clientRequest.once('error', error => {
+        if (error.code !== 'ECONNRESET') reject(error);
+      });
+      clientRequest.once('response', response => {
+        response.once('data', chunk => {
+          assert.equal(chunk.toString(), 'first');
+          clientRequest.destroy();
+          resolve();
+        });
+      });
+      clientRequest.end('{"prompt":"cancel"}');
+    });
+    await waitFor(() => upstreamResponseClosed && upstreamSocketClosed, 2000);
+  } finally {
+    clientRequest.destroy();
+    await new Promise(resolve => proxy.close(resolve));
+    await new Promise(resolve => upstream.close(resolve));
+  }
+  assert.equal(upstreamResponseClosed, true);
+  assert.equal(upstreamSocketClosed, true);
+});
+
 test('proxy does not abort Render after a normal SSE response completes', async () => {
   let upstreamAborted = false;
   const handler = createVercelRenderProxy({
@@ -256,4 +370,253 @@ test('proxy does not abort Render after a normal SSE response completes', async 
   });
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(upstreamAborted, false);
+});
+
+test('platform fetch rejection after cancellation closes the response and cleans listeners', async () => {
+  for (const event of ['aborted', 'error']) {
+    const request = createSyntheticRequest();
+    const response = createSyntheticResponse();
+    let fetchSignal;
+    let fetchRejected = false;
+    let abortCount = 0;
+    const handler = createVercelRenderProxy({
+      renderOrigin: 'https://render.example',
+      proxySecret: TEST_SECRET,
+      cancellationMode: 'platform',
+      fixedPathname: '/api/codex/stream',
+      fetchImpl: async (_url, init) => {
+        fetchSignal = init.signal;
+        init.signal.addEventListener('abort', () => {
+          abortCount += 1;
+        }, { once: true });
+        return await new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            fetchRejected = true;
+            const error = new Error('synthetic abort');
+            error.name = 'AbortError';
+            reject(error);
+          }, { once: true });
+        });
+      },
+      logger: { info() {}, error() {} }
+    });
+
+    const pending = handler(request, response);
+    await waitFor(() => fetchSignal !== undefined);
+    assert.equal(request.complete, true);
+    if (event === 'error') {
+      const error = new Error('aborted');
+      error.code = 'ECONNRESET';
+      request.emit('error', error);
+      request.aborted = true;
+      request.emit('aborted');
+    } else {
+      request.aborted = true;
+      request.emit('aborted');
+      const error = new Error('duplicate cancellation');
+      error.code = 'ECONNRESET';
+      request.emit('error', error);
+    }
+    await pending;
+    assert.equal(fetchSignal.aborted, true);
+    assert.equal(fetchRejected, true);
+    assert.equal(abortCount, 1);
+    assert.equal(response.destroyed, true);
+    assert.equal(response.destroyCount, 1);
+    assert.equal(request.listenerCount('aborted'), 0);
+    assert.equal(request.listenerCount('close'), 0);
+    assert.equal(request.listenerCount('error'), 0);
+  }
+});
+
+test('platform cancellation at the body handoff does not start Render', async () => {
+  let fetchCalled = false;
+  const request = createSyntheticRequest({
+    afterEnd(currentRequest) {
+      currentRequest.aborted = true;
+      currentRequest.emit('aborted');
+    }
+  });
+  const response = createSyntheticResponse();
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example',
+    proxySecret: TEST_SECRET,
+    cancellationMode: 'platform',
+    fixedPathname: '/api/codex/stream',
+    fetchImpl: async () => {
+      fetchCalled = true;
+      return new Response(null, { status: 200 });
+    },
+    logger: { info() {}, error() {} }
+  });
+
+  await handler(request, response);
+  assert.equal(fetchCalled, false);
+  assert.equal(response.destroyed, true);
+  assert.equal(response.destroyCount, 1);
+  assert.equal(request.listenerCount('aborted'), 0);
+  assert.equal(request.listenerCount('close'), 0);
+  assert.equal(request.listenerCount('error'), 0);
+});
+
+test('platform cancellation during body reading closes the response without fetching', async () => {
+  let fetchCalled = false;
+  const request = createSyntheticRequest({ emitBody: false });
+  const response = createSyntheticResponse();
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example',
+    proxySecret: TEST_SECRET,
+    cancellationMode: 'platform',
+    fixedPathname: '/api/codex/stream',
+    fetchImpl: async () => {
+      fetchCalled = true;
+      return new Response(null, { status: 200 });
+    },
+    logger: { info() {}, error() {} }
+  });
+
+  const pending = handler(request, response);
+  await waitFor(() => request.listenerCount('data') > 0);
+  request.aborted = true;
+  request.emit('aborted');
+  await pending;
+  assert.equal(fetchCalled, false);
+  assert.equal(response.destroyed, true);
+  assert.equal(response.destroyCount, 1);
+  assert.equal(request.listenerCount('aborted'), 0);
+  assert.equal(request.listenerCount('close'), 0);
+  assert.equal(request.listenerCount('error'), 0);
+});
+
+test('platform mode does not fetch after the response is already destroyed', async () => {
+  let fetchCalled = false;
+  const request = createSyntheticRequest({ method: 'GET', emitBody: false });
+  const response = createSyntheticResponse();
+  response.destroyed = true;
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example',
+    proxySecret: TEST_SECRET,
+    cancellationMode: 'platform',
+    fixedPathname: '/api/codex/stream',
+    fetchImpl: async () => {
+      fetchCalled = true;
+      return new Response(null, { status: 200 });
+    },
+    logger: { info() {}, error() {} }
+  });
+
+  await handler(request, response);
+  assert.equal(fetchCalled, false);
+  assert.equal(response.destroyCount, 0);
+  assert.equal(request.listenerCount('aborted'), 0);
+  assert.equal(request.listenerCount('close'), 0);
+  assert.equal(request.listenerCount('error'), 0);
+});
+
+test('platform mode does not treat a normal completed request close as cancellation', async () => {
+  const request = createSyntheticRequest();
+  const response = createSyntheticResponse();
+  let fetchSignal;
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example',
+    proxySecret: TEST_SECRET,
+    cancellationMode: 'platform',
+    fixedPathname: '/api/codex/stream',
+    fetchImpl: async (_url, init) => {
+      fetchSignal = init.signal;
+      await new Promise(resolve => setTimeout(resolve, 25));
+      return new Response(null, { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+    logger: { info() {}, error() {} }
+  });
+
+  const pending = handler(request, response);
+  await waitFor(() => fetchSignal !== undefined);
+  assert.equal(request.complete, true);
+  request.emit('close');
+  await pending;
+  assert.equal(fetchSignal.aborted, false);
+  assert.equal(request.listenerCount('aborted'), 0);
+  assert.equal(request.listenerCount('close'), 0);
+  assert.equal(request.listenerCount('error'), 0);
+});
+
+test('legacy mode retains the completed-request cancellation condition', async () => {
+  const request = createSyntheticRequest();
+  const response = createSyntheticResponse();
+  let fetchSignal;
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example',
+    proxySecret: TEST_SECRET,
+    fetchImpl: async (_url, init) => {
+      fetchSignal = init.signal;
+      await new Promise(resolve => setTimeout(resolve, 25));
+      return new Response(null, { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+    logger: { info() {}, error() {} }
+  });
+
+  const pending = handler(request, response);
+  await waitFor(() => fetchSignal !== undefined);
+  assert.equal(request.complete, true);
+  request.aborted = true;
+  request.emit('aborted');
+  await pending;
+  assert.equal(fetchSignal.aborted, false);
+  assert.equal(response.writableFinished, true);
+  assert.equal(request.listenerCount('aborted'), 0);
+  assert.equal(request.listenerCount('close'), 0);
+});
+
+test('platform mode aborts and cleans the upstream body when pipeline fails', async () => {
+  let upstreamAborted = false;
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example',
+    proxySecret: TEST_SECRET,
+    cancellationMode: 'platform',
+    fixedPathname: '/api/codex/stream',
+    fetchImpl: async (_url, init) => {
+      init.signal.addEventListener('abort', () => { upstreamAborted = true; }, { once: true });
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('first'));
+          setTimeout(() => controller.error(new Error('synthetic pipeline failure')), 0);
+        }
+      });
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    },
+    logger: { info() {}, error() {} }
+  });
+
+  await withProxy(handler, async baseUrl => {
+    const response = await fetch(baseUrl + '/api/codex-stream?__warmbuddy_path=%2Fapi%2Fcodex%2Fstream');
+    await assert.rejects(() => response.text());
+    await waitFor(() => upstreamAborted, 2000);
+  });
+  assert.equal(upstreamAborted, true);
+});
+
+test('fixed Codex proxy rejects direct and forged non-Codex paths', async () => {
+  let observedUrl;
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example',
+    proxySecret: TEST_SECRET,
+    cancellationMode: 'platform',
+    fixedPathname: '/api/codex/stream',
+    fetchImpl: async url => {
+      observedUrl = url;
+      return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+    logger: { info() {}, error() {} }
+  });
+
+  await withProxy(handler, async baseUrl => {
+    const direct = await fetch(baseUrl + '/api/codex-stream');
+    assert.equal(direct.status, 404);
+    const forged = await fetch(baseUrl + '/api/codex-stream?__warmbuddy_path=%2Fapi%2Fchat%2Fstream');
+    assert.equal(forged.status, 404);
+    const exact = await fetch(baseUrl + '/api/codex-stream?__warmbuddy_path=%2Fapi%2Fcodex%2Fstream');
+    assert.equal(exact.status, 200);
+  });
+  assert.equal(observedUrl, 'https://render.example/api/codex/stream');
 });

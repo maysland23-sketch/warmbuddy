@@ -5,13 +5,21 @@
   "outputDirectory": "public",
   "rewrites": [
     {
+      "source": "/api/codex/stream",
+      "destination": "/api/codex-stream?__warmbuddy_path=/api/codex/stream"
+    },
+    {
       "source": "/api/:path*",
       "destination": "/api/proxy?__warmbuddy_path=/api/:path*"
     }
   ],
   "functions": {
-    "api/*.js": {
+    "api/proxy.js": {
       "maxDuration": 300
+    },
+    "api/codex-stream.js": {
+      "maxDuration": 300,
+      "supportsCancellation": true
     }
   }
 }
