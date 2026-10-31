@@ -43,6 +43,29 @@ function makeStore(messages) {
   };
 }
 
+function makeOversizedReceipts() {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const longPath = 'y'.repeat(1850);
+  return {
+    activities: Array.from({ length: 64 }, (_, activityIndex) => {
+      const activityId = 'wa_' + (activityIndex + 1);
+      return {
+        requestId, activityId, tool: 'web_search', phase: 'completed',
+        action: 'search', outcome: 'unknown', sources: 'available',
+        sourceCards: Array.from({ length: 8 }, (_, sourceIndex) => {
+          const hex = (activityIndex * 8 + sourceIndex).toString(16).padStart(64, '0');
+          const displayUrl = 'https://example.org/' + longPath + '-' + activityIndex + '-' + sourceIndex;
+          return {
+            requestId, activityId, sourceId: 'ws_' + hex,
+            displayUrl, url: displayUrl, redacted: false,
+            title: 'source-' + activityIndex + '-' + sourceIndex, refId: 'ref_' + sourceIndex
+          };
+        })
+      };
+    })
+  };
+}
+
 test('Codex sync keeps a newer dirty status after an old synced-zero response', async () => {
   const message = {
     id: 'm1', role: 'ai', text: 'running', createdAt: '2026-10-06T00:00:00.000Z',
@@ -162,6 +185,75 @@ test('Codex frontend metadata omits empty contentType and remains accepted by th
   for (const index of [2, 3, 4]) assert.equal(Object.prototype.hasOwnProperty.call(requestBody.messages[index].metadata, 'contentType'), false);
   for (const row of requestBody.messages) assert.ok(serverSync.normalizeCodexMessage(row));
   for (const message of messages) assert.equal(message._synced, true);
+});
+
+test('Codex frontend uploads bounded receipts and hydrates them without exposing sidecars', async () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const activityId = 'wa_1';
+  const sourceId = 'ws_' + 'b'.repeat(64);
+  const message = {
+    id: 'user-receipt', role: 'user', text: '查资料', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-receipt', _codexTurnStatus: 'completed',
+    _codexVersion: 2, _codexUpdatedAt: '2026-10-06T00:00:02.000Z', _codexWriterId: 'writer-a',
+    _codexReceipts: { activities: [{
+      requestId, activityId, tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown',
+      sources: 'none', sourceCards: [{ requestId, activityId, sourceId,
+        displayUrl: 'https://example.org/article', redacted: true, title: '<img>' }]
+    }] },
+    _synced: false, _syncDirty: true
+  };
+  const store = makeStore([message]);
+  let requestBody;
+  const sync = loadSync(store, async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ syncedMessageIds: ['user-receipt'] }) };
+  });
+  await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+  assert.deepEqual(requestBody.messages[0].metadata.receipts, message._codexReceipts);
+  assert.doesNotMatch(JSON.stringify(requestBody), /sessionId|threadId|sidecar/);
+
+  const incomingStore = makeStore([]);
+  const incomingSync = loadSync(incomingStore, async () => ({ ok: true, json: async () => ({ messages: [] }) }));
+  incomingSync.mergeCodexCloudMessages(incomingStore.projects[0], [{
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: 'user-receipt', role: 'user', content: '查资料',
+    createdAt: message.createdAt, metadata: requestBody.messages[0].metadata
+  }]);
+  assert.equal(JSON.stringify(incomingStore.projects[0].chats[0].messages[0]._codexReceipts), JSON.stringify(message._codexReceipts));
+});
+
+test('Codex sync projects and hydrates an oversized terminal receipt summary', async () => {
+  const message = {
+    id: 'oversized-sync', role: 'user', text: '查资料', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-oversized-sync', _codexTurnStatus: 'completed',
+    _codexVersion: 3, _codexUpdatedAt: '2026-10-06T00:00:03.000Z', _codexWriterId: 'writer-a',
+    _codexReceipts: makeOversizedReceipts(), _synced: false, _syncDirty: true
+  };
+  const store = makeStore([message]);
+  let requestBody;
+  const sync = loadSync(store, async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ syncedMessageIds: [message.id] }) };
+  });
+
+  await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+
+  const projected = requestBody.messages[0].metadata.receipts;
+  assert.ok(Buffer.byteLength(JSON.stringify(projected), 'utf8') <= 64 * 1024);
+  assert.equal(projected.omitted, true);
+  assert.ok(projected.omittedSources > 0);
+  assert.equal(requestBody.messages[0].metadata.turnStatus, 'completed');
+
+  const incomingStore = makeStore([]);
+  const incomingSync = loadSync(incomingStore, async () => ({ ok: true, json: async () => ({ messages: [] }) }));
+  incomingSync.mergeCodexCloudMessages(incomingStore.projects[0], [{
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: message.id,
+    role: 'user', content: message.text, createdAt: message.createdAt,
+    metadata: requestBody.messages[0].metadata
+  }]);
+  const hydrated = incomingStore.projects[0].chats[0].messages[0];
+  assert.equal(hydrated._codexTurnStatus, 'completed');
+  assert.equal(hydrated._codexReceipts.omitted, true);
+  assert.equal(hydrated._codexReceipts.activities.length, 64);
 });
 
 test('Codex sync preserves terminal updates while invalid contentType values remain rejected', () => {

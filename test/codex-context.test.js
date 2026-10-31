@@ -90,6 +90,19 @@ test('Codex context uses the explicit WarmBuddy project, current rules, L1/L2 hi
   assert.ok(chat);
 });
 
+test('Codex native web mode replaces the legacy search marker instruction without changing ordinary model context', () => {
+  const store = makeStore();
+  const chat = store.projects[1].chats[0];
+  chat.aiSettings.webSearch = true;
+  const module = loadChat(store);
+  const result = module.buildCodexPromptContext({
+    projectId: 'codex-code-test', chatId: 'codex-chat', codexWebMode: 'native',
+    currentMessages: [{ id: 'current-native', role: 'user', text: '查资料' }]
+  });
+  assert.match(result.prompt, /Codex 原生网页工具/);
+  assert.doesNotMatch(result.prompt, /\[\[SEARCH:/);
+});
+
 test('Codex continuation refreshes current preference and dynamic context without replaying full history', () => {
   const store = makeStore();
   const chat = store.projects[1].chats[0];

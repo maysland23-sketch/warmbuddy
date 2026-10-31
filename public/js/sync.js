@@ -16,6 +16,15 @@ var SyncModule = (function() {
   var CODEX_SYNC_STATUSES = { running: true, completed: true, failed: true, canceled: true, unknown: true };
   var CODEX_TERMINAL_STATUSES = { completed: true, failed: true, canceled: true, unknown: true };
   var CODEX_PULL_MAX_PAGES = 1000;
+  var CODEX_RECEIPT_REQUEST_ID = /^wr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  var CODEX_RECEIPT_ACTIVITY_ID = /^wa_[1-9][0-9]*$/;
+  var CODEX_RECEIPT_SOURCE_ID = /^ws_[0-9a-f]{64}$/;
+  var CODEX_RECEIPT_REF_ID = /^[a-zA-Z0-9_-]{1,128}$/;
+  var CODEX_RECEIPT_MAX_ACTIVITIES = 64;
+  var CODEX_RECEIPT_MAX_SOURCES = 8;
+  var CODEX_RECEIPT_MAX_URL_BYTES = 2048;
+  var CODEX_RECEIPT_MAX_TITLE_BYTES = 256;
+  var CODEX_RECEIPT_MAX_BYTES = 64 * 1024;
 
   function isCodexProject(project) {
     return !!project && project.id === CODEX_PROJECT_ID && project.runtime === CODEX_RUNTIME;
@@ -24,6 +33,121 @@ var SyncModule = (function() {
   function codexMessageStatus(message) {
     return message && message._codexTurnStatus && CODEX_SYNC_STATUSES[message._codexTurnStatus]
       ? message._codexTurnStatus : 'unknown';
+  }
+
+  function receiptBytes(value) {
+    try {
+      if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
+      return unescape(encodeURIComponent(value)).length;
+    } catch (_) { return Number.MAX_SAFE_INTEGER; }
+  }
+
+  function receiptPublicUrl(value) {
+    if (typeof value !== 'string' || receiptBytes(value) > CODEX_RECEIPT_MAX_URL_BYTES || /[\s\u0000-\u001f\u007f\\]/.test(value)) return false;
+    if (!/^https?:\/\/[^/?#]+(?:[/?#]|$)/i.test(value)) return false;
+    try {
+      var parsed = new URL(value);
+      var host = String(parsed.hostname || '').toLowerCase();
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !parsed.username && !parsed.password && !parsed.port &&
+        !parsed.search && !parsed.hash && !/^\d+(?:\.\d+){3}$/.test(host) && host.indexOf(':') < 0 && host.indexOf('.') >= 0 &&
+        host.charAt(host.length - 1) !== '.' && !/(^|\.)(localhost|local|internal|invalid|test)$/.test(host) && /^[a-z0-9.-]+$/.test(host);
+    } catch (_) { return false; }
+  }
+
+  function compactCodexReceipts(receipts) {
+    var priorOmittedSources = Number.isInteger(receipts.omittedSources) ? receipts.omittedSources : 0;
+    var totalSources = priorOmittedSources + receipts.activities.reduce(function(total, activity) {
+      return total + (Array.isArray(activity.sourceCards) ? activity.sourceCards.length : 0);
+    }, 0);
+    var result = {
+      activities: receipts.activities.map(function(activity) {
+        var compacted = {
+          requestId: activity.requestId, activityId: activity.activityId,
+          tool: 'web_search', phase: activity.phase,
+          action: activity.action, outcome: 'unknown', sourceCards: []
+        };
+        if (activity.phase === 'completed') compacted.sources = activity.sources;
+        if (activity.phase === 'interrupted') compacted.reason = activity.reason;
+        return compacted;
+      }),
+      omitted: true,
+      omittedSources: totalSources
+    };
+    var retainedSources = 0;
+    for (var activityIndex = 0; activityIndex < receipts.activities.length; activityIndex++) {
+      var sourceCards = Array.isArray(receipts.activities[activityIndex].sourceCards)
+        ? receipts.activities[activityIndex].sourceCards : [];
+      for (var sourceIndex = 0; sourceIndex < sourceCards.length; sourceIndex++) {
+        result.activities[activityIndex].sourceCards.push(sourceCards[sourceIndex]);
+        retainedSources += 1;
+        result.omittedSources = totalSources - retainedSources;
+        if (receiptBytes(JSON.stringify(result)) > CODEX_RECEIPT_MAX_BYTES) {
+          result.activities[activityIndex].sourceCards.pop();
+          retainedSources -= 1;
+          result.omittedSources = totalSources - retainedSources;
+        }
+      }
+    }
+    return result;
+  }
+
+  function normalizeCodexReceipts(receipts) {
+    if (!receipts || typeof receipts !== 'object' || Array.isArray(receipts) || !Array.isArray(receipts.activities) || receipts.activities.length > CODEX_RECEIPT_MAX_ACTIVITIES) throw new Error('invalid receipts');
+    if (receipts.omitted !== undefined && typeof receipts.omitted !== 'boolean') throw new Error('invalid receipts');
+    if (receipts.omittedSources !== undefined && (!Number.isInteger(receipts.omittedSources) || receipts.omittedSources < 0)) throw new Error('invalid receipts');
+    if (receipts.omittedSources > 0 && receipts.omitted !== true) throw new Error('invalid receipts');
+    var result = { activities: [] }, activityIds = {}, requestId = null;
+    receipts.activities.forEach(function(activity) {
+      if (!activity || typeof activity !== 'object' || Array.isArray(activity) || !CODEX_RECEIPT_REQUEST_ID.test(activity.requestId || '') ||
+          !CODEX_RECEIPT_ACTIVITY_ID.test(activity.activityId || '') || activityIds[activity.activityId] || activity.tool !== 'web_search' ||
+          ['started', 'completed', 'interrupted'].indexOf(activity.phase) < 0 || ['unknown', 'search', 'open_page'].indexOf(activity.action) < 0 || activity.outcome !== 'unknown') throw new Error('invalid receipts');
+      if (requestId && requestId !== activity.requestId) throw new Error('invalid receipts');
+      requestId = activity.requestId; activityIds[activity.activityId] = true;
+      var targetKeys = ['targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl'];
+      var hasTarget = targetKeys.some(function(key) { return Object.prototype.hasOwnProperty.call(activity, key); });
+      if (hasTarget && activity.action !== 'open_page') throw new Error('invalid receipts');
+      var normalized = { requestId: requestId, activityId: activity.activityId, tool: 'web_search', phase: activity.phase, action: activity.action, outcome: 'unknown' };
+      if (hasTarget) {
+        if (!CODEX_RECEIPT_SOURCE_ID.test(activity.targetSourceId || '') || !receiptPublicUrl(activity.targetDisplayUrl) || typeof activity.targetRedacted !== 'boolean') throw new Error('invalid receipts');
+        if (activity.targetRedacted ? Object.prototype.hasOwnProperty.call(activity, 'targetUrl') : !receiptPublicUrl(activity.targetUrl) || activity.targetUrl !== activity.targetDisplayUrl) throw new Error('invalid receipts');
+        normalized.targetSourceId = activity.targetSourceId; normalized.targetDisplayUrl = activity.targetDisplayUrl; normalized.targetRedacted = activity.targetRedacted;
+        if (!activity.targetRedacted) normalized.targetUrl = activity.targetUrl;
+      }
+      if (activity.phase === 'completed') {
+        if (['available', 'none', 'unknown'].indexOf(activity.sources) < 0) throw new Error('invalid receipts');
+        normalized.sources = activity.sources;
+      }
+      if (activity.phase === 'interrupted') {
+        if (['turn_ended', 'round_failed', 'cancelled'].indexOf(activity.reason) < 0) throw new Error('invalid receipts');
+        normalized.reason = activity.reason;
+      }
+      if (!Array.isArray(activity.sourceCards) || activity.sourceCards.length > CODEX_RECEIPT_MAX_SOURCES || (activity.phase !== 'completed' && activity.sourceCards.length)) throw new Error('invalid receipts');
+      var sourceIds = {};
+      normalized.sourceCards = activity.sourceCards.map(function(source) {
+        if (!source || typeof source !== 'object' || Array.isArray(source) || source.requestId !== requestId || source.activityId !== activity.activityId ||
+            !CODEX_RECEIPT_SOURCE_ID.test(source.sourceId || '') || sourceIds[source.sourceId] || !receiptPublicUrl(source.displayUrl) || typeof source.redacted !== 'boolean') throw new Error('invalid receipts');
+        if (source.redacted ? Object.prototype.hasOwnProperty.call(source, 'url') : !receiptPublicUrl(source.url) || source.url !== source.displayUrl) throw new Error('invalid receipts');
+        var normalizedSource = { requestId: requestId, activityId: activity.activityId, sourceId: source.sourceId, displayUrl: source.displayUrl, redacted: source.redacted };
+        if (!source.redacted) normalizedSource.url = source.url;
+        if (source.title !== undefined) {
+          if (typeof source.title !== 'string' || receiptBytes(source.title) > CODEX_RECEIPT_MAX_TITLE_BYTES) throw new Error('invalid receipts');
+          if (source.title) normalizedSource.title = source.title;
+        }
+        if (source.refId !== undefined) {
+          if (typeof source.refId !== 'string' || !CODEX_RECEIPT_REF_ID.test(source.refId)) throw new Error('invalid receipts');
+          normalizedSource.refId = source.refId;
+        }
+        sourceIds[source.sourceId] = true;
+        return normalizedSource;
+      });
+      result.activities.push(normalized);
+    });
+    if (receipts.omitted === true) {
+      result.omitted = true;
+      result.omittedSources = receipts.omittedSources || 0;
+    }
+    if (receiptBytes(JSON.stringify(result)) > CODEX_RECEIPT_MAX_BYTES) return compactCodexReceipts(result);
+    return result;
   }
 
   function codexMetadata(message) {
@@ -38,6 +162,9 @@ var SyncModule = (function() {
     else if (message.contentType !== undefined && message.contentType !== null && typeof message.contentType !== 'string') metadata.contentType = message.contentType;
     if (Number.isInteger(message._codexVersion)) metadata.version = message._codexVersion;
     if (message._codexWriterId) metadata.writerId = String(message._codexWriterId);
+    if (message._codexReceipts) {
+      metadata.receipts = normalizeCodexReceipts(message._codexReceipts);
+    }
     return metadata;
   }
 
@@ -301,7 +428,8 @@ var SyncModule = (function() {
       _codexUpdatedAt: metadata.updatedAt || row.createdAt,
       _codexVersion: Number.isInteger(metadata.version) ? metadata.version : 0,
       _codexWriterId: metadata.writerId || '', _synced: true, _syncDirty: false,
-      _codexRemote: true
+      _codexRemote: true,
+      _codexReceipts: metadata.receipts ? normalizeCodexReceipts(metadata.receipts) : undefined
     };
   }
 
@@ -927,6 +1055,7 @@ var SyncModule = (function() {
     scheduleCodexMessageSync: scheduleCodexMessageSync,
     pullCodexConversationMessages: pullCodexConversationMessages,
     mergeCodexCloudMessages: mergeCodexCloudMessages,
+    normalizeCodexReceipts: normalizeCodexReceipts,
     pullChatMessages: pullChatMessages,
     pullAllProjectEnabledStates: pullAllProjectEnabledStates,
     reconcileFromBackend: reconcileFromBackend,

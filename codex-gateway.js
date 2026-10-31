@@ -1,3 +1,5 @@
+const { isIP } = require('node:net');
+
 const DEFAULT_CODEX_GATEWAY_TIMEOUT_MS = 150000;
 const MAX_CODEX_GATEWAY_TIMEOUT_MS = 150000;
 const MAX_CODEX_PROMPT_BYTES = 32768;
@@ -14,7 +16,16 @@ const MAX_CODEX_SSE_BUFFER_BYTES = MAX_CODEX_EVENT_BYTES + 64 * 1024;
 const MAX_CODEX_ERROR_BODY_BYTES = 64 * 1024;
 const CODEX_SESSION_ID_PATTERN = /^gs_[0-9a-f]{64}$/;
 const CODEX_GATEWAY_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
-const CODEX_EVENT_TYPES = new Set(['session', 'status', 'message', 'error', 'completion']);
+const CODEX_WEB_MODES = new Set(['legacy', 'native']);
+const CODEX_EVENT_TYPES = new Set(['session', 'status', 'message', 'error', 'completion', 'activity', 'source']);
+const CODEX_REQUEST_ID_PATTERN = /^wr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CODEX_ACTIVITY_ID_PATTERN = /^wa_[1-9][0-9]*$/;
+const CODEX_SOURCE_ID_PATTERN = /^ws_[0-9a-f]{64}$/;
+const CODEX_REF_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+const CODEX_MAX_WEB_ACTIVITIES = 64;
+const CODEX_MAX_WEB_SOURCES_PER_ACTIVITY = 8;
+const CODEX_MAX_WEB_URL_BYTES = 2048;
+const CODEX_MAX_WEB_TITLE_BYTES = 256;
 const CODEX_UPSTREAM_ERROR_CODES = new Map([
   ['BUSY', 'BUSY'],
   ['UNKNOWN_SESSION', 'UNKNOWN_SESSION'],
@@ -59,6 +70,14 @@ function publicMessage(code, fallback) {
 
 function createCodexError(code, status, fallback) {
   return new CodexGatewayError(publicMessage(code, fallback), { code, status });
+}
+
+function normalizeCodexWebMode(value) {
+  const mode = value === undefined ? 'legacy' : value;
+  if (typeof mode !== 'string' || !CODEX_WEB_MODES.has(mode)) {
+    throw createCodexError('CODEX_GATEWAY_NOT_CONFIGURED', 503);
+  }
+  return mode;
 }
 
 function normalizeBaseUrl(value, { allowHttpLoopback = false } = {}) {
@@ -217,7 +236,117 @@ function parseEventPayload(eventName, rawData) {
   return payload;
 }
 
-async function consumeCodexSse(body, { expectedSessionId, onEvent, onHeartbeat } = {}) {
+function invalidCodexReceipt() {
+  throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
+}
+
+function boundedCodexText(value, maxBytes) {
+  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= maxBytes;
+}
+
+function isPublicCodexUrl(value) {
+  if (!boundedCodexText(value, CODEX_MAX_WEB_URL_BYTES) || /[\s\u0000-\u001f\u007f\\]/u.test(value)) return false;
+  if (!/^https?:\/\/[^/?#]+(?:[/?#]|$)/i.test(value)) return false;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.port &&
+      !url.search && !url.hash && !isIP(host) && !host.includes(':') && host.includes('.') &&
+      !host.endsWith('.') && !/(?:^|\.)(?:localhost|local|internal|invalid|test)$/.test(host) &&
+      /^[a-z0-9.-]+$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+function receiptRequestId(payload, state) {
+  if (!payload || !CODEX_REQUEST_ID_PATTERN.test(payload.requestId || '')) invalidCodexReceipt();
+  if (state.requestId && state.requestId !== payload.requestId) invalidCodexReceipt();
+  state.requestId ||= payload.requestId;
+  return payload.requestId;
+}
+
+function normalizeCodexTarget(payload, action) {
+  const targetKeys = ['targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl'];
+  if (targetKeys.some(key => Object.hasOwn(payload, key)) && action !== 'open_page') invalidCodexReceipt();
+  if (action !== 'open_page') return {};
+  const present = targetKeys.some(key => Object.hasOwn(payload, key));
+  if (!present) return {};
+  if (!CODEX_SOURCE_ID_PATTERN.test(payload.targetSourceId || '') ||
+      !isPublicCodexUrl(payload.targetDisplayUrl) || typeof payload.targetRedacted !== 'boolean') {
+    invalidCodexReceipt();
+  }
+  if (payload.targetRedacted) {
+    if (Object.hasOwn(payload, 'targetUrl')) invalidCodexReceipt();
+  } else if (!isPublicCodexUrl(payload.targetUrl) || payload.targetUrl !== payload.targetDisplayUrl) {
+    invalidCodexReceipt();
+  }
+  return {
+    targetSourceId: payload.targetSourceId,
+    targetDisplayUrl: payload.targetDisplayUrl,
+    targetRedacted: payload.targetRedacted,
+    ...(payload.targetRedacted ? {} : { targetUrl: payload.targetUrl })
+  };
+}
+
+function normalizeCodexActivity(payload, state) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+      payload.tool !== 'web_search' || !['started', 'completed', 'interrupted'].includes(payload.phase) ||
+      !['unknown', 'search', 'open_page'].includes(payload.action) || payload.outcome !== 'unknown' ||
+      !CODEX_ACTIVITY_ID_PATTERN.test(payload.activityId || '')) invalidCodexReceipt();
+  const requestId = receiptRequestId(payload, state);
+  const activityId = payload.activityId;
+  const existing = state.activities.get(activityId);
+  if (payload.phase === 'started') {
+    if (existing || state.activities.size >= CODEX_MAX_WEB_ACTIVITIES) invalidCodexReceipt();
+  } else if (!existing || existing.terminal) {
+    invalidCodexReceipt();
+  }
+
+  const target = normalizeCodexTarget(payload, payload.action);
+  const normalized = {
+    requestId, activityId, tool: 'web_search', phase: payload.phase,
+    action: payload.action, outcome: 'unknown', ...target
+  };
+  if (payload.phase === 'completed') {
+    if (!['available', 'none', 'unknown'].includes(payload.sources)) invalidCodexReceipt();
+    normalized.sources = payload.sources;
+  }
+  if (payload.phase === 'interrupted') {
+    if (!['turn_ended', 'round_failed', 'cancelled'].includes(payload.reason)) invalidCodexReceipt();
+    normalized.reason = payload.reason;
+  }
+  state.activities.set(activityId, { phase: payload.phase, terminal: payload.phase !== 'started', sourceIds: existing?.sourceIds || new Set() });
+  return normalized;
+}
+
+function normalizeCodexSource(payload, state) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) invalidCodexReceipt();
+  const requestId = receiptRequestId(payload, state);
+  const activityId = payload.activityId;
+  const activity = state.activities.get(activityId);
+  if (!activity || activity.phase !== 'completed' || !CODEX_ACTIVITY_ID_PATTERN.test(activityId || '') ||
+      !CODEX_SOURCE_ID_PATTERN.test(payload.sourceId || '') || typeof payload.redacted !== 'boolean' ||
+      !isPublicCodexUrl(payload.displayUrl)) invalidCodexReceipt();
+  if (activity.sourceIds.size >= CODEX_MAX_WEB_SOURCES_PER_ACTIVITY || activity.sourceIds.has(payload.sourceId)) invalidCodexReceipt();
+  if (payload.redacted) {
+    if (Object.hasOwn(payload, 'url')) invalidCodexReceipt();
+  } else if (!isPublicCodexUrl(payload.url) || payload.url !== payload.displayUrl) {
+    invalidCodexReceipt();
+  }
+  const normalized = {
+    requestId, activityId, sourceId: payload.sourceId,
+    displayUrl: payload.displayUrl, redacted: payload.redacted,
+    ...(payload.redacted ? {} : { url: payload.url })
+  };
+  if (boundedCodexText(payload.title, CODEX_MAX_WEB_TITLE_BYTES) && payload.title.trim() &&
+      !/[\u0000-\u001f\u007f]|:\/\//u.test(payload.title)) normalized.title = payload.title;
+  if (typeof payload.refId === 'string' && CODEX_REF_ID_PATTERN.test(payload.refId)) normalized.refId = payload.refId;
+  activity.sourceIds.add(payload.sourceId);
+  return normalized;
+}
+
+async function consumeCodexSse(body, { expectedSessionId, onEvent, onHeartbeat, webMode } = {}) {
   if (!body || typeof body.getReader !== 'function') {
     throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
   }
@@ -232,10 +361,13 @@ async function consumeCodexSse(body, { expectedSessionId, onEvent, onHeartbeat }
   let completionStatus = null;
   let inputBytes = 0;
   const messages = [];
+  const receiptState = { requestId: null, activities: new Map() };
+  const normalizedWebMode = normalizeCodexWebMode(webMode);
 
   const dispatch = async () => {
     if (!eventName && dataLines.length === 0) return;
-    if (!CODEX_EVENT_TYPES.has(eventName) || dataLines.length === 0) {
+    if (!CODEX_EVENT_TYPES.has(eventName) || dataLines.length === 0 ||
+        (normalizedWebMode !== 'native' && (eventName === 'activity' || eventName === 'source'))) {
       throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
     }
     const payload = parseEventPayload(eventName, dataLines.join('\n'));
@@ -277,9 +409,16 @@ async function consumeCodexSse(body, { expectedSessionId, onEvent, onHeartbeat }
       if (payload.status !== 'completed' && payload.status !== 'failed') {
         throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
       }
+      if (normalizedWebMode === 'native' && [...receiptState.activities.values()].some(activity => !activity.terminal)) {
+        invalidCodexReceipt();
+      }
       completionStatus = payload.status;
       completed = true;
       event = { type: 'completion', payload: { status: payload.status } };
+    } else if (eventName === 'activity') {
+      event = { type: 'activity', payload: normalizeCodexActivity(payload, receiptState) };
+    } else if (eventName === 'source') {
+      event = { type: 'source', payload: normalizeCodexSource(payload, receiptState) };
     }
 
     eventName = '';
@@ -389,7 +528,8 @@ function createCodexGatewayClient({
   token = process.env.CODEX_GATEWAY_TOKEN,
   timeoutMs = process.env.CODEX_GATEWAY_TIMEOUT_MS,
   fetchImpl = globalThis.fetch,
-  allowHttpLoopback = false
+  allowHttpLoopback = false,
+  webMode = process.env.CODEX_WEB_MODE
 } = {}) {
   const gatewayUrl = normalizeBaseUrl(baseUrl, { allowHttpLoopback });
   const gatewayToken = String(token || '').trim();
@@ -398,6 +538,7 @@ function createCodexGatewayClient({
   }
   if (typeof fetchImpl !== 'function') throw createCodexError('CODEX_GATEWAY_NOT_CONFIGURED', 503);
   const timeout = normalizeTimeout(timeoutMs);
+  const normalizedWebMode = normalizeCodexWebMode(webMode);
 
   return {
     async run({ prompt, sessionId, signal, onEvent, onHeartbeat } = {}) {
@@ -429,7 +570,8 @@ function createCodexGatewayClient({
         const result = await consumeCodexSse(response.body, {
           expectedSessionId: request.sessionId,
           onEvent,
-          onHeartbeat
+          onHeartbeat,
+          webMode: normalizedWebMode
         });
         if (!request.sessionId && !result.sessionId) {
           throw createCodexError('CODEX_MISSING_SESSION', 502);
@@ -501,6 +643,12 @@ function createCodexGatewayClient({
 }
 
 module.exports = {
+  CODEX_ACTIVITY_ID_PATTERN,
+  CODEX_MAX_WEB_ACTIVITIES,
+  CODEX_MAX_WEB_SOURCES_PER_ACTIVITY,
+  CODEX_REQUEST_ID_PATTERN,
+  CODEX_SOURCE_ID_PATTERN,
+  CODEX_WEB_MODES,
   CODEX_ERROR_MESSAGES,
   CODEX_GATEWAY_TOKEN_PATTERN,
   CODEX_SESSION_ID_PATTERN,
@@ -514,6 +662,7 @@ module.exports = {
   CodexGatewayError,
   consumeCodexSse,
   createCodexGatewayClient,
+  normalizeCodexWebMode,
   serializeCodexRequest,
   validateCodexRequest
 };

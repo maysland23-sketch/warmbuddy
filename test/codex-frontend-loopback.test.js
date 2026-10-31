@@ -53,6 +53,10 @@ test('Codex frontend loopback reads chunked SSE, performs one same-session searc
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('end', () => {
+      if (req.url === '/api/codex/config' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        return res.end(JSON.stringify({ webMode: 'legacy' }));
+      }
       if (req.url === '/api/codex/stream' && req.method === 'POST') {
         const parsed = JSON.parse(body);
         state.posts.push(parsed);
@@ -125,6 +129,59 @@ test('Codex frontend loopback reads chunked SSE, performs one same-session searc
     await codex.disconnect({ projectId: 'codex-code-test', chatId: 'chat-1', sessionId: activeSession });
     assert.equal(state.deletes.length, 1);
     assert.equal(await storage.getItem(codex.sessionKey('codex-gateway', 'codex-code-test', 'chat-1')), null);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('Codex frontend loopback native mode accepts activity/source without legacy search', async () => {
+  const sessionId = 'gs_' + '1'.repeat(64);
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const activityId = 'wa_1';
+  const sourceId = 'ws_' + 'a'.repeat(64);
+  const state = { posts: [], searches: [] };
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      if (req.url === '/api/codex/config' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ webMode: 'native' }));
+      }
+      if (req.url === '/api/codex/stream' && req.method === 'POST') {
+        state.posts.push(JSON.parse(body));
+        res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', connection: 'close' });
+        const events = [
+          'event: session\ndata: {"sessionId":"' + sessionId + '"}\n\n',
+          'event: activity\ndata: ' + JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' }) + '\n\n',
+          'event: activity\ndata: ' + JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown', sources: 'available' }) + '\n\n',
+          'event: source\ndata: ' + JSON.stringify({ requestId, activityId, sourceId, displayUrl: 'https://example.org/native', url: 'https://example.org/native', redacted: false, title: 'Native' }) + '\n\n',
+          'event: completion\ndata: {"status":"completed"}\n\n'
+        ];
+        events.forEach(item => res.write(item));
+        return res.end();
+      }
+      if (req.url === '/api/search') {
+        state.searches.push(body);
+        res.writeHead(500); return res.end();
+      }
+      res.writeHead(404); res.end();
+    });
+  });
+  const address = await new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address())));
+  const storage = { getItem: async () => null, setItem: async () => {}, removeItem: async () => {} };
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'native-chat',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'native-chat', aiSettings: { webSearch: true }, messages: [{ id: 'user-native', role: 'user', text: '查资料' }] }] }]
+  };
+  const stateWithCommits = Object.assign(state, { commits: [] });
+  try {
+    const codex = loadCodex('http://127.0.0.1:' + address.port, store, storage, stateWithCommits);
+    const result = await codex.sendChatTurn({ projectId: 'codex-code-test', chatId: 'native-chat', userMessageIds: ['user-native'], userText: '查资料' });
+    assert.equal(result.completed, true);
+    assert.equal(state.posts.length, 1);
+    assert.equal(state.searches.length, 0);
+    assert.equal(store.projects[0].chats[0].messages[0]._codexReceipts.activities[0].sourceCards[0].sourceId, sourceId);
   } finally {
     await new Promise(resolve => server.close(resolve));
   }

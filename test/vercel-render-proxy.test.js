@@ -256,6 +256,24 @@ test('proxy streams upstream response before upstream body closes', async () => 
   });
 });
 
+test('proxy forwards native activity/source SSE bytes without inspecting or rewriting them', async () => {
+  const receiptSse = [
+    'event: activity\ndata: {"requestId":"wr_test","activityId":"wa_1","tool":"web_search","phase":"started","action":"unknown","outcome":"unknown"}\n\n',
+    'event: source\ndata: {"requestId":"wr_test","activityId":"wa_1","sourceId":"ws_test","displayUrl":"https://example.org/a","redacted":true}\n\n'
+  ].join('');
+  const handler = createVercelRenderProxy({
+    renderOrigin: 'https://render.example', proxySecret: TEST_SECRET,
+    fetchImpl: async () => new Response(receiptSse, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    logger: { info() {}, error() {} }
+  });
+
+  await withProxy(handler, async baseUrl => {
+    const response = await fetch(baseUrl + '/api/codex/stream');
+    assert.equal(response.headers.get('content-type'), 'text/event-stream');
+    assert.equal(await response.text(), receiptSse);
+  });
+});
+
 test('proxy aborts Render when the client closes an incomplete SSE response', async () => {
   let upstreamResponseClosed = false;
   let upstreamSocketClosed = false;

@@ -27,6 +27,7 @@ const {
   CODEX_SESSION_ID_PATTERN,
   CodexGatewayError,
   createCodexGatewayClient,
+  normalizeCodexWebMode,
   serializeCodexRequest
 } = require('./codex-gateway');
 const { buildMemoryRows } = require('./memories-persistence');
@@ -88,6 +89,8 @@ if (OUTBOUND_PROXY) {
 
 const app = express();
 const IS_RENDER = String(process.env.RENDER || '').toLowerCase() === 'true';
+const CODEX_WEB_MODE = normalizeCodexWebMode(process.env.CODEX_WEB_MODE);
+const CODEX_PUBLIC_EVENT_TYPES = new Set(['session', 'status', 'message', 'error', 'completion', 'activity', 'source']);
 
 app.use((req, res, next) => {
   req.requestId = randomUUID();
@@ -118,6 +121,16 @@ app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
 app.use(['/api', '/api/*splat'], createRenderApiGuard({ secret: RENDER_PROXY_SECRET }));
 app.use(express.json({ limit: '5mb' }));
 
+app.get('/api/codex/config', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    res.json({ webMode: normalizeCodexWebMode(app.locals.codexWebMode ?? CODEX_WEB_MODE) });
+  } catch (error) {
+    const payload = codexErrorPayload(error);
+    res.status(codexErrorStatus(error, payload.code)).json(payload);
+  }
+});
+
 const AGENT_GATEWAY_MAX_PROMPT_CHARS = 240000;
 const CLAUDE_CODE_TEST_PROJECT_ID = 'claude-code-test';
 const AGENT_GATEWAY_PROMPT_POLICY = [
@@ -138,7 +151,9 @@ let codexGatewayClient = null;
 
 function getCodexGatewayClient() {
   if (app.locals.codexGatewayClient) return app.locals.codexGatewayClient;
-  if (!codexGatewayClient) codexGatewayClient = createCodexGatewayClient();
+  if (!codexGatewayClient) codexGatewayClient = createCodexGatewayClient({
+    webMode: normalizeCodexWebMode(app.locals.codexWebMode ?? CODEX_WEB_MODE)
+  });
   return codexGatewayClient;
 }
 
@@ -2339,7 +2354,25 @@ app.post('/api/codex/stream', async (req, res) => {
   let pendingCompletion = null;
   let completionSent = false;
   let emittedError = false;
+  const projectCodexReceiptPayload = (type, payload) => {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new CodexGatewayError('Codex Gateway returned an invalid receipt', { status: 502, code: 'CODEX_GATEWAY_INVALID_RESPONSE' });
+    }
+    const fields = type === 'activity'
+      ? ['requestId', 'activityId', 'tool', 'phase', 'action', 'outcome', 'sources', 'reason', 'targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl']
+      : ['requestId', 'activityId', 'sourceId', 'displayUrl', 'redacted', 'url', 'title', 'refId'];
+    const result = {};
+    fields.forEach(field => {
+      if (Object.prototype.hasOwnProperty.call(payload, field)) result[field] = payload[field];
+    });
+    if (type === 'source' && result.redacted === true) delete result.url;
+    if (type === 'activity' && result.targetRedacted === true) delete result.targetUrl;
+    return result;
+  };
   const handleGatewayEvent = async event => {
+    if (!event || !CODEX_PUBLIC_EVENT_TYPES.has(event.type)) {
+      throw new CodexGatewayError('Codex Gateway returned an unknown event', { status: 502, code: 'CODEX_GATEWAY_INVALID_RESPONSE' });
+    }
     if (event.type === 'error') {
       emittedError = true;
       return writeCodexGatewaySse(res, 'error', {
@@ -2350,6 +2383,13 @@ app.post('/api/codex/stream', async (req, res) => {
       completionStatus = event.payload.status;
       pendingCompletion = event.payload;
       return true;
+    }
+    if ((event.type === 'activity' || event.type === 'source') &&
+        normalizeCodexWebMode(app.locals.codexWebMode ?? CODEX_WEB_MODE) !== 'native') {
+      throw new CodexGatewayError('Codex receipt event is not enabled', { status: 502, code: 'CODEX_GATEWAY_INVALID_RESPONSE' });
+    }
+    if (event.type === 'activity' || event.type === 'source') {
+      return writeCodexGatewaySse(res, event.type, projectCodexReceiptPayload(event.type, event.payload), clientAbortContext.signal);
     }
     return writeCodexGatewaySse(res, event.type, event.payload, clientAbortContext.signal);
   };

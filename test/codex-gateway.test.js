@@ -114,6 +114,52 @@ test('Codex client sends only the allowed JSON fields and forwards complete mess
   assert.equal(result.completed, true);
 });
 
+test('Codex client validates and forwards bounded native activity/source receipts in order', async () => {
+  const sessionId = 'gs_' + 'c'.repeat(64);
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const activityId = 'wa_1';
+  const sourceId = 'ws_' + 'd'.repeat(64);
+  const url = 'https://docs.example.org/page';
+  const upstream = [
+    `event: session\ndata: ${JSON.stringify({ sessionId })}\n\n`,
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown', threadId: 'private' })}\n\n`,
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'completed', action: 'open_page', outcome: 'unknown', targetSourceId: sourceId, targetDisplayUrl: url, targetRedacted: false, targetUrl: url, sources: 'available', results: [{ url: 'private' }] })}\n\n`,
+    `event: source\ndata: ${JSON.stringify({ requestId, activityId, sourceId, displayUrl: url, redacted: false, url, title: 'Public docs', refId: 'turn1view0', snippet: 'private' })}\n\n`,
+    'event: completion\ndata: {"status":"completed"}\n\n'
+  ].join('');
+  const events = [];
+  const { client } = clientWithResponse(chunkedSseResponse(upstream, 2), { webMode: 'native' });
+  const result = await client.run({ prompt: 'native', onEvent: event => events.push(event) });
+
+  assert.deepEqual(events.map(event => event.type), ['session', 'activity', 'activity', 'source', 'completion']);
+  assert.deepEqual(events[1].payload, { requestId, activityId, tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' });
+  assert.deepEqual(events[2].payload, {
+    requestId, activityId, tool: 'web_search', phase: 'completed', action: 'open_page', outcome: 'unknown',
+    targetSourceId: sourceId, targetDisplayUrl: url, targetRedacted: false, targetUrl: url, sources: 'available'
+  });
+  assert.deepEqual(events[3].payload, { requestId, activityId, sourceId, displayUrl: url, redacted: false, url, title: 'Public docs', refId: 'turn1view0' });
+  assert.equal(result.completed, true);
+});
+
+test('Codex client keeps legacy mode closed to native receipt events', async () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const stream = `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' })}\n\n`;
+  const { client } = clientWithResponse(sseResponse(stream));
+  await assert.rejects(() => client.run({ prompt: 'legacy' }), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+});
+
+test('Codex client rejects duplicate or uncorrelated native receipt events', async () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const start = `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' })}\n\n`;
+  const duplicate = `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' })}\n\n`;
+  const { client } = clientWithResponse(sseResponse(start + duplicate));
+  await assert.rejects(() => client.run({ prompt: 'duplicate' }), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+
+  const source = `event: source\ndata: ${JSON.stringify({ requestId, activityId: 'wa_9', sourceId: 'ws_' + 'e'.repeat(64), displayUrl: 'https://example.org/a', redacted: false, url: 'https://example.org/a' })}\n\n`;
+  const { client: sourceClient } = clientWithResponse(sseResponse(source));
+  await assert.rejects(() => sourceClient.run({ prompt: 'uncorrelated' }), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+});
+
 test('Codex client enforces UTF-8 prompt, NUL, session, and exact body validation', async () => {
   const { client } = clientWithResponse(sseResponse(''));
   const validSessionId = 'gs_' + 'f'.repeat(64);

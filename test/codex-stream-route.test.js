@@ -26,6 +26,48 @@ function stopApi(server) {
   return new Promise(resolve => server.close(resolve));
 }
 
+test('Codex config exposes only the server-selected non-sensitive web mode', async () => {
+  const api = await startApi();
+  try {
+    const legacy = await fetch(`http://127.0.0.1:${api.address().port}/api/codex/config`, {
+      headers: { 'x-warmbuddy-proxy-secret': process.env.RENDER_PROXY_SECRET }
+    });
+    assert.equal(legacy.status, 200);
+    assert.equal(legacy.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await legacy.json(), { webMode: 'legacy' });
+
+    app.locals.codexWebMode = 'native';
+    const native = await fetch(`http://127.0.0.1:${api.address().port}/api/codex/config`, {
+      headers: { 'x-warmbuddy-proxy-secret': process.env.RENDER_PROXY_SECRET }
+    });
+    const nativeBody = await native.text();
+    assert.equal(native.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(JSON.parse(nativeBody), { webMode: 'native' });
+    assert.doesNotMatch(nativeBody, /token|gateway|thread|url/i);
+  } finally {
+    delete app.locals.codexWebMode;
+    await stopApi(api);
+  }
+});
+
+test('Codex config rejects an invalid server mode without starting a model request', async () => {
+  app.locals.codexWebMode = 'invalid';
+  const api = await startApi();
+  try {
+    const response = await fetch('http://127.0.0.1:' + api.address().port + '/api/codex/config', {
+      headers: { 'x-warmbuddy-proxy-secret': process.env.RENDER_PROXY_SECRET, 'Cache-Control': 'no-store' }
+    });
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const body = await response.json();
+    assert.equal(body.code, 'CODEX_GATEWAY_NOT_CONFIGURED');
+    assert.equal(typeof body.error, 'string');
+  } finally {
+    delete app.locals.codexWebMode;
+    await stopApi(api);
+  }
+});
+
 async function waitFor(predicate, timeoutMs = 2000) {
   const started = Date.now();
   while (!predicate()) {
@@ -67,6 +109,38 @@ test('Codex route streams named events and forwards only prompt/session to the c
     assert.equal(calls[0].sessionId, 'gs_' + 'd'.repeat(64));
     assert.equal(typeof calls[0].signal, 'object');
   } finally {
+    delete app.locals.codexGatewayClient;
+    await stopApi(api);
+  }
+});
+
+test('Codex route forwards normalized activity/source events without private fields', async () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const activityId = 'wa_1';
+  const sourceId = 'ws_' + 'a'.repeat(64);
+  app.locals.codexWebMode = 'native';
+  app.locals.codexGatewayClient = {
+    run: async ({ onEvent }) => {
+      await onEvent({ type: 'session', payload: { sessionId: 'gs_' + 'e'.repeat(64) } });
+      await onEvent({ type: 'activity', payload: { requestId, activityId, tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown', threadId: 'private' } });
+      await onEvent({ type: 'activity', payload: { requestId, activityId, tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown', sources: 'available' } });
+      await onEvent({ type: 'source', payload: { requestId, activityId, sourceId, displayUrl: 'https://example.org/a', redacted: true, title: '<untrusted>', threadId: 'private' } });
+      await onEvent({ type: 'completion', payload: { status: 'completed' } });
+      return { completed: true, sessionId: 'gs_' + 'e'.repeat(64), messages: [] };
+    }
+  };
+  const api = await startApi();
+  try {
+    const response = await fetch(`http://127.0.0.1:${api.address().port}/api/codex/stream`, {
+      method: 'POST', headers: PROXY_HEADERS, body: JSON.stringify({ prompt: 'native' })
+    });
+    const body = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(body, /event: activity/);
+    assert.match(body, /event: source/);
+    assert.doesNotMatch(body, /threadId|private/);
+  } finally {
+    delete app.locals.codexWebMode;
     delete app.locals.codexGatewayClient;
     await stopApi(api);
   }

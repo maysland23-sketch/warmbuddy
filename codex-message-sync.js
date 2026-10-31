@@ -1,5 +1,7 @@
 'use strict';
 
+const { isIP } = require('node:net');
+
 const CODEX_PROJECT_ID = 'codex-code-test';
 const CODEX_RUNTIME = 'codex-gateway';
 const CODEX_SYNC_ERROR = 'CODEX_SYNC_INVALID_REQUEST';
@@ -7,8 +9,17 @@ const CODEX_SYNC_STATUSES = new Set(['running', 'completed', 'failed', 'canceled
 const CODEX_ROLES = new Set(['user', 'assistant']);
 const CODEX_MAX_PAGE_SIZE = 100;
 const CODEX_MAX_CONTENT_BYTES = 4 * 1024 * 1024;
-const CODEX_METADATA_KEYS = new Set(['runtime', 'turnId', 'turnStatus', 'messageIndex', 'updatedAt', 'contentType', 'version', 'writerId']);
+const CODEX_METADATA_KEYS = new Set(['runtime', 'turnId', 'turnStatus', 'messageIndex', 'updatedAt', 'contentType', 'version', 'writerId', 'receipts']);
 const CODEX_TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled', 'unknown']);
+const CODEX_RECEIPT_REQUEST_ID = /^wr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CODEX_RECEIPT_ACTIVITY_ID = /^wa_[1-9][0-9]*$/;
+const CODEX_RECEIPT_SOURCE_ID = /^ws_[0-9a-f]{64}$/;
+const CODEX_RECEIPT_REF_ID = /^[a-zA-Z0-9_-]{1,128}$/;
+const CODEX_RECEIPT_MAX_ACTIVITIES = 64;
+const CODEX_RECEIPT_MAX_SOURCES = 8;
+const CODEX_RECEIPT_MAX_URL_BYTES = 2048;
+const CODEX_RECEIPT_MAX_TITLE_BYTES = 256;
+const CODEX_RECEIPT_MAX_BYTES = 64 * 1024;
 
 function invalid(message = CODEX_SYNC_ERROR) {
   const error = new Error(message);
@@ -25,6 +36,150 @@ function text(value, field, { required = true, maxBytes = 256 } = {}) {
   if (typeof value !== 'string' || (required && !value.trim())) throw invalid();
   if (Buffer.byteLength(value, 'utf8') > maxBytes) throw invalid();
   return value;
+}
+
+function receiptText(value, maxBytes) {
+  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= maxBytes;
+}
+
+function receiptPublicUrl(value) {
+  if (!receiptText(value, CODEX_RECEIPT_MAX_URL_BYTES) || /[\s\u0000-\u001f\u007f\\]/.test(value)) return false;
+  if (!/^https?:\/\/[^/?#]+(?:[/?#]|$)/i.test(value)) return false;
+  try {
+    const parsed = new URL(value);
+    const host = String(parsed.hostname || '').toLowerCase();
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      !parsed.username && !parsed.password && !parsed.port && !parsed.search && !parsed.hash &&
+      isIP(host) === 0 && host.includes('.') && !host.endsWith('.') &&
+      !/(^|\.)(localhost|local|internal|invalid|test)$/.test(host) && /^[a-z0-9.-]+$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCodexReceiptSource(source, requestId, activityId, sourceIds) {
+  if (!source || typeof source !== 'object' || Array.isArray(source) ||
+      source.requestId !== requestId || source.activityId !== activityId ||
+      !CODEX_RECEIPT_SOURCE_ID.test(source.sourceId || '') || sourceIds.has(source.sourceId) ||
+      !receiptPublicUrl(source.displayUrl) || typeof source.redacted !== 'boolean') throw invalid();
+  if (source.redacted) {
+    if (Object.prototype.hasOwnProperty.call(source, 'url')) throw invalid();
+  } else if (!receiptPublicUrl(source.url) || source.url !== source.displayUrl) {
+    throw invalid();
+  }
+  const result = {
+    requestId, activityId, sourceId: source.sourceId,
+    displayUrl: source.displayUrl, redacted: source.redacted
+  };
+  if (!source.redacted) result.url = source.url;
+  if (source.title !== undefined) {
+    if (!receiptText(source.title, CODEX_RECEIPT_MAX_TITLE_BYTES)) throw invalid();
+    if (source.title) result.title = source.title;
+  }
+  if (source.refId !== undefined) {
+    if (typeof source.refId !== 'string' || !CODEX_RECEIPT_REF_ID.test(source.refId)) throw invalid();
+    result.refId = source.refId;
+  }
+  sourceIds.add(source.sourceId);
+  return result;
+}
+
+function compactCodexReceipts(receipts) {
+  const priorOmittedSources = Number.isInteger(receipts.omittedSources) ? receipts.omittedSources : 0;
+  const totalSources = priorOmittedSources + receipts.activities.reduce((total, activity) => (
+    total + (Array.isArray(activity.sourceCards) ? activity.sourceCards.length : 0)
+  ), 0);
+  const result = {
+    activities: receipts.activities.map(activity => {
+      const compacted = {
+        requestId: activity.requestId, activityId: activity.activityId,
+        tool: 'web_search', phase: activity.phase,
+        action: activity.action, outcome: 'unknown', sourceCards: []
+      };
+      if (activity.phase === 'completed') compacted.sources = activity.sources;
+      if (activity.phase === 'interrupted') compacted.reason = activity.reason;
+      return compacted;
+    }),
+    omitted: true,
+    omittedSources: totalSources
+  };
+  let retainedSources = 0;
+  for (let activityIndex = 0; activityIndex < receipts.activities.length; activityIndex++) {
+    const sourceCards = Array.isArray(receipts.activities[activityIndex].sourceCards)
+      ? receipts.activities[activityIndex].sourceCards : [];
+    for (const source of sourceCards) {
+      result.activities[activityIndex].sourceCards.push(source);
+      result.omittedSources = totalSources - (++retainedSources);
+      if (Buffer.byteLength(JSON.stringify(result), 'utf8') > CODEX_RECEIPT_MAX_BYTES) {
+        result.activities[activityIndex].sourceCards.pop();
+        retainedSources--;
+        result.omittedSources = totalSources - retainedSources;
+      }
+    }
+  }
+  return result;
+}
+
+function normalizeCodexReceipts(receipts) {
+  if (!receipts || typeof receipts !== 'object' || Array.isArray(receipts) || !Array.isArray(receipts.activities) ||
+      receipts.activities.length > CODEX_RECEIPT_MAX_ACTIVITIES) throw invalid();
+  if (receipts.omitted !== undefined && typeof receipts.omitted !== 'boolean') throw invalid();
+  if (receipts.omittedSources !== undefined &&
+      (!Number.isInteger(receipts.omittedSources) || receipts.omittedSources < 0)) throw invalid();
+  if (receipts.omittedSources > 0 && receipts.omitted !== true) throw invalid();
+  const result = { activities: [] };
+  const activityIds = new Set();
+  let requestId = null;
+  for (const activity of receipts.activities) {
+    if (!activity || typeof activity !== 'object' || Array.isArray(activity) ||
+        !CODEX_RECEIPT_REQUEST_ID.test(activity.requestId || '') ||
+        !CODEX_RECEIPT_ACTIVITY_ID.test(activity.activityId || '') || activityIds.has(activity.activityId) ||
+        activity.tool !== 'web_search' || !['started', 'completed', 'interrupted'].includes(activity.phase) ||
+        !['unknown', 'search', 'open_page'].includes(activity.action) || activity.outcome !== 'unknown') throw invalid();
+    if (requestId && requestId !== activity.requestId) throw invalid();
+    requestId = activity.requestId;
+    activityIds.add(activity.activityId);
+    const hasTarget = ['targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl']
+      .some(key => Object.prototype.hasOwnProperty.call(activity, key));
+    if (hasTarget && activity.action !== 'open_page') throw invalid();
+    const normalized = {
+      requestId, activityId: activity.activityId, tool: 'web_search', phase: activity.phase,
+      action: activity.action, outcome: 'unknown'
+    };
+    if (hasTarget) {
+      if (!CODEX_RECEIPT_SOURCE_ID.test(activity.targetSourceId || '') ||
+          !receiptPublicUrl(activity.targetDisplayUrl) || typeof activity.targetRedacted !== 'boolean') throw invalid();
+      if (activity.targetRedacted) {
+        if (Object.prototype.hasOwnProperty.call(activity, 'targetUrl')) throw invalid();
+      } else if (!receiptPublicUrl(activity.targetUrl) || activity.targetUrl !== activity.targetDisplayUrl) {
+        throw invalid();
+      }
+      normalized.targetSourceId = activity.targetSourceId;
+      normalized.targetDisplayUrl = activity.targetDisplayUrl;
+      normalized.targetRedacted = activity.targetRedacted;
+      if (!activity.targetRedacted) normalized.targetUrl = activity.targetUrl;
+    }
+    if (activity.phase === 'completed') {
+      if (!['available', 'none', 'unknown'].includes(activity.sources)) throw invalid();
+      normalized.sources = activity.sources;
+    }
+    if (activity.phase === 'interrupted') {
+      if (!['turn_ended', 'round_failed', 'cancelled'].includes(activity.reason)) throw invalid();
+      normalized.reason = activity.reason;
+    }
+    if (!Array.isArray(activity.sourceCards) || activity.sourceCards.length > CODEX_RECEIPT_MAX_SOURCES || activity.phase !== 'completed' && activity.sourceCards.length) throw invalid();
+    const sourceIds = new Set();
+    normalized.sourceCards = activity.sourceCards.map(source => normalizeCodexReceiptSource(source, requestId, activity.activityId, sourceIds));
+    result.activities.push(normalized);
+  }
+  if (receipts.omitted === true) {
+    result.omitted = true;
+    result.omittedSources = receipts.omittedSources || 0;
+  }
+  if (Buffer.byteLength(JSON.stringify(result), 'utf8') > CODEX_RECEIPT_MAX_BYTES) {
+    return compactCodexReceipts(result);
+  }
+  return result;
 }
 
 function normalizeCodexMetadata(metadata) {
@@ -50,6 +205,10 @@ function normalizeCodexMetadata(metadata) {
     if (key === 'runtime') {
       if (metadata[key] !== CODEX_RUNTIME) throw invalid();
       result[key] = CODEX_RUNTIME;
+      continue;
+    }
+    if (key === 'receipts') {
+      result.receipts = normalizeCodexReceipts(metadata[key]);
       continue;
     }
     result[key] = text(metadata[key], key, { maxBytes: key === 'contentType' ? 128 : 256 });
@@ -150,6 +309,8 @@ module.exports = {
   buildCodexConversationQuery,
   normalizeCodexMessage,
   normalizeCodexMetadata,
+  normalizeCodexReceipts,
+  compactCodexReceipts,
   compareCodexUpdates,
   shouldApplyCodexUpdate
 };

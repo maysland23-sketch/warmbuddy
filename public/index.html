@@ -441,6 +441,31 @@ textarea::-webkit-scrollbar { width: 0; display: none; }
   white-space: pre-wrap; word-break: break-all;
   line-height: 1.4;
 }
+/* Codex native web receipt panel */
+.codex-receipt-panel {
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  margin: 6px 0;
+  overflow: hidden;
+  font-size: 11px;
+}
+.codex-receipt-header {
+  padding: 7px 12px;
+  color: var(--text-light);
+  cursor: pointer;
+  user-select: none;
+}
+.codex-receipt-count { color: var(--text-lighter); }
+.codex-receipt-items { padding: 0 12px 6px; }
+.codex-receipt-item { padding: 5px 0; border-top: 1px solid var(--border-light); }
+.codex-receipt-item-label { color: var(--text); }
+.codex-receipt-note, .codex-receipt-display-url { color: var(--text-lighter); font-size: 10px; }
+.codex-receipt-source { padding-top: 3px; overflow-wrap: anywhere; }
+.codex-receipt-source-link { color: var(--accent-soft); text-decoration: none; }
+.codex-receipt-source-link:hover { text-decoration: underline; }
+.codex-receipt-source-text { color: var(--text-light); }
+.codex-receipt-display-url { display: block; padding-top: 1px; }
 /* Date separator */
 .chat-date-separator {
   text-align: center; padding: 12px 0 8px; font-size: 12px;

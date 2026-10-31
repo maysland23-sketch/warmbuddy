@@ -561,7 +561,8 @@ var ChatModule = (function() {
     var explicitContext = !!(contextProject || contextChat);
     var fp = explicitContext
       ? [contextProject && contextProject.id || '', contextChat && contextChat.id || '', contextChat && contextChat._messageCount || 0,
-        contextProject && contextProject.preference || '', contextProject && contextProject._userStatus || '', contextProject && contextProject._aiStatus || ''].join('|')
+        contextProject && contextProject.preference || '', contextProject && contextProject._userStatus || '', contextProject && contextProject._aiStatus || '',
+        dynamicOptions.codexWebMode || ''].join('|')
       : getDynamicCtxFingerprint();
     var nowTs = Date.now();
     if (!explicitContext && _dynCtxCache.fp === fp && _dynCtxCache.content && (nowTs - _dynCtxCache.ts) < 60000) {
@@ -607,7 +608,11 @@ var ChatModule = (function() {
       }
     }
     if (ais.webSearch) {
-      parts.push('【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。');
+      if (dynamicOptions.codexWebMode === 'native') {
+        parts.push('【搜索能力】可使用 Codex 原生网页工具查阅公开网页；不要输出旧的搜索标记，也不要假设已经完成搜索。');
+      } else {
+        parts.push('【搜索能力】需要最新信息时插入[[SEARCH:关键词]]，关键词1-5字。系统会搜索并二次调用你整合结果。');
+      }
     }
     if (chat && chat.lastInteractionTime) {
       parts.push('上次发消息：' + fFormatTimeSince(chat.lastInteractionTime) + '。');
@@ -772,7 +777,8 @@ var ChatModule = (function() {
     var dynamicSnapshot = Object.assign({}, chat._dynCtxSnapshot || {});
     var dynamicBlock = buildDynamicContextBlock(project, chat, {
       snapshot: dynamicSnapshot,
-      forceSnapshot: options.newSession === true
+      forceSnapshot: options.newSession === true,
+      codexWebMode: options.codexWebMode
     });
     var customPromptContext = options.customPromptContext || '';
     if (!customPromptContext && options.beginCustomPrompt !== false) {
@@ -892,6 +898,65 @@ var ChatModule = (function() {
   }
 
   var _toolCallPanelStore = {};
+
+  function codexReceiptSafeUrl(value) {
+    if (typeof value !== 'string' || /[\s\u0000-\u001f\u007f\\]/.test(value) || !/^https?:\/\/[^/?#]+(?:[/?#]|$)/i.test(value)) return false;
+    try {
+      var parsed = new URL(value);
+      var host = String(parsed.hostname || '').toLowerCase();
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !parsed.username && !parsed.password && !parsed.port &&
+        !parsed.search && !parsed.hash && !/^\d+(?:\.\d+){3}$/.test(host) && host.indexOf(':') < 0 && host.indexOf('.') >= 0 &&
+        host.charAt(host.length - 1) !== '.' && !/(^|\.)(localhost|local|internal|invalid|test)$/.test(host) && /^[a-z0-9.-]+$/.test(host);
+    } catch (_) { return false; }
+  }
+
+  function codexReceiptLink(url, label) {
+    var text = AppCore.escapeHtml(label || url || '未知来源');
+    if (!codexReceiptSafeUrl(url)) return '<span class="codex-receipt-source-text">' + text + '</span>';
+    return '<a class="codex-receipt-source-link" href="' + AppCore.escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+  }
+
+  function codexReceiptActivityLabel(activity) {
+    if (activity.phase === 'started') {
+      return activity.action === 'search' ? '正在搜索' : activity.action === 'open_page' ? '正在打开网页' : '正在查阅';
+    }
+    if (activity.phase === 'interrupted') return activity.reason === 'cancelled' ? '已取消查阅' : '查阅中断';
+    if (activity.action === 'search') return '搜索动作已结束';
+    if (activity.action === 'open_page') return '打开网页动作已结束';
+    return '查阅动作已结束';
+  }
+
+  function renderCodexReceiptPanel(receipts) {
+    if (!receipts || !Array.isArray(receipts.activities) || receipts.activities.length === 0) return '';
+    var activities = receipts.activities.slice(0, 64);
+    var html = '<details class="codex-receipt-panel"><summary class="codex-receipt-header">查阅记录 <span class="codex-receipt-count">(' + activities.length + ')</span></summary><div class="codex-receipt-items">';
+    if (receipts.omitted) {
+      var omittedSources = Number.isInteger(receipts.omittedSources) ? receipts.omittedSources : 0;
+      html += '<div class="codex-receipt-note">' + (omittedSources > 0 ? '部分来源已省略（' + omittedSources + ' 条）' : '部分回执详情已省略') + '</div>';
+    }
+    activities.forEach(function(activity) {
+      if (!activity || typeof activity !== 'object') return;
+      var label = codexReceiptActivityLabel(activity);
+      html += '<div class="codex-receipt-item"><div class="codex-receipt-item-label">' + AppCore.escapeHtml(label) + '</div>';
+      if (activity.phase === 'completed' && activity.sources === 'none') html += '<div class="codex-receipt-note">无可用来源</div>';
+      else if (activity.phase === 'completed' && activity.sources === 'unknown') html += '<div class="codex-receipt-note">来源暂不可用</div>';
+      var targetUrl = activity.targetRedacted === false && activity.targetUrl === activity.targetDisplayUrl ? activity.targetUrl : null;
+      if (activity.action === 'open_page' && activity.targetDisplayUrl) {
+        html += '<div class="codex-receipt-source">' + codexReceiptLink(targetUrl, activity.targetDisplayUrl) + '</div>';
+      }
+      var cards = Array.isArray(activity.sourceCards) ? activity.sourceCards.slice(0, 8) : [];
+      cards.forEach(function(source) {
+        if (!source || typeof source !== 'object') return;
+        var sourceUrl = source.redacted === false && source.url === source.displayUrl ? source.url : null;
+        var sourceLabel = source.title || source.displayUrl || '未知来源';
+        html += '<div class="codex-receipt-source">' + codexReceiptLink(sourceUrl, sourceLabel);
+        if (source.displayUrl && source.title) html += '<span class="codex-receipt-display-url">' + AppCore.escapeHtml(source.displayUrl) + '</span>';
+        html += '</div>';
+      });
+      html += '</div>';
+    });
+    return html + '</div></details>';
+  }
 
   function toggleToolCallPanel(panelId) {
     var items = AppCore.$('tcItems_' + panelId);
@@ -1043,6 +1108,7 @@ var ChatModule = (function() {
                ' ontouchmove="bubbleTouchMove(event)">' +
             (m.replyTo ? renderReplyBlock(m.replyTo) : '') + displayText + codexStatusHtml +
           '</div>' +
+          (isUser ? renderCodexReceiptPanel(m._codexReceipts) : '') +
           '<div class="bubble-time-row">' +
           (isUser ?
           '<span class="outer-star-icon ' + starOnceCls + ' ' + starSelectedCls + '"' +

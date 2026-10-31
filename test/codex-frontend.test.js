@@ -83,6 +83,24 @@ test('reload marks only this device running Codex turns unknown and preserves te
   assert.equal(saves, 1);
 });
 
+test('reload interrupts persisted running receipts and schedules their unknown terminal state', () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const running = {
+    id: 'reload-receipt', role: 'user', _codexRuntime: 'codex-gateway', _codexLocalDevice: true,
+    _codexTurnStatus: 'running', _codexVersion: 4, _codexReceipts: { activities: [{
+      requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown', sourceCards: []
+    }] }
+  };
+  const store = { projects: [{ id: 'codex-code-test', chats: [{ id: 'reload-chat', messages: [running] }] }] };
+  const syncCalls = [];
+  const codex = loadCodex({ store, getModule: name => name === 'sync' ? { scheduleCodexMessageSync: (...args) => syncCalls.push(args) } : null });
+  codex.markReloadedTurnsUnknown();
+  assert.equal(running._codexTurnStatus, 'unknown');
+  assert.equal(running._codexReceipts.activities[0].phase, 'interrupted');
+  assert.equal(running._codexReceipts.activities[0].reason, 'turn_ended');
+  assert.deepEqual(syncCalls, [['codex-code-test', 'reload-chat']]);
+});
+
 function responseFromChunks(chunks, headers = { 'content-type': 'text/event-stream' }) {
   const encoded = chunks.map(chunk => chunk instanceof Uint8Array ? chunk : new TextEncoder().encode(chunk));
   let index = 0;
@@ -149,6 +167,414 @@ test('Codex frontend parses fragmented named SSE, heartbeats, Unicode, and redac
     { type: 'error', payload: { code: 'BUSY' } }
   ]);
   assert.doesNotMatch(JSON.stringify(events), /private|hidden/);
+});
+
+test('Codex frontend decodes bounded native activity/source receipts and keeps display-only URLs unclickable', async () => {
+  const codex = loadCodex();
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const activityId = 'wa_1';
+  const sourceId = 'ws_' + 'a'.repeat(64);
+  const events = [];
+  const stream = [
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown', threadId: 'private' })}\n\n`,
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown', sources: 'none' })}\n\n`,
+    `event: source\ndata: ${JSON.stringify({ requestId, activityId, sourceId, displayUrl: 'https://example.org/article', redacted: true, title: '<img>', refId: 'ref_1', url: 'https://example.org/article?secret=1' })}\n\n`,
+    'event: completion\ndata: {"status":"completed"}\n\n'
+  ].join('');
+  await assert.rejects(
+    () => codex.consumeSse(responseFromChunks([stream]), { webMode: 'native', onEvent: event => events.push(event) }),
+    error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE'
+  );
+
+  const validStream = stream.replace(',"url":"https://example.org/article?secret=1"', '');
+  const validEvents = [];
+  const result = await codex.consumeSse(responseFromChunks([validStream]), {
+    webMode: 'native', onEvent: event => validEvents.push(event)
+  });
+  assert.equal(result.completed, true);
+  assert.deepEqual(validEvents.map(event => event.type), ['activity', 'activity', 'source', 'completion']);
+  assert.equal(JSON.stringify(validEvents[2].payload), JSON.stringify({
+    requestId, activityId, sourceId, displayUrl: 'https://example.org/article', redacted: true, title: '<img>', refId: 'ref_1'
+  }));
+});
+
+test('Codex frontend native mode never falls back to legacy search integration', async () => {
+  const sid = 'gs_' + '1'.repeat(64);
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'native-search',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [
+      { id: 'native-search', aiSettings: { webSearch: true }, messages: [{ id: 'native-user', role: 'user', text: '查资料' }] }
+    ] }]
+  };
+  const calls = [];
+  const configCalls = [];
+  const codex = loadCodex({
+    store,
+    chatModule: { buildCodexPromptContext: options => { calls.push(options); return { prompt: 'native prompt' }; }, commitCodexResponse: async () => {} },
+    fetchImpl: async (url, init) => {
+      if (url.endsWith('/api/codex/config')) {
+        configCalls.push(init);
+        return { ok: true, json: async () => ({ webMode: 'native' }) };
+      }
+      if (url.endsWith('/api/search')) throw new Error('legacy search must not run');
+      return responseFromChunks([
+        `event: session\ndata: {"sessionId":"${sid}"}\n\n`,
+        'event: message\ndata: {"text":"回答 [[SEARCH:不应调用旧搜索]]"}\n\n',
+        'event: completion\ndata: {"status":"completed"}\n\n'
+      ]);
+    }
+  });
+  const result = await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'native-search', userMessageIds: ['native-user'], userText: '查资料'
+  });
+  assert.equal(result.completed, true);
+  assert.equal(configCalls.length, 1);
+  assert.equal(calls[0].codexWebMode, 'native');
+});
+
+test('Codex frontend rereads no-store web config for every turn and fixes each turn mode', async () => {
+  const sid = 'gs_' + '4'.repeat(64);
+  const configModes = ['legacy', 'native', 'legacy'];
+  const configRequests = [];
+  const gatewayRequests = [];
+  const contextModes = [];
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'mode-switch',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{
+      id: 'mode-switch', aiSettings: { webSearch: true }, messages: [
+        { id: 'legacy-user', role: 'user', text: 'legacy' },
+        { id: 'native-user', role: 'user', text: 'native' },
+        { id: 'legacy-user-again', role: 'user', text: 'legacy again' }
+      ]
+    }] }]
+  };
+  const codex = loadCodex({
+    store,
+    chatModule: {
+      buildCodexPromptContext: options => {
+        contextModes.push(options.codexWebMode);
+        return { prompt: options.codexWebMode + ' prompt' };
+      },
+      commitCodexResponse: async () => {}
+    },
+    fetchImpl: async (url, init) => {
+      if (url.endsWith('/api/codex/config')) {
+        configRequests.push(init);
+        return { ok: true, json: async () => ({ webMode: configModes.shift() }) };
+      }
+      gatewayRequests.push(JSON.parse(init.body));
+      return responseFromChunks([
+        'event: session\ndata: {"sessionId":"' + sid + '"}\n\n',
+        'event: message\ndata: {"text":"回答"}\n\n',
+        'event: completion\ndata: {"status":"completed"}\n\n'
+      ]);
+    }
+  });
+
+  await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'mode-switch',
+    userMessageIds: ['legacy-user'], userText: 'legacy'
+  });
+  await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'mode-switch',
+    userMessageIds: ['native-user'], userText: 'native'
+  });
+  await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'mode-switch',
+    userMessageIds: ['legacy-user-again'], userText: 'legacy again'
+  });
+
+  assert.equal(configRequests.length, 3);
+  for (const request of configRequests) {
+    assert.equal(request.cache, 'no-store');
+    assert.equal(request.headers['Cache-Control'], 'no-store');
+  }
+  assert.deepEqual(contextModes, ['legacy', 'native', 'legacy']);
+  assert.equal(gatewayRequests.length, 3);
+});
+
+test('Codex frontend stops before Gateway when web config is missing, invalid, malformed, unavailable, or non-success', async () => {
+  const cases = [
+    { name: 'missing', response: { ok: true, json: async () => ({}) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
+    { name: 'invalid', response: { ok: true, json: async () => ({ webMode: 'bogus' }) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
+    { name: 'toString', response: { ok: true, json: async () => ({ webMode: 'toString' }) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
+    { name: 'constructor', response: { ok: true, json: async () => ({ webMode: 'constructor' }) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
+    { name: 'proto', response: { ok: true, json: async () => ({ webMode: '__proto__' }) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
+    { name: 'malformed', response: { ok: true, json: async () => { throw new Error('bad json'); } }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
+    { name: 'unavailable', response: { ok: false, status: 503, json: async () => ({}) }, code: 'CODEX_GATEWAY_UNAVAILABLE' },
+    { name: 'network', error: new Error('offline'), code: 'CODEX_GATEWAY_UNAVAILABLE' }
+  ];
+  for (const item of cases) {
+    const user = { id: 'config-' + item.name, role: 'user', text: '配置检查' };
+    const store = {
+      activeProject: 'codex-code-test', activeChat: 'config-' + item.name,
+      projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{
+        id: 'config-' + item.name, messages: [user]
+      }] }]
+    };
+    let gatewayCalls = 0;
+    const toasts = [];
+    const codex = loadCodex({
+      store,
+      toast: message => toasts.push(message),
+      chatModule: { buildCodexPromptContext: () => ({ prompt: 'must not build' }), commitCodexResponse: async () => {} },
+      fetchImpl: async url => {
+        if (url.endsWith('/api/codex/config')) {
+          if (item.error) throw item.error;
+          return item.response;
+        }
+        gatewayCalls++;
+        return responseFromChunks([]);
+      }
+    });
+    await assert.rejects(
+      () => codex.sendChatTurn({
+        projectId: 'codex-code-test', chatId: 'config-' + item.name,
+        userMessageIds: [user.id], userText: '配置检查'
+      }),
+      error => error.code === item.code
+    );
+    assert.equal(gatewayCalls, 0, item.name);
+    assert.equal(user._codexTurnStatus, 'failed', item.name);
+    assert.equal(toasts.length, 1, item.name);
+  }
+});
+
+test('Codex sendChatTurn preserves a small open_page target without a synthetic omission', async () => {
+  const sid = 'gs_' + 'a'.repeat(64);
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const activityId = 'wa_1';
+  const targetUrl = 'https://example.org/guide';
+  const user = { id: 'open-page-user', role: 'user', text: '打开资料' };
+  const store = { activeProject: 'codex-code-test', activeChat: 'open-page-chat', projects: [{
+    id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'open-page-chat', aiSettings: { webSearch: true }, messages: [user] }]
+  }] };
+  const codex = loadCodex({
+    store,
+    chatModule: { buildCodexPromptContext: () => ({ prompt: 'native prompt' }), commitCodexResponse: async () => {} },
+    fetchImpl: async url => url.endsWith('/api/codex/config')
+      ? { ok: true, json: async () => ({ webMode: 'native' }) }
+      : responseFromChunks([
+        `event: session\ndata: {"sessionId":"${sid}"}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'started', action: 'open_page', outcome: 'unknown', targetSourceId: 'ws_' + 'b'.repeat(64), targetDisplayUrl: targetUrl, targetRedacted: false, targetUrl })}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'completed', action: 'open_page', outcome: 'unknown', targetSourceId: 'ws_' + 'b'.repeat(64), targetDisplayUrl: targetUrl, targetRedacted: false, targetUrl, sources: 'available' })}\n\n`,
+        'event: completion\ndata: {"status":"completed"}\n\n'
+      ])
+  });
+
+  const result = await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'open-page-chat', userMessageIds: [user.id], userText: user.text
+  });
+
+  assert.equal(result.completed, true);
+  const receipts = user._codexReceipts;
+  assert.equal(receipts.omitted, undefined);
+  assert.equal(receipts.omittedSources, undefined);
+  assert.equal(receipts.activities[0].targetUrl, targetUrl);
+  assert.equal(receipts.activities[0].targetDisplayUrl, targetUrl);
+});
+
+test('Codex sendChatTurn preserves existing omission metadata when a later receipt remains under budget', async () => {
+  const sid = 'gs_' + 'd'.repeat(64);
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const user = {
+    id: 'existing-omission-user', role: 'user', text: '继续查阅',
+    _codexReceipts: { activities: [], omitted: true, omittedSources: 5 }
+  };
+  const store = { activeProject: 'codex-code-test', activeChat: 'existing-omission-chat', projects: [{
+    id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'existing-omission-chat', aiSettings: { webSearch: true }, messages: [user] }]
+  }] };
+  const codex = loadCodex({
+    store,
+    chatModule: { buildCodexPromptContext: () => ({ prompt: 'native prompt' }), commitCodexResponse: async () => {} },
+    fetchImpl: async url => url.endsWith('/api/codex/config')
+      ? { ok: true, json: async () => ({ webMode: 'native' }) }
+      : responseFromChunks([
+        `event: session\ndata: {"sessionId":"${sid}"}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'search', outcome: 'unknown' })}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown', sources: 'none' })}\n\n`,
+        'event: completion\ndata: {"status":"completed"}\n\n'
+      ])
+  });
+
+  await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'existing-omission-chat', userMessageIds: [user.id], userText: user.text
+  });
+
+  assert.equal(user._codexReceipts.omitted, true);
+  assert.equal(user._codexReceipts.omittedSources, 5);
+});
+
+test('Codex sendChatTurn compacts oversized real-shaped receipts while retaining all terminal activities', async () => {
+  const sid = 'gs_' + 'c'.repeat(64);
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const user = { id: 'oversized-user', role: 'user', text: '查阅大量资料' };
+  const store = { activeProject: 'codex-code-test', activeChat: 'oversized-chat', projects: [{
+    id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'oversized-chat', aiSettings: { webSearch: true }, messages: [user] }]
+  }] };
+  const events = [`event: session\ndata: {"sessionId":"${sid}"}\n\n`];
+  for (let activityIndex = 1; activityIndex <= 64; activityIndex += 1) {
+    const activityId = `wa_${activityIndex}`;
+    events.push(`event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'started', action: 'search', outcome: 'unknown' })}\n\n`);
+    events.push(`event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown', sources: 'available' })}\n\n`);
+    for (let sourceIndex = 0; sourceIndex < 8; sourceIndex += 1) {
+      const sourceId = 'ws_' + (activityIndex * 8 + sourceIndex).toString(16).padStart(64, '0');
+      const url = `https://example.org/article-${activityIndex}-${sourceIndex}`;
+      events.push(`event: source\ndata: ${JSON.stringify({ requestId, activityId, sourceId, displayUrl: url, url, redacted: false, title: 'T'.repeat(256), refId: `ref_${activityIndex}_${sourceIndex}` })}\n\n`);
+    }
+  }
+  events.push('event: completion\ndata: {"status":"completed"}\n\n');
+  const codex = loadCodex({
+    store,
+    chatModule: { buildCodexPromptContext: () => ({ prompt: 'native prompt' }), commitCodexResponse: async () => {} },
+    fetchImpl: async url => url.endsWith('/api/codex/config')
+      ? { ok: true, json: async () => ({ webMode: 'native' }) }
+      : responseFromChunks([events.join('')])
+  });
+
+  const result = await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'oversized-chat', userMessageIds: [user.id], userText: user.text
+  });
+
+  assert.equal(result.completed, true);
+  const receipts = user._codexReceipts;
+  assert.ok(new TextEncoder().encode(JSON.stringify(receipts)).byteLength <= 64 * 1024);
+  assert.equal(receipts.omitted, true);
+  assert.ok(receipts.omittedSources > 0);
+  assert.equal(receipts.activities.length, 64);
+  assert.equal(receipts.activities[0].activityId, 'wa_1');
+  assert.equal(receipts.activities[63].activityId, 'wa_64');
+  assert.ok(receipts.activities.every(activity => activity.phase === 'completed'));
+});
+
+test('Codex config JSON cancellation becomes canceled without sending Gateway or committing side effects', async () => {
+  const caller = new AbortController();
+  const user = { id: 'config-abort-user', role: 'user', text: '配置取消' };
+  const store = { activeProject: 'codex-code-test', activeChat: 'config-abort-chat', projects: [{
+    id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'config-abort-chat', messages: [user] }]
+  }] };
+  let jsonStarted = false;
+  let gatewayCalls = 0;
+  let commits = 0;
+  const syncCalls = [];
+  const codex = loadCodex({
+    store,
+    getModule: name => name === 'sync' ? { scheduleCodexMessageSync: (...args) => syncCalls.push(args) } : null,
+    chatModule: { buildCodexPromptContext: () => ({ prompt: 'must not build' }), commitCodexResponse: async () => { commits += 1; } },
+    fetchImpl: async (url, init) => {
+      if (url.endsWith('/api/codex/config')) {
+        return {
+          ok: true,
+          json: () => {
+            jsonStarted = true;
+            return new Promise((resolve, reject) => {
+              init.signal.addEventListener('abort', () => reject(new Error('config body aborted')), { once: true });
+            });
+          }
+        };
+      }
+      gatewayCalls += 1;
+      return responseFromChunks([]);
+    }
+  });
+
+  const turn = codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'config-abort-chat', userMessageIds: [user.id], userText: user.text,
+    signal: caller.signal
+  });
+  while (!jsonStarted) await new Promise(resolve => setTimeout(resolve, 0));
+  caller.abort();
+
+  await assert.rejects(() => turn, error => error.code === 'CODEX_GATEWAY_ABORTED');
+  assert.equal(user._codexTurnStatus, 'canceled');
+  assert.equal(gatewayCalls, 0);
+  assert.equal(commits, 0);
+  assert.ok(syncCalls.length > 0);
+});
+
+test('Codex frontend records activity/source receipts on the user message and keeps late sources associated', async () => {
+  const sid = 'gs_' + '2'.repeat(64);
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const activityId = 'wa_1';
+  const sourceId = 'ws_' + 'c'.repeat(64);
+  const syncCalls = [];
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'receipt-chat',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [
+      { id: 'receipt-chat', aiSettings: { webSearch: true }, messages: [{ id: 'receipt-user', role: 'user', text: '查资料' }] }
+    ] }]
+  };
+  const codex = loadCodex({
+    store,
+    chatModule: {
+      buildCodexPromptContext: () => ({ prompt: 'native prompt' }),
+      commitCodexResponse: async () => {}
+    },
+    getModule: name => name === 'sync' ? { scheduleCodexMessageSync: (...args) => syncCalls.push(args) } : null,
+    fetchImpl: async (url) => {
+      if (url.endsWith('/api/codex/config')) return { ok: true, json: async () => ({ webMode: 'native' }) };
+      return responseFromChunks([
+        `event: session\ndata: {"sessionId":"${sid}"}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' })}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown', sources: 'available' })}\n\n`,
+        `event: source\ndata: ${JSON.stringify({ requestId, activityId, sourceId, displayUrl: 'https://example.org/a', redacted: true, title: '<b>来源</b>', refId: 'ref_1' })}\n\n`,
+        'event: completion\ndata: {"status":"completed"}\n\n'
+      ]);
+    }
+  });
+
+  const result = await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'receipt-chat', userMessageIds: ['receipt-user'], userText: '查资料'
+  });
+  assert.equal(result.completed, true);
+  const receipts = store.projects[0].chats[0].messages[0]._codexReceipts;
+  assert.equal(receipts.activities.length, 1);
+  assert.equal(receipts.activities[0].phase, 'completed');
+  assert.equal(receipts.activities[0].sourceCards[0].sourceId, sourceId);
+  assert.equal(receipts.activities[0].sourceCards[0].redacted, true);
+  assert.ok(syncCalls.length > 0);
+});
+
+test('Codex zero-message failures and unknown EOFs sync terminal state and settle running receipts', async () => {
+  async function runCase(streamChunks) {
+    const sid = 'gs_' + Math.random().toString(16).slice(2).padEnd(64, '0').slice(0, 64);
+    const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+    const activityId = 'wa_1';
+    const syncCalls = [];
+    const user = { id: 'user-terminal', role: 'user', text: '查资料' };
+    const store = { activeProject: 'codex-code-test', activeChat: 'terminal-chat', projects: [{
+      id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'terminal-chat', aiSettings: { webSearch: true }, messages: [user] }]
+    }] };
+    const codex = loadCodex({
+      store,
+      chatModule: { buildCodexPromptContext: () => ({ prompt: 'native prompt' }), commitCodexResponse: async () => {} },
+      getModule: name => name === 'sync' ? { scheduleCodexMessageSync: (...args) => syncCalls.push(args) } : null,
+      fetchImpl: async url => url.endsWith('/api/codex/config')
+        ? { ok: true, json: async () => ({ webMode: 'native' }) }
+        : responseFromChunks(streamChunks(sid, requestId, activityId))
+    });
+    return { codex, store, user, syncCalls };
+  }
+
+  const failed = await runCase(sid => [
+    `event: session\ndata: {"sessionId":"${sid}"}\n\n`,
+    'event: error\ndata: {"code":"CODEX_GATEWAY_FAILED"}\n\n'
+  ]);
+  await assert.rejects(() => failed.codex.sendChatTurn({ projectId: 'codex-code-test', chatId: 'terminal-chat', userMessageIds: ['user-terminal'], userText: '查资料' }));
+  assert.equal(failed.user._codexTurnStatus, 'failed');
+  assert.ok(failed.syncCalls.length > 0);
+
+  const unknown = await runCase((_sid, requestId, activityId) => [
+    'event: session\ndata: {"sessionId":"gs_' + '3'.repeat(64) + '"}\n\n',
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId, tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' })}\n\n`
+  ]);
+  let unknownError;
+  await assert.rejects(() => unknown.codex.sendChatTurn({ projectId: 'codex-code-test', chatId: 'terminal-chat', userMessageIds: ['user-terminal'], userText: '查资料' }), error => { unknownError = error; return true; });
+  assert.equal(unknownError.code, 'CODEX_GATEWAY_INCOMPLETE');
+  assert.equal(unknown.user._codexTurnStatus, 'unknown');
+  assert.equal(unknown.user._codexReceipts.activities[0].phase, 'interrupted');
+  assert.equal(unknown.user._codexReceipts.activities[0].reason, 'turn_ended');
+  assert.ok(unknown.syncCalls.length > 0);
 });
 
 test('Codex frontend requires a complete completion event and never dispatches an incomplete EOF event', async () => {
@@ -281,23 +707,26 @@ test('invalidating a Codex turn prevents late completion and releases its contro
       buildCodexPromptContext: () => ({ prompt: 'prompt' }),
       commitCodexResponse: async () => { commits++; }
     },
-    fetchImpl: async (_url, init) => ({
-      ok: true, status: 200,
-      headers: { get: name => name.toLowerCase() === 'content-type' ? 'text/event-stream' : null },
-      body: {
-        getReader() {
-          return {
-            read() {
-              return new Promise((_resolve, reject) => {
-                releaseRead = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-                init.signal.addEventListener('abort', releaseRead, { once: true });
-              });
-            },
-            async cancel() {}, releaseLock() {}
-          };
+    fetchImpl: async (_url, init) => {
+      if (_url.endsWith('/api/codex/config')) return { ok: true, json: async () => ({ webMode: 'legacy' }) };
+      return {
+        ok: true, status: 200,
+        headers: { get: name => name.toLowerCase() === 'content-type' ? 'text/event-stream' : null },
+        body: {
+          getReader() {
+            return {
+              read() {
+                return new Promise((_resolve, reject) => {
+                  releaseRead = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                  init.signal.addEventListener('abort', releaseRead, { once: true });
+                });
+              },
+              async cancel() {}, releaseLock() {}
+            };
+          }
         }
-      }
-    })
+      };
+    }
   });
   const turn = codex.sendChatTurn({ projectId: 'codex-code-test', chatId: 'chat-invalidate', userMessageIds: ['u-invalidate'], userText: '开始' });
   while (!releaseRead) await new Promise(resolve => setTimeout(resolve, 0));
@@ -329,26 +758,29 @@ test('a Codex turn holds the page lock across chats without canceling the origin
       buildCodexPromptContext: () => ({ prompt: 'prompt' }),
       commitCodexResponse: async () => {}
     },
-    fetchImpl: async (_url, init) => ({
-      ok: true,
-      status: 200,
-      headers: { get: name => name.toLowerCase() === 'content-type' ? 'text/event-stream' : null },
-      body: {
-        getReader() {
-          return {
-            read() {
-              return new Promise((_resolve, reject) => {
-                const abort = () => reject(Object.assign(new Error('read aborted'), { name: 'AbortError' }));
-                openedReads.push({ signal: init.signal, abort });
-                init.signal.addEventListener('abort', abort, { once: true });
-              });
-            },
-            async cancel() {},
-            releaseLock() {}
-          };
+    fetchImpl: async (_url, init) => {
+      if (_url.endsWith('/api/codex/config')) return { ok: true, json: async () => ({ webMode: 'legacy' }) };
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: name => name.toLowerCase() === 'content-type' ? 'text/event-stream' : null },
+        body: {
+          getReader() {
+            return {
+              read() {
+                return new Promise((_resolve, reject) => {
+                  const abort = () => reject(Object.assign(new Error('read aborted'), { name: 'AbortError' }));
+                  openedReads.push({ signal: init.signal, abort });
+                  init.signal.addEventListener('abort', abort, { once: true });
+                });
+              },
+              async cancel() {},
+              releaseLock() {}
+            };
+          }
         }
-      }
-    })
+      };
+    }
   });
   const abortA = new AbortController();
   const abortB = new AbortController();
@@ -425,6 +857,7 @@ test('Codex search turns commit only final integration messages', async () => {
   const codex = loadCodex({
     store, storage, chatModule,
     fetchImpl: async url => {
+      if (url.endsWith('/api/codex/config')) return { ok: true, json: async () => ({ webMode: 'legacy' }) };
       if (url.endsWith('/api/search')) return { ok: true, json: async () => ({ results: '资料' }) };
       postCount++;
       return responseFromChunks(postCount === 1 ? [
@@ -464,6 +897,7 @@ test('stopping during Codex search aborts search and prevents integration POST',
     store,
     chatModule: { buildCodexPromptContext: () => ({ prompt: 'prompt' }), commitCodexResponse: async () => {} },
     fetchImpl: (url, init) => {
+      if (url.endsWith('/api/codex/config')) return Promise.resolve({ ok: true, json: async () => ({ webMode: 'legacy' }) });
       if (url.endsWith('/api/search')) {
         searchSignal = init.signal;
         return new Promise((resolve, reject) => {
