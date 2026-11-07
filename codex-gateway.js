@@ -1,4 +1,4 @@
-const { isIP } = require('node:net');
+const CodexReceiptContract = require('./public/js/codex-receipt-contract');
 
 const DEFAULT_CODEX_GATEWAY_TIMEOUT_MS = 150000;
 const MAX_CODEX_GATEWAY_TIMEOUT_MS = 150000;
@@ -16,6 +16,7 @@ const MAX_CODEX_SSE_BUFFER_BYTES = MAX_CODEX_EVENT_BYTES + 64 * 1024;
 const MAX_CODEX_ERROR_BODY_BYTES = 64 * 1024;
 const CODEX_SESSION_ID_PATTERN = /^gs_[0-9a-f]{64}$/;
 const CODEX_GATEWAY_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const CODEX_RECEIPT_PROFILE = 'github-mcp-v1';
 const CODEX_WEB_MODES = new Set(['legacy', 'native']);
 const CODEX_EVENT_TYPES = new Set(['session', 'status', 'message', 'error', 'completion', 'activity', 'source']);
 const CODEX_REQUEST_ID_PATTERN = /^wr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -27,6 +28,27 @@ const CODEX_MAX_WEB_SOURCES_PER_ACTIVITY = 8;
 const CODEX_MAX_WEB_URL_BYTES = 2048;
 const CODEX_MAX_WEB_TITLE_BYTES = 256;
 const CODEX_UPSTREAM_ERROR_CODES = new Map([
+  ['TIMEOUT', 'CODEX_GATEWAY_TIMEOUT'],
+  ['CANCELLED', 'CODEX_GATEWAY_ABORTED'],
+  ['INVALID_EVENT', 'CODEX_GATEWAY_INVALID_RESPONSE'],
+  ['INVALID_JSONL', 'CODEX_GATEWAY_INVALID_RESPONSE'],
+  ['INCOMPLETE_JSONL', 'CODEX_GATEWAY_INVALID_RESPONSE'],
+  ['OUTPUT_LIMIT', 'CODEX_GATEWAY_INVALID_RESPONSE'],
+  ['THREAD_MISMATCH', 'CODEX_SESSION_MISMATCH'],
+  ['AGENT_FAILURE', 'CODEX_GATEWAY_FAILED'],
+  ['ABNORMAL_EXIT', 'CODEX_GATEWAY_FAILED'],
+  ['SPAWN_FAILURE', 'CODEX_GATEWAY_FAILED'],
+  ['NONZERO', 'CODEX_GATEWAY_FAILED'],
+  ['SIGNAL', 'CODEX_GATEWAY_FAILED'],
+  ['STDIN', 'CODEX_GATEWAY_FAILED'],
+  ['CLEANUP_UNCONFIRMED', 'CODEX_GATEWAY_UNAVAILABLE'],
+  ['SSE_BACKPRESSURE', 'CODEX_GATEWAY_UNAVAILABLE'],
+  ['INVALID_RUNTIME_CONFIGURATION', 'CODEX_GATEWAY_NOT_CONFIGURED'],
+  ['INVALID_INPUT', 'CODEX_INVALID_REQUEST'],
+  ['INVALID_SESSION', 'CODEX_INVALID_SESSION'],
+  ['SESSION_CAPACITY', 'BUSY'],
+  ['CODEX_RECEIPT_PROFILE_REQUIRED', 'CODEX_RECEIPT_PROFILE_REQUIRED'],
+  ['CODEX_RECEIPT_PROFILE_UNSUPPORTED', 'CODEX_RECEIPT_PROFILE_UNSUPPORTED'],
   ['BUSY', 'BUSY'],
   ['UNKNOWN_SESSION', 'UNKNOWN_SESSION'],
   ['SESSION_ACTIVE', 'SESSION_ACTIVE'],
@@ -50,6 +72,8 @@ const CODEX_ERROR_MESSAGES = Object.freeze({
   CODEX_INVALID_SESSION: 'Invalid Codex session',
   CODEX_SESSION_MISMATCH: 'Codex session mismatch',
   CODEX_MISSING_SESSION: 'Codex did not return a session id',
+  CODEX_RECEIPT_PROFILE_REQUIRED: 'Codex receipt profile is required',
+  CODEX_RECEIPT_PROFILE_UNSUPPORTED: 'Codex receipt profile is unsupported',
   BUSY: 'Codex Gateway is busy',
   UNKNOWN_SESSION: 'Codex session is unknown',
   SESSION_ACTIVE: 'Codex session is active'
@@ -128,32 +152,50 @@ function validateCodexPrompt(prompt) {
   return prompt;
 }
 
-function validateCodexRequest(prompt, sessionId) {
+function validateCodexReceiptProfile(value) {
+  if (value === undefined) return undefined;
+  if (value !== CODEX_RECEIPT_PROFILE) {
+    throw createCodexError('CODEX_INVALID_REQUEST', 400);
+  }
+  return value;
+}
+
+function validateCodexRequest(prompt, sessionId, receiptProfile) {
   const normalizedPrompt = validateCodexPrompt(prompt);
   let normalizedSessionId;
   if (sessionId !== undefined) normalizedSessionId = assertSessionId(sessionId);
-  return { prompt: normalizedPrompt, sessionId: normalizedSessionId };
+  const normalizedReceiptProfile = validateCodexReceiptProfile(receiptProfile);
+  const request = { prompt: normalizedPrompt, sessionId: normalizedSessionId };
+  if (normalizedReceiptProfile !== undefined) request.receiptProfile = normalizedReceiptProfile;
+  return request;
 }
 
-function serializeCodexRequest(prompt, sessionId) {
-  const request = validateCodexRequest(prompt, sessionId);
-  const body = JSON.stringify(request.sessionId === undefined
-    ? { prompt: request.prompt }
-    : { prompt: request.prompt, sessionId: request.sessionId });
-  if (Buffer.byteLength(body, 'utf8') > MAX_CODEX_BODY_BYTES) {
+function serializeCodexRequest(prompt, sessionId, receiptProfile) {
+  const request = validateCodexRequest(prompt, sessionId, receiptProfile);
+  const body = {
+    prompt: request.prompt
+  };
+  if (request.sessionId !== undefined) body.sessionId = request.sessionId;
+  if (request.receiptProfile !== undefined) body.receiptProfile = request.receiptProfile;
+  const serialized = JSON.stringify(body);
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_CODEX_BODY_BYTES) {
     throw createCodexError('CODEX_GATEWAY_REJECTED', 413);
   }
-  return body;
+  return serialized;
 }
 
 function normalizeUpstreamCode(value) {
-  return CODEX_UPSTREAM_ERROR_CODES.get(String(value || '')) || null;
+  return typeof value === 'string' ? CODEX_UPSTREAM_ERROR_CODES.get(value) || null : null;
 }
 
 function statusForCode(code) {
+  if (code === 'CODEX_RECEIPT_PROFILE_REQUIRED') return 428;
+  if (code === 'CODEX_RECEIPT_PROFILE_UNSUPPORTED') return 400;
   if (code === 'BUSY') return 409;
   if (code === 'UNKNOWN_SESSION') return 404;
   if (code === 'SESSION_ACTIVE') return 409;
+  if (code === 'CODEX_INVALID_REQUEST' || code === 'CODEX_INVALID_SESSION') return 400;
+  if (code === 'CODEX_PROMPT_TOO_LARGE') return 413;
   if (code === 'UNAUTHORIZED' || code === 'FORBIDDEN') return 502;
   return 502;
 }
@@ -240,113 +282,95 @@ function invalidCodexReceipt() {
   throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
 }
 
-function boundedCodexText(value, maxBytes) {
-  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= maxBytes;
-}
-
-function isPublicCodexUrl(value) {
-  if (!boundedCodexText(value, CODEX_MAX_WEB_URL_BYTES) || /[\s\u0000-\u001f\u007f\\]/u.test(value)) return false;
-  if (!/^https?:\/\/[^/?#]+(?:[/?#]|$)/i.test(value)) return false;
-  try {
-    const url = new URL(value);
-    const host = url.hostname.toLowerCase();
-    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.port &&
-      !url.search && !url.hash && !isIP(host) && !host.includes(':') && host.includes('.') &&
-      !host.endsWith('.') && !/(?:^|\.)(?:localhost|local|internal|invalid|test)$/.test(host) &&
-      /^[a-z0-9.-]+$/.test(host);
-  } catch {
-    return false;
-  }
-}
-
 function receiptRequestId(payload, state) {
-  if (!payload || !CODEX_REQUEST_ID_PATTERN.test(payload.requestId || '')) invalidCodexReceipt();
+  if (!payload || typeof payload.requestId !== 'string' || !CODEX_REQUEST_ID_PATTERN.test(payload.requestId)) invalidCodexReceipt();
   if (state.requestId && state.requestId !== payload.requestId) invalidCodexReceipt();
   state.requestId ||= payload.requestId;
   return payload.requestId;
 }
 
-function normalizeCodexTarget(payload, action) {
-  const targetKeys = ['targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl'];
-  if (targetKeys.some(key => Object.hasOwn(payload, key)) && action !== 'open_page') invalidCodexReceipt();
-  if (action !== 'open_page') return {};
-  const present = targetKeys.some(key => Object.hasOwn(payload, key));
-  if (!present) return {};
-  if (!CODEX_SOURCE_ID_PATTERN.test(payload.targetSourceId || '') ||
-      !isPublicCodexUrl(payload.targetDisplayUrl) || typeof payload.targetRedacted !== 'boolean') {
-    invalidCodexReceipt();
-  }
-  if (payload.targetRedacted) {
-    if (Object.hasOwn(payload, 'targetUrl')) invalidCodexReceipt();
-  } else if (!isPublicCodexUrl(payload.targetUrl) || payload.targetUrl !== payload.targetDisplayUrl) {
-    invalidCodexReceipt();
-  }
-  return {
-    targetSourceId: payload.targetSourceId,
-    targetDisplayUrl: payload.targetDisplayUrl,
-    targetRedacted: payload.targetRedacted,
-    ...(payload.targetRedacted ? {} : { targetUrl: payload.targetUrl })
-  };
+const CODEX_RECEIPT_ACTIVITY_FIELDS = [
+  'requestId', 'activityId', 'tool', 'phase', 'action', 'outcome', 'sources', 'reason',
+  'targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl', 'context'
+];
+const CODEX_RECEIPT_SOURCE_FIELDS = [
+  'requestId', 'activityId', 'sourceId', 'displayUrl', 'redacted', 'url', 'title', 'refId',
+  'context', 'linkKind'
+];
+
+function receiptContractOptions(receiptProfile) {
+  if (receiptProfile === undefined) return undefined;
+  if (receiptProfile !== CODEX_RECEIPT_PROFILE) invalidCodexReceipt();
+  return { profile: receiptProfile };
 }
 
-function normalizeCodexActivity(payload, state) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
-      payload.tool !== 'web_search' || !['started', 'completed', 'interrupted'].includes(payload.phase) ||
-      !['unknown', 'search', 'open_page'].includes(payload.action) || payload.outcome !== 'unknown' ||
-      !CODEX_ACTIVITY_ID_PATTERN.test(payload.activityId || '')) invalidCodexReceipt();
+function receiptWhitelist(payload, fields) {
+  const result = {};
+  fields.forEach(field => {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) result[field] = payload[field];
+  });
+  return result;
+}
+
+function normalizeCodexActivity(payload, state, receiptProfile, webMode) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) invalidCodexReceipt();
   const requestId = receiptRequestId(payload, state);
   const activityId = payload.activityId;
   const existing = state.activities.get(activityId);
   if (payload.phase === 'started') {
-    if (existing || state.activities.size >= CODEX_MAX_WEB_ACTIVITIES) invalidCodexReceipt();
+    if (typeof activityId !== 'string' || existing || state.activities.size >= CodexReceiptContract.MAX_ACTIVITIES) invalidCodexReceipt();
   } else if (!existing || existing.terminal) {
     invalidCodexReceipt();
   }
 
-  const target = normalizeCodexTarget(payload, payload.action);
-  const normalized = {
-    requestId, activityId, tool: 'web_search', phase: payload.phase,
-    action: payload.action, outcome: 'unknown', ...target
-  };
-  if (payload.phase === 'completed') {
-    if (!['available', 'none', 'unknown'].includes(payload.sources)) invalidCodexReceipt();
-    normalized.sources = payload.sources;
-  }
-  if (payload.phase === 'interrupted') {
-    if (!['turn_ended', 'round_failed', 'cancelled'].includes(payload.reason)) invalidCodexReceipt();
-    normalized.reason = payload.reason;
-  }
-  state.activities.set(activityId, { phase: payload.phase, terminal: payload.phase !== 'started', sourceIds: existing?.sourceIds || new Set() });
-  return normalized;
-}
-
-function normalizeCodexSource(payload, state) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) invalidCodexReceipt();
-  const requestId = receiptRequestId(payload, state);
-  const activityId = payload.activityId;
-  const activity = state.activities.get(activityId);
-  if (!activity || activity.phase !== 'completed' || !CODEX_ACTIVITY_ID_PATTERN.test(activityId || '') ||
-      !CODEX_SOURCE_ID_PATTERN.test(payload.sourceId || '') || typeof payload.redacted !== 'boolean' ||
-      !isPublicCodexUrl(payload.displayUrl)) invalidCodexReceipt();
-  if (activity.sourceIds.size >= CODEX_MAX_WEB_SOURCES_PER_ACTIVITY || activity.sourceIds.has(payload.sourceId)) invalidCodexReceipt();
-  if (payload.redacted) {
-    if (Object.hasOwn(payload, 'url')) invalidCodexReceipt();
-  } else if (!isPublicCodexUrl(payload.url) || payload.url !== payload.displayUrl) {
+  const candidate = receiptWhitelist(payload, CODEX_RECEIPT_ACTIVITY_FIELDS);
+  candidate.requestId = requestId;
+  candidate.sourceCards = [];
+  let normalized;
+  try {
+    normalized = CodexReceiptContract.normalizeReceiptSet(
+      { activities: [candidate] }, receiptContractOptions(receiptProfile)
+    ).activities[0];
+  } catch (_) {
     invalidCodexReceipt();
   }
-  const normalized = {
-    requestId, activityId, sourceId: payload.sourceId,
-    displayUrl: payload.displayUrl, redacted: payload.redacted,
-    ...(payload.redacted ? {} : { url: payload.url })
-  };
-  if (boundedCodexText(payload.title, CODEX_MAX_WEB_TITLE_BYTES) && payload.title.trim() &&
-      !/[\u0000-\u001f\u007f]|:\/\//u.test(payload.title)) normalized.title = payload.title;
-  if (typeof payload.refId === 'string' && CODEX_REF_ID_PATTERN.test(payload.refId)) normalized.refId = payload.refId;
-  activity.sourceIds.add(payload.sourceId);
-  return normalized;
+  if (normalized.tool === 'web_search' && webMode !== 'native') invalidCodexReceipt();
+  if (existing) {
+    try {
+      CodexReceiptContract.assertActivityTransition(existing.activity, normalized);
+    } catch (_) {
+      invalidCodexReceipt();
+    }
+  }
+  state.activities.set(activityId, {
+    phase: normalized.phase,
+    terminal: normalized.phase !== 'started',
+    activity: normalized
+  });
+  return receiptWhitelist(normalized, CODEX_RECEIPT_ACTIVITY_FIELDS);
 }
 
-async function consumeCodexSse(body, { expectedSessionId, onEvent, onHeartbeat, webMode } = {}) {
+function normalizeCodexSource(payload, state, receiptProfile, webMode) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) invalidCodexReceipt();
+  receiptRequestId(payload, state);
+  const activityId = payload.activityId;
+  const activity = state.activities.get(activityId);
+  if (!activity || activity.phase !== 'completed') invalidCodexReceipt();
+  if (activity.activity.tool === 'web_search' && webMode !== 'native') invalidCodexReceipt();
+  const candidate = { ...activity.activity, sourceCards: activity.activity.sourceCards.concat([receiptWhitelist(payload, CODEX_RECEIPT_SOURCE_FIELDS)]) };
+  let normalized;
+  try {
+    normalized = CodexReceiptContract.normalizeReceiptSet(
+      { activities: [candidate] }, receiptContractOptions(receiptProfile)
+    ).activities[0];
+  } catch (_) {
+    invalidCodexReceipt();
+  }
+  activity.activity = normalized;
+  return normalized.sourceCards[normalized.sourceCards.length - 1];
+}
+
+async function consumeCodexSse(body, { expectedSessionId, onEvent, onHeartbeat, webMode, receiptProfile } = {}) {
   if (!body || typeof body.getReader !== 'function') {
     throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
   }
@@ -366,8 +390,7 @@ async function consumeCodexSse(body, { expectedSessionId, onEvent, onHeartbeat, 
 
   const dispatch = async () => {
     if (!eventName && dataLines.length === 0) return;
-    if (!CODEX_EVENT_TYPES.has(eventName) || dataLines.length === 0 ||
-        (normalizedWebMode !== 'native' && (eventName === 'activity' || eventName === 'source'))) {
+    if (!CODEX_EVENT_TYPES.has(eventName) || dataLines.length === 0) {
       throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
     }
     const payload = parseEventPayload(eventName, dataLines.join('\n'));
@@ -409,16 +432,16 @@ async function consumeCodexSse(body, { expectedSessionId, onEvent, onHeartbeat, 
       if (payload.status !== 'completed' && payload.status !== 'failed') {
         throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
       }
-      if (normalizedWebMode === 'native' && [...receiptState.activities.values()].some(activity => !activity.terminal)) {
+      if ([...receiptState.activities.values()].some(activity => !activity.terminal)) {
         invalidCodexReceipt();
       }
       completionStatus = payload.status;
       completed = true;
       event = { type: 'completion', payload: { status: payload.status } };
     } else if (eventName === 'activity') {
-      event = { type: 'activity', payload: normalizeCodexActivity(payload, receiptState) };
+      event = { type: 'activity', payload: normalizeCodexActivity(payload, receiptState, receiptProfile, normalizedWebMode) };
     } else if (eventName === 'source') {
-      event = { type: 'source', payload: normalizeCodexSource(payload, receiptState) };
+      event = { type: 'source', payload: normalizeCodexSource(payload, receiptState, receiptProfile, normalizedWebMode) };
     }
 
     eventName = '';
@@ -486,6 +509,9 @@ async function consumeCodexSse(body, { expectedSessionId, onEvent, onHeartbeat, 
         throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
       }
     }
+    if (completed && (buffer || eventName || dataLines.length > 0)) {
+      throw createCodexError('CODEX_GATEWAY_INVALID_RESPONSE', 502);
+    }
   } finally {
     try { await reader.cancel(); } catch {}
     try { reader.releaseLock(); } catch {}
@@ -541,9 +567,9 @@ function createCodexGatewayClient({
   const normalizedWebMode = normalizeCodexWebMode(webMode);
 
   return {
-    async run({ prompt, sessionId, signal, onEvent, onHeartbeat } = {}) {
-      const request = validateCodexRequest(prompt, sessionId);
-      const body = serializeCodexRequest(request.prompt, request.sessionId);
+    async run({ prompt, sessionId, receiptProfile, signal, onEvent, onHeartbeat } = {}) {
+      const request = validateCodexRequest(prompt, sessionId, receiptProfile);
+      const body = serializeCodexRequest(request.prompt, request.sessionId, request.receiptProfile);
       const abortContext = createAbortContext(signal, timeout);
       try {
         const response = await fetchImpl(`${gatewayUrl}/v1/agent/stream`, {
@@ -571,7 +597,8 @@ function createCodexGatewayClient({
           expectedSessionId: request.sessionId,
           onEvent,
           onHeartbeat,
-          webMode: normalizedWebMode
+          webMode: normalizedWebMode,
+          receiptProfile: request.receiptProfile
         });
         if (!request.sessionId && !result.sessionId) {
           throw createCodexError('CODEX_MISSING_SESSION', 502);
@@ -648,6 +675,7 @@ module.exports = {
   CODEX_MAX_WEB_SOURCES_PER_ACTIVITY,
   CODEX_REQUEST_ID_PATTERN,
   CODEX_SOURCE_ID_PATTERN,
+  CODEX_RECEIPT_PROFILE,
   CODEX_WEB_MODES,
   CODEX_ERROR_MESSAGES,
   CODEX_GATEWAY_TOKEN_PATTERN,
@@ -664,5 +692,6 @@ module.exports = {
   createCodexGatewayClient,
   normalizeCodexWebMode,
   serializeCodexRequest,
+  validateCodexReceiptProfile,
   validateCodexRequest
 };

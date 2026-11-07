@@ -2,6 +2,40 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const sharedReceiptContract = require('../public/js/codex-receipt-contract');
+
+function loadSyncForCodex(store, fetchImpl) {
+  const timeSource = fs.readFileSync('public/js/chat-time.js', 'utf8');
+  const source = fs.readFileSync('public/js/sync.js', 'utf8');
+  let module;
+  const modules = {};
+  const sandbox = {
+    console, Date, Promise, encodeURIComponent, URL,
+    CodexReceiptContract: sharedReceiptContract,
+    fetch: fetchImpl,
+    renderChatMessages() {},
+    toLocalDisplayTime: value => value,
+    getActiveProject: () => store.projects.find(project => project.id === store.activeProject),
+    getActiveChatObj: () => store.projects.flatMap(project => project.chats).find(chat => chat.id === store.activeChat),
+    getActiveApiConfig: () => ({}),
+    getAIName: () => '暖伴',
+    getActiveChatAiSettings: () => ({}),
+    MemoryModule: { getCML: () => null, getCoreOverview: () => null },
+    AppCore: {
+      BACKEND_URL: 'http://app.test',
+      getStore: () => store,
+      getActiveProject: () => store.projects.find(project => project.id === store.activeProject),
+      getActiveChatObj: () => store.projects.flatMap(project => project.chats).find(chat => chat.id === store.activeChat),
+      getModule: () => null,
+      saveStore() {},
+      register: (name, value) => { modules[name] = value; module = value; }
+    }
+  };
+  vm.runInNewContext(timeSource, sandbox, { filename: 'public/js/chat-time.js' });
+  sandbox.AppCore.getModule = name => modules[name] || null;
+  vm.runInNewContext(source, sandbox, { filename: 'public/js/sync.js' });
+  return module;
+}
 
 function loadCodex(options = {}) {
   const source = fs.readFileSync('public/js/codex.js', 'utf8');
@@ -16,6 +50,7 @@ function loadCodex(options = {}) {
     TextDecoder,
     ReadableStream,
     AbortController,
+    CodexReceiptContract: options.receiptContract === undefined ? sharedReceiptContract : options.receiptContract,
     setTimeout,
     clearTimeout,
     fetch: options.fetchImpl,
@@ -38,6 +73,13 @@ function loadCodex(options = {}) {
   };
   vm.runInNewContext(source, sandbox, { filename: 'public/js/codex.js' });
   return module;
+}
+
+function makeStartedWebReceipt(activityId = 'wa_1') {
+  return { activities: [{
+    requestId: 'wr_123e4567-e89b-12d3-a456-426614174000', activityId,
+    tool: 'web_search', phase: 'started', action: 'search', outcome: 'unknown', sourceCards: []
+  }] };
 }
 
 test('reload marks only this device running Codex turns unknown and preserves terminal state', () => {
@@ -101,6 +143,82 @@ test('reload interrupts persisted running receipts and schedules their unknown t
   assert.deepEqual(syncCalls, [['codex-code-test', 'reload-chat']]);
 });
 
+test('reload fails before mutating any running message when the shared receipt module is missing', () => {
+  const messages = ['first', 'second'].map((id, index) => ({
+    id, role: 'user', _codexRuntime: 'codex-gateway', _codexLocalDevice: true,
+    _codexTurnStatus: 'running', _codexVersion: index + 1, _codexReceipts: makeStartedWebReceipt('wa_' + (index + 1))
+  }));
+  const store = { projects: [{ id: 'codex-code-test', chats: [{ id: 'reload-chat', messages }] }] };
+  let saves = 0;
+  const syncCalls = [];
+  const codex = loadCodex({
+    store, receiptContract: null, saveStore: () => { saves += 1; },
+    getModule: name => name === 'sync' ? { scheduleCodexMessageSync: (...args) => syncCalls.push(args) } : null
+  });
+
+  assert.throws(() => codex.markReloadedTurnsUnknown(), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+  for (const message of messages) {
+    assert.equal(message._codexTurnStatus, 'running');
+    assert.equal(message._codexVersion, messages.indexOf(message) + 1);
+    assert.equal(Object.prototype.hasOwnProperty.call(message, '_syncDirty'), false);
+    assert.equal(message._codexReceipts.activities[0].phase, 'started');
+  }
+  assert.equal(saves, 0);
+  assert.deepEqual(syncCalls, []);
+});
+
+test('reload validates profiles before mutating any running message', () => {
+  const valid = {
+    id: 'valid', role: 'user', _codexRuntime: 'codex-gateway', _codexLocalDevice: true,
+    _codexTurnStatus: 'running', _codexVersion: 4, _codexReceipts: makeStartedWebReceipt()
+  };
+  const invalid = {
+    id: 'invalid', role: 'user', _codexRuntime: 'codex-gateway', _codexLocalDevice: true,
+    _codexTurnStatus: 'running', _codexVersion: 8, _codexReceiptProfile: 'github-mcp-v2',
+    _codexReceipts: { activities: [] }
+  };
+  const store = { projects: [{ id: 'codex-code-test', chats: [{ id: 'reload-chat', messages: [invalid, valid] }] }] };
+  let saves = 0;
+  const codex = loadCodex({ store, saveStore: () => { saves += 1; } });
+
+  assert.throws(() => codex.markReloadedTurnsUnknown(), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+  assert.equal(valid._codexTurnStatus, 'running');
+  assert.equal(valid._codexVersion, 4);
+  assert.equal(invalid._codexTurnStatus, 'running');
+  assert.equal(invalid._codexVersion, 8);
+  assert.equal(saves, 0);
+});
+
+test('reload persists earlier message updates when a later receipt is invalid', () => {
+  const valid = {
+    id: 'valid-first', role: 'user', _codexRuntime: 'codex-gateway', _codexLocalDevice: true,
+    _codexTurnStatus: 'running', _codexVersion: 4, _codexReceipts: makeStartedWebReceipt()
+  };
+  const invalid = {
+    id: 'invalid-second', role: 'user', _codexRuntime: 'codex-gateway', _codexLocalDevice: true,
+    _codexTurnStatus: 'running', _codexVersion: 8, _codexReceipts: { activities: [{
+      requestId: 'wr_123e4567-e89b-12d3-a456-426614174000', activityId: 'wa_2', tool: 'web_search',
+      phase: 'started', action: 'constructor', outcome: 'unknown', sourceCards: []
+    }] }
+  };
+  const store = { projects: [{ id: 'codex-code-test', chats: [{ id: 'reload-chat', messages: [valid, invalid] }] }] };
+  let saves = 0;
+  const syncCalls = [];
+  const codex = loadCodex({
+    store, saveStore: () => { saves += 1; },
+    getModule: name => name === 'sync' ? { scheduleCodexMessageSync: (...args) => syncCalls.push(args) } : null
+  });
+
+  assert.throws(() => codex.markReloadedTurnsUnknown(), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+  assert.equal(valid._codexTurnStatus, 'unknown');
+  assert.equal(valid._codexVersion, 5);
+  assert.equal(valid._codexReceipts.activities[0].phase, 'interrupted');
+  assert.equal(invalid._codexTurnStatus, 'running');
+  assert.equal(invalid._codexVersion, 8);
+  assert.equal(saves, 1);
+  assert.deepEqual(syncCalls, [['codex-code-test', 'reload-chat']]);
+});
+
 function responseFromChunks(chunks, headers = { 'content-type': 'text/event-stream' }) {
   const encoded = chunks.map(chunk => chunk instanceof Uint8Array ? chunk : new TextEncoder().encode(chunk));
   let index = 0;
@@ -140,6 +258,18 @@ test('Codex frontend builds the exact bounded request body and rejects extra fie
   assert.throws(() => codex.createRequestBody('x\0y'), /CODEX_INVALID_PROMPT/);
   assert.throws(() => codex.createRequestBody('x', 'private-thread'), /CODEX_INVALID_SESSION/);
   assert.throws(() => codex.createRequestBody('x', sessionId, { token: 'secret' }), /CODEX_INVALID_REQUEST/);
+});
+
+test('Codex frontend fails closed when the shared receipt module is missing', async () => {
+  const codex = loadCodex({ receiptContract: null });
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const stream = `event: activity\ndata: ${JSON.stringify({
+    requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'search', outcome: 'unknown'
+  })}\n\n`;
+  await assert.rejects(
+    () => codex.consumeSse(responseFromChunks([stream]), { webMode: 'native' }),
+    error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE'
+  );
 });
 
 test('Codex frontend parses fragmented named SSE, heartbeats, Unicode, and redacts payload fields', async () => {
@@ -196,6 +326,69 @@ test('Codex frontend decodes bounded native activity/source receipts and keeps d
   assert.equal(JSON.stringify(validEvents[2].payload), JSON.stringify({
     requestId, activityId, sourceId, displayUrl: 'https://example.org/article', redacted: true, title: '<img>', refId: 'ref_1'
   }));
+});
+
+test('Codex frontend keeps GitHub profile receipts independent from native web mode', async () => {
+  const codex = loadCodex();
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const sourceId = 'ws_' + 'f'.repeat(64);
+  const commit = 'd'.repeat(40);
+  const sourceUrl = 'https://github.com/Neverland/warmbuddy/blob/' + commit + '/README.md';
+  const githubStream = [
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'github_mcp', phase: 'started', action: 'search_code', outcome: 'unknown', raw: 'private' })}\n\n`,
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'github_mcp', phase: 'completed', action: 'search_code', outcome: 'failed', sources: 'none', reason: 'tool_failed', context: { owner: 'Neverland', repo: 'warmbuddy', path: 'README.md', commit }, raw: 'private' })}\n\n`,
+    `event: source\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', sourceId, displayUrl: sourceUrl, url: sourceUrl, redacted: false, linkKind: 'constructed', resourceUri: 'secret://uri' })}\n\n`,
+    'event: completion\ndata: {"status":"completed"}\n\n'
+  ].join('');
+  const events = [];
+  const result = await codex.consumeSse(responseFromChunks([githubStream]), {
+    webMode: 'legacy', receiptProfile: 'github-mcp-v1', onEvent: event => events.push(event)
+  });
+  assert.equal(result.completed, true);
+  assert.equal(events[1].payload.outcome, 'failed');
+  assert.equal(events[1].payload.reason, 'tool_failed');
+  assert.equal(events[1].payload.context.commit, commit);
+  assert.equal(events[2].payload.linkKind, 'constructed');
+  assert.doesNotMatch(JSON.stringify(events), /raw|resourceUri|secret/);
+
+  const webStream = [
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' })}\n\n`,
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown', sources: 'none' })}\n\n`,
+    'event: completion\ndata: {"status":"completed"}\n\n'
+  ].join('');
+  await codex.consumeSse(responseFromChunks([webStream]), { webMode: 'native' });
+  await assert.rejects(() => codex.consumeSse(responseFromChunks([githubStream]), { webMode: 'native' }), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+  await assert.rejects(() => codex.consumeSse(responseFromChunks([webStream]), { webMode: 'legacy', receiptProfile: 'github-mcp-v1' }), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+});
+
+test('Codex frontend rejects incompatible activity snapshots before emitting a terminal update', async () => {
+  const codex = loadCodex();
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const cases = [
+    {
+      started: { tool: 'web_search', action: 'search' },
+      completed: { tool: 'web_search', action: 'open_page' },
+      options: { webMode: 'native' }
+    },
+    {
+      started: { tool: 'github_mcp', action: 'search_code' },
+      completed: { tool: 'github_mcp', action: 'list_commits' },
+      options: { webMode: 'legacy', receiptProfile: 'github-mcp-v1' }
+    }
+  ];
+  for (const item of cases) {
+    const events = [];
+    const stream = [
+      `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', phase: 'started', outcome: 'unknown', ...item.started })}\n\n`,
+      `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', phase: 'completed', outcome: 'unknown', sources: 'none', ...item.completed })}\n\n`,
+      'event: completion\ndata: {"status":"completed"}\n\n'
+    ].join('');
+    await assert.rejects(
+      () => codex.consumeSse(responseFromChunks([stream]), { ...item.options, onEvent: event => events.push(event) }),
+      error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE'
+    );
+    assert.deepEqual(events.map(event => event.type), ['activity']);
+  }
 });
 
 test('Codex frontend native mode never falls back to legacy search integration', async () => {
@@ -291,12 +484,213 @@ test('Codex frontend rereads no-store web config for every turn and fixes each t
   }
   assert.deepEqual(contextModes, ['legacy', 'native', 'legacy']);
   assert.equal(gatewayRequests.length, 3);
+  assert.equal(Object.prototype.hasOwnProperty.call(gatewayRequests[0], 'receiptProfile'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(gatewayRequests[1], 'receiptProfile'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(gatewayRequests[2], 'receiptProfile'), false);
+});
+
+test('Codex frontend fixes an enabled receipt profile for the turn and sends it only at the WB request boundary', async () => {
+  const sid = 'gs_' + '9'.repeat(64);
+  const user = { id: 'profile-gate-user', role: 'user', text: '读仓库' };
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'profile-gate-chat',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{
+      id: 'profile-gate-chat', messages: [user]
+    }] }]
+  };
+  const prompts = [];
+  const gatewayRequests = [];
+  const codex = loadCodex({
+    store,
+    chatModule: {
+      buildCodexPromptContext: options => { prompts.push(options); return { prompt: 'profile prompt' }; },
+      commitCodexResponse: async () => {}
+    },
+    fetchImpl: async (url, init) => {
+      if (url.endsWith('/api/codex/config')) {
+        return { ok: true, json: async () => ({ webMode: 'native', receiptProfile: 'github-mcp-v1' }) };
+      }
+      gatewayRequests.push(JSON.parse(init.body));
+      return responseFromChunks([
+        `event: session\ndata: {"sessionId":"${sid}"}\n\n`,
+        'event: message\ndata: {"text":"回答"}\n\n',
+        'event: completion\ndata: {"status":"completed"}\n\n'
+      ]);
+    }
+  });
+
+  const result = await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'profile-gate-chat', userMessageIds: [user.id], userText: user.text
+  });
+  assert.equal(result.completed, true);
+  assert.deepEqual(gatewayRequests, [{ prompt: 'profile prompt', receiptProfile: 'github-mcp-v1' }]);
+  assert.equal(user._codexReceiptProfile, 'github-mcp-v1');
+  assert.doesNotMatch(JSON.stringify(prompts), /github-mcp-v1|_codexReceiptProfile/);
+});
+
+test('Codex turn binds an atomic empty receipt sidecar and the actual SyncModule uploads it', async () => {
+  const sid = 'gs_' + 'a'.repeat(64);
+  const user = { id: 'profile-sidecar-user', role: 'user', text: '无工具回合' };
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'profile-sidecar-chat',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{
+      id: 'profile-sidecar-chat', messages: [user]
+    }] }]
+  };
+  const uploadBodies = [];
+  const sync = loadSyncForCodex(store, async (_url, init) => {
+    uploadBodies.push(JSON.parse(init.body));
+    return { ok: true, json: async () => ({ synced: 1, syncedMessageIds: [user.id] }) };
+  });
+  const syncJobs = [];
+  let codex;
+  const codexSync = { scheduleCodexMessageSync: (...args) => {
+    const job = sync.syncCodexMessagesToBackend(...args);
+    syncJobs.push(job);
+    return job;
+  } };
+  codex = loadCodex({
+    store,
+    getModule: name => name === 'sync' ? codexSync : null,
+    chatModule: { buildCodexPromptContext: () => ({ prompt: 'no-tool prompt' }), commitCodexResponse: async () => {} },
+    fetchImpl: async (url, init) => {
+      if (url.endsWith('/api/codex/config')) return { ok: true, json: async () => ({ webMode: 'native', receiptProfile: 'github-mcp-v1' }) };
+      assert.deepEqual(JSON.parse(init.body), { prompt: 'no-tool prompt', receiptProfile: 'github-mcp-v1' });
+      return responseFromChunks([
+        `event: session\ndata: {"sessionId":"${sid}"}\n\n`,
+        'event: completion\ndata: {"status":"completed"}\n\n'
+      ]);
+    }
+  });
+
+  const result = await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'profile-sidecar-chat', userMessageIds: [user.id], userText: user.text
+  });
+  await Promise.all(syncJobs);
+
+  assert.equal(result.completed, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(user._codexReceipts)), { activities: [] });
+  assert.equal(user._codexReceiptProfile, 'github-mcp-v1');
+  assert.equal(uploadBodies.length, 1);
+  assert.equal(uploadBodies[0].receiptProfile, 'github-mcp-v1');
+  assert.deepEqual(uploadBodies[0].messages[0].metadata.receipts, { activities: [] });
+  assert.equal(uploadBodies[0].messages[0].metadata.turnStatus, 'completed');
+  assert.equal(user._syncDirty, false);
+  assert.equal(user._synced, true);
+});
+
+test('Codex profile sidecars survive failed, canceled, and context-failed turns into SyncModule', async () => {
+  const cases = [
+    { name: 'failed', status: 'failed', stream: 'error' },
+    { name: 'canceled', status: 'canceled', stream: 'cancel' },
+    { name: 'context-failed', status: 'failed', stream: 'context' }
+  ];
+
+  for (const testCase of cases) {
+    const user = { id: 'profile-terminal-' + testCase.name, role: 'user', text: testCase.name };
+    const chatId = 'profile-terminal-chat-' + testCase.name;
+    const store = {
+      activeProject: 'codex-code-test', activeChat: chatId,
+      projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: chatId, messages: [user] }] }]
+    };
+    const uploadBodies = [];
+    const sync = loadSyncForCodex(store, async (_url, init) => {
+      uploadBodies.push(JSON.parse(init.body));
+      return { ok: true, json: async () => ({ synced: 1, syncedMessageIds: [user.id] }) };
+    });
+    const syncJobs = [];
+    const codexSync = { scheduleCodexMessageSync: (...args) => {
+      const job = sync.syncCodexMessagesToBackend(...args);
+      syncJobs.push(job);
+      return job;
+    } };
+    let codex;
+    codex = loadCodex({
+      store,
+      getModule: name => name === 'sync' ? codexSync : null,
+      chatModule: {
+        buildCodexPromptContext: () => {
+          if (testCase.stream === 'context') throw new Error('context failed');
+          if (testCase.stream === 'cancel') codex.cancel('codex-code-test', chatId);
+          return { prompt: testCase.name + ' prompt' };
+        },
+        commitCodexResponse: async () => {}
+      },
+      fetchImpl: async (url, init) => {
+        if (url.endsWith('/api/codex/config')) {
+          return { ok: true, json: async () => ({ webMode: 'native', receiptProfile: 'github-mcp-v1' }) };
+        }
+        assert.equal(testCase.stream, 'error');
+        assert.deepEqual(JSON.parse(init.body), { prompt: 'failed prompt', receiptProfile: 'github-mcp-v1' });
+        return responseFromChunks(['event: error\ndata: {"code":"CODEX_GATEWAY_FAILED"}\n\n']);
+      }
+    });
+
+    await assert.rejects(
+      () => codex.sendChatTurn({ projectId: 'codex-code-test', chatId, userMessageIds: [user.id], userText: user.text }),
+      error => testCase.status === 'canceled'
+        ? error.code === 'CODEX_GATEWAY_ABORTED'
+        : error.code === 'CODEX_GATEWAY_FAILED' || error.message === 'context failed'
+    );
+    await Promise.all(syncJobs);
+
+    assert.equal(user._codexTurnStatus, testCase.status);
+    assert.equal(user._codexReceiptProfile, 'github-mcp-v1');
+    assert.deepEqual(JSON.parse(JSON.stringify(user._codexReceipts)), { activities: [] });
+    assert.equal(uploadBodies.length > 0, true);
+    assert.ok(uploadBodies.some(body => body.receiptProfile === 'github-mcp-v1'));
+    assert.ok(uploadBodies.some(body => body.messages.some(message => message.message_id === user.id &&
+      message.metadata.receipts && message.metadata.receipts.activities.length === 0 &&
+      message.metadata.turnStatus === testCase.status)));
+    assert.equal(user._syncDirty, false);
+    assert.equal(user._synced, true);
+  }
+});
+
+test('Codex profile binding validates all receipts before applying any profile sidecar', async () => {
+  const valid = { id: 'profile-valid-first', role: 'user', text: 'first' };
+  const invalid = {
+    id: 'profile-invalid-second', role: 'user', text: 'second',
+    _codexReceipts: { activities: [{
+      requestId: 'wr_123e4567-e89b-12d3-a456-426614174000', activityId: 'wa_1',
+      tool: 'web_search', phase: 'started', action: 'constructor', outcome: 'unknown', sourceCards: []
+    }] }
+  };
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'profile-atomic-chat',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{
+      id: 'profile-atomic-chat', messages: [valid, invalid]
+    }] }]
+  };
+  let streamCalls = 0;
+  const codex = loadCodex({
+    store,
+    chatModule: { buildCodexPromptContext: () => ({ prompt: 'must not build' }), commitCodexResponse: async () => {} },
+    fetchImpl: async url => {
+      if (url.endsWith('/api/codex/config')) return { ok: true, json: async () => ({ webMode: 'native', receiptProfile: 'github-mcp-v1' }) };
+      streamCalls += 1;
+      return responseFromChunks([]);
+    }
+  });
+
+  await assert.rejects(
+    () => codex.sendChatTurn({
+      projectId: 'codex-code-test', chatId: 'profile-atomic-chat',
+      userMessageIds: [valid.id, invalid.id], userText: 'two users'
+    }),
+    error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE'
+  );
+  assert.equal(streamCalls, 0);
+  assert.equal(Object.prototype.hasOwnProperty.call(valid, '_codexReceiptProfile'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(valid, '_codexReceipts'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(invalid, '_codexReceiptProfile'), false);
 });
 
 test('Codex frontend stops before Gateway when web config is missing, invalid, malformed, unavailable, or non-success', async () => {
   const cases = [
     { name: 'missing', response: { ok: true, json: async () => ({}) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
     { name: 'invalid', response: { ok: true, json: async () => ({ webMode: 'bogus' }) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
+    { name: 'unsupported-receipt-profile', response: { ok: true, json: async () => ({ webMode: 'legacy', receiptProfile: 'github-mcp-v2' }) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
     { name: 'toString', response: { ok: true, json: async () => ({ webMode: 'toString' }) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
     { name: 'constructor', response: { ok: true, json: async () => ({ webMode: 'constructor' }) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
     { name: 'proto', response: { ok: true, json: async () => ({ webMode: '__proto__' }) }, code: 'CODEX_GATEWAY_INVALID_RESPONSE' },
@@ -533,6 +927,145 @@ test('Codex frontend records activity/source receipts on the user message and ke
   assert.equal(receipts.activities[0].sourceCards[0].sourceId, sourceId);
   assert.equal(receipts.activities[0].sourceCards[0].redacted, true);
   assert.ok(syncCalls.length > 0);
+});
+
+test('Codex frontend uses an explicit GitHub profile sidecar for local mixed receipts without entering prompt or session state', async () => {
+  const sid = 'gs_' + '4'.repeat(64);
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const user = {
+    id: 'github-local-user', role: 'user', text: '读仓库', _codexReceiptProfile: 'github-mcp-v1'
+  };
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'github-local-chat',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [
+      { id: 'github-local-chat', aiSettings: { webSearch: false }, messages: [user] }
+    ] }]
+  };
+  const prompts = [];
+  const sessionWrites = [];
+  const codex = loadCodex({
+    store,
+    storage: {
+      getItem: async () => null,
+      setItem: async (_key, value) => sessionWrites.push(value),
+      removeItem: async () => {}
+    },
+    chatModule: {
+      buildCodexPromptContext: options => { prompts.push(options); return { prompt: 'github prompt' }; },
+      commitCodexResponse: async () => {}
+    },
+    fetchImpl: async url => url.endsWith('/api/codex/config')
+      ? { ok: true, json: async () => ({ webMode: 'native' }) }
+      : responseFromChunks([
+        `event: session\ndata: {"sessionId":"${sid}"}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'search', outcome: 'unknown' })}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown', sources: 'none' })}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_2', tool: 'github_mcp', phase: 'started', action: 'get_file_contents', outcome: 'unknown' })}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_2', tool: 'github_mcp', phase: 'completed', action: 'get_file_contents', outcome: 'failed', sources: 'none', reason: 'tool_failed' })}\n\n`,
+        `event: source\ndata: ${JSON.stringify({ requestId, activityId: 'wa_2', sourceId: 'ws_' + 'd'.repeat(64), displayUrl: 'https://github.com/Neverland/warmbuddy/blob/' + 'a'.repeat(40) + '/README.md', url: 'https://github.com/Neverland/warmbuddy/blob/' + 'a'.repeat(40) + '/README.md', redacted: false, linkKind: 'constructed' })}\n\n`,
+        'event: completion\ndata: {"status":"completed"}\n\n'
+      ])
+  });
+
+  const result = await codex.sendChatTurn({
+    projectId: 'codex-code-test', chatId: 'github-local-chat', userMessageIds: [user.id], userText: user.text
+  });
+  assert.equal(result.completed, true);
+  assert.equal(user._codexTurnStatus, 'completed');
+  assert.equal(user._codexReceiptProfile, 'github-mcp-v1');
+  assert.equal(user._codexReceipts.activities[1].outcome, 'failed');
+  assert.equal(user._codexReceipts.activities[1].reason, 'tool_failed');
+  assert.equal(user._codexReceipts.activities[1].sourceCards[0].linkKind, 'constructed');
+  assert.equal(store.projects[0].chats[0].messages.filter(message => message.role === 'ai').length, 0);
+  assert.doesNotMatch(JSON.stringify(prompts), /github-mcp-v1|_codexReceiptProfile/);
+  assert.equal(JSON.stringify(sessionWrites), JSON.stringify([{ sessionId: sid }]));
+});
+
+test('Codex GitHub SSE receipts survive the actual SyncModule upload and cloud recovery path', async () => {
+  const sid = 'gs_' + '5'.repeat(64);
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const commit = 'e'.repeat(40);
+  const sourceUrl = 'https://github.com/Neverland/warmbuddy/blob/' + commit + '/README.md';
+  const user = { id: 'github-sync-user', role: 'user', text: '同步仓库' };
+  const store = {
+    activeProject: 'codex-code-test', activeChat: 'github-sync-chat',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'github-sync-chat', messages: [user] }] }]
+  };
+  const uploadBodies = [];
+  const sync = loadSyncForCodex(store, async (_url, init) => {
+    uploadBodies.push(JSON.parse(init.body));
+    return { ok: true, json: async () => ({ synced: 1, syncedMessageIds: [user.id] }) };
+  });
+  const syncJobs = [];
+  const codex = loadCodex({
+    store,
+    getModule: name => name === 'sync' ? {
+      scheduleCodexMessageSync: (...args) => {
+        const job = sync.syncCodexMessagesToBackend(...args);
+        syncJobs.push(job);
+        return job;
+      }
+    } : null,
+    chatModule: { buildCodexPromptContext: () => ({ prompt: 'github sync prompt' }), commitCodexResponse: async () => {} },
+    fetchImpl: async url => url.endsWith('/api/codex/config')
+      ? { ok: true, json: async () => ({ webMode: 'legacy', receiptProfile: 'github-mcp-v1' }) }
+      : responseFromChunks([
+        `event: session\ndata: {"sessionId":"${sid}"}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'github_mcp', phase: 'started', action: 'get_file_contents', outcome: 'unknown' })}\n\n`,
+        `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'github_mcp', phase: 'completed', action: 'get_file_contents', outcome: 'failed', sources: 'available', reason: 'tool_failed', context: { owner: 'Neverland', repo: 'warmbuddy', path: 'README.md', commit } })}\n\n`,
+        `event: source\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', sourceId: 'ws_' + '9'.repeat(64), displayUrl: sourceUrl, url: sourceUrl, redacted: false, linkKind: 'constructed', title: 'README' })}\n\n`,
+        'event: completion\ndata: {"status":"completed"}\n\n'
+      ])
+  });
+
+  await codex.sendChatTurn({ projectId: 'codex-code-test', chatId: 'github-sync-chat', userMessageIds: [user.id], userText: user.text });
+  await Promise.all(syncJobs);
+  assert.ok(uploadBodies.length >= 1);
+  const uploaded = uploadBodies[uploadBodies.length - 1].messages[0];
+  assert.equal(uploaded.metadata.receiptProfile, 'github-mcp-v1');
+  assert.equal(uploaded.metadata.receipts.activities[0].reason, 'tool_failed');
+  assert.equal(uploaded.metadata.receipts.activities[0].sourceCards[0].linkKind, 'constructed');
+
+  const restoredStore = {
+    activeProject: 'codex-code-test', activeChat: 'github-sync-chat',
+    projects: [{ id: 'codex-code-test', runtime: 'codex-gateway', chats: [] }]
+  };
+  const restoredSync = loadSyncForCodex(restoredStore, async () => ({ ok: true, json: async () => ({}) }));
+  restoredSync.mergeCodexCloudMessages(restoredStore.projects[0], [{
+    projectId: uploaded.project_id, windowId: uploaded.window_id, messageId: uploaded.message_id,
+    role: uploaded.role, content: uploaded.content, tokenUsage: uploaded.token_usage,
+    createdAt: uploaded.created_at, metadata: uploaded.metadata
+  }]);
+  const restored = restoredStore.projects[0].chats[0].messages[0];
+  assert.equal(restored._codexReceiptProfile, 'github-mcp-v1');
+  assert.equal(restored._codexReceipts.activities[0].context.commit, commit);
+  assert.equal(restored._codexReceipts.activities[0].sourceCards[0].linkKind, 'constructed');
+  assert.equal(restored._codexReceipts.activities[0].outcome, 'failed');
+});
+
+test('Codex frontend rejects a GitHub event without its owning profile before claiming success', async () => {
+  const user = { id: 'github-missing-profile', role: 'user', text: '读仓库' };
+  const store = { activeProject: 'codex-code-test', activeChat: 'github-missing-chat', projects: [{
+    id: 'codex-code-test', runtime: 'codex-gateway', chats: [{ id: 'github-missing-chat', messages: [user] }]
+  }] };
+  let commits = 0;
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const codex = loadCodex({
+    store,
+    chatModule: { buildCodexPromptContext: () => ({ prompt: 'must not commit' }), commitCodexResponse: async () => { commits++; } },
+    fetchImpl: async url => url.endsWith('/api/codex/config')
+      ? { ok: true, json: async () => ({ webMode: 'native' }) }
+      : responseFromChunks([`event: activity\ndata: ${JSON.stringify({
+        requestId, activityId: 'wa_1', tool: 'github_mcp', phase: 'started', action: 'search_code', outcome: 'unknown'
+      })}\n\n`])
+  });
+  await assert.rejects(
+    () => codex.sendChatTurn({ projectId: 'codex-code-test', chatId: 'github-missing-chat', userMessageIds: [user.id], userText: user.text }),
+    error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE'
+  );
+  assert.equal(user._codexTurnStatus, 'failed');
+  assert.equal(Object.prototype.hasOwnProperty.call(user, '_codexReceipts'), false);
+  assert.equal(commits, 0);
 });
 
 test('Codex zero-message failures and unknown EOFs sync terminal state and settle running receipts', async () => {

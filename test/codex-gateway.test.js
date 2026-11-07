@@ -114,6 +114,30 @@ test('Codex client sends only the allowed JSON fields and forwards complete mess
   assert.equal(result.completed, true);
 });
 
+test('Codex client serializes a validated receipt profile at the Gateway JSON boundary', async () => {
+  const sessionId = 'gs_' + 'e'.repeat(64);
+  const upstream = [
+    `event: session\ndata: ${JSON.stringify({ sessionId })}\n\n`,
+    'event: completion\ndata: {"status":"completed"}\n\n'
+  ].join('');
+  let request;
+  const { client } = clientWithResponse(rawRequest => {
+    request = rawRequest;
+    return chunkedSseResponse(upstream, 5);
+  });
+
+  await client.run({ prompt: 'profile boundary', receiptProfile: 'github-mcp-v1' });
+
+  assert.deepEqual(JSON.parse(request.body), {
+    prompt: 'profile boundary', receiptProfile: 'github-mcp-v1'
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(JSON.parse(request.body), 'sessionId'), false);
+  assert.throws(
+    () => serializeCodexRequest('profile boundary', undefined, 'github-mcp-v2'),
+    error => error.code === 'CODEX_INVALID_REQUEST'
+  );
+});
+
 test('Codex client validates and forwards bounded native activity/source receipts in order', async () => {
   const sessionId = 'gs_' + 'c'.repeat(64);
   const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
@@ -146,6 +170,158 @@ test('Codex client keeps legacy mode closed to native receipt events', async () 
   const stream = `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' })}\n\n`;
   const { client } = clientWithResponse(sseResponse(stream));
   await assert.rejects(() => client.run({ prompt: 'legacy' }), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+});
+
+test('Codex client accepts GitHub receipts under the exact profile independently of native web mode', async () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const sessionId = 'gs_' + '7'.repeat(64);
+  const commit = 'a'.repeat(40);
+  const makeActivity = (activityId, action, phase, extra = {}) => ({
+    requestId, activityId, tool: 'github_mcp', phase, action,
+    outcome: phase === 'completed' && extra.failed ? 'failed' : 'unknown',
+    ...extra
+  });
+  const sourceId = 'ws_' + '8'.repeat(64);
+  const sourceUrl = 'https://github.com/Neverland/warmbuddy/blob/' + commit + '/README.md';
+  const activities = [
+    makeActivity('wa_1', 'search_repositories', 'started'),
+    makeActivity('wa_1', 'search_repositories', 'completed', {
+      sources: 'none', context: { owner: 'Neverland', repo: 'warmbuddy', ref: 'main' }
+    }),
+    makeActivity('wa_2', 'search_code', 'started'),
+    makeActivity('wa_2', 'search_code', 'completed', {
+      sources: 'available', context: { owner: 'Neverland', repo: 'warmbuddy', path: 'src/app.js', commit },
+      failed: true, reason: 'tool_failed'
+    }),
+    makeActivity('wa_3', 'get_file_contents', 'started'),
+    makeActivity('wa_3', 'get_file_contents', 'interrupted', { reason: 'cancelled' }),
+    makeActivity('wa_4', 'list_commits', 'started'),
+    makeActivity('wa_4', 'list_commits', 'completed', { sources: 'unknown' })
+  ];
+  const upstream = [
+    `event: session\ndata: ${JSON.stringify({ sessionId })}\n\n`,
+    ...activities.map(activity => `event: activity\ndata: ${JSON.stringify(activity)}\n\n`),
+    `event: source\ndata: ${JSON.stringify({ requestId, activityId: 'wa_2', sourceId, displayUrl: sourceUrl, url: sourceUrl, redacted: false, linkKind: 'constructed', title: 'README' })}\n\n`,
+    'event: completion\ndata: {"status":"completed"}\n\n'
+  ].join('');
+  const events = [];
+  const { client } = clientWithResponse(sseResponse(upstream), { webMode: 'legacy' });
+  await client.run({ prompt: 'github', receiptProfile: 'github-mcp-v1', onEvent: event => events.push(event) });
+  assert.equal(events.filter(event => event.type === 'activity').length, 8);
+  assert.equal(events.find(event => event.type === 'activity' && event.payload.activityId === 'wa_2' && event.payload.phase === 'completed').payload.reason, 'tool_failed');
+  assert.deepEqual(events.find(event => event.type === 'source').payload, {
+    requestId, activityId: 'wa_2', sourceId, displayUrl: sourceUrl, url: sourceUrl,
+    redacted: false, linkKind: 'constructed', title: 'README'
+  });
+});
+
+test('Codex receipt combinations keep web mode and GitHub profile independent', async () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const webStarted = `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'started', action: 'unknown', outcome: 'unknown' })}\n\n`;
+  const webCompleted = `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown', sources: 'none' })}\n\n`;
+  const githubStarted = `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'github_mcp', phase: 'started', action: 'search_code', outcome: 'unknown' })}\n\n`;
+  const githubCompleted = `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'github_mcp', phase: 'completed', action: 'search_code', outcome: 'unknown', sources: 'none' })}\n\n`;
+  const completed = 'event: completion\ndata: {"status":"completed"}\n\n';
+  const sessionId = 'gs_' + '5'.repeat(64);
+  const cases = [
+    ['legacy', undefined, githubStarted, 'CODEX_GATEWAY_INVALID_RESPONSE'],
+    ['legacy', 'github-mcp-v1', githubStarted + githubCompleted + completed, null],
+    ['native', undefined, webStarted + webCompleted + completed, null],
+    ['native', undefined, githubStarted, 'CODEX_GATEWAY_INVALID_RESPONSE'],
+    ['native', 'github-mcp-v1', webStarted + webCompleted + completed, null]
+  ];
+  for (const [webMode, receiptProfile, stream, expectedCode] of cases) {
+    const { client } = clientWithResponse(sseResponse(stream), { webMode });
+    const run = client.run({ prompt: 'combination', sessionId, receiptProfile });
+    if (expectedCode) await assert.rejects(run, error => error.code === expectedCode);
+    else await run;
+  }
+});
+
+test('Codex client accepts interleaved activities but rejects a non-GitHub constructed source', async () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const sessionId = 'gs_' + '4'.repeat(64);
+  const activity = (activityId, phase) => ({
+    requestId, activityId, tool: 'github_mcp', phase, action: 'search_code', outcome: 'unknown',
+    ...(phase === 'completed' ? { sources: 'available' } : {})
+  });
+  const interleaved = [
+    `event: session\ndata: ${JSON.stringify({ sessionId })}\n\n`,
+    `event: activity\ndata: ${JSON.stringify(activity('wa_1', 'started'))}\n\n`,
+    `event: activity\ndata: ${JSON.stringify(activity('wa_2', 'started'))}\n\n`,
+    `event: activity\ndata: ${JSON.stringify(activity('wa_2', 'completed'))}\n\n`,
+    `event: activity\ndata: ${JSON.stringify(activity('wa_1', 'completed'))}\n\n`,
+    'event: completion\ndata: {"status":"completed"}\n\n'
+  ].join('');
+  const { client } = clientWithResponse(sseResponse(interleaved), { webMode: 'legacy' });
+  await client.run({ prompt: 'interleaved', sessionId, receiptProfile: 'github-mcp-v1' });
+
+  const sourceId = 'ws_' + '5'.repeat(64);
+  const invalidSource = [
+    `event: activity\ndata: ${JSON.stringify(activity('wa_1', 'started'))}\n\n`,
+    `event: activity\ndata: ${JSON.stringify(activity('wa_1', 'completed'))}\n\n`,
+    `event: source\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', sourceId, displayUrl: 'https://example.org/not-github', url: 'https://example.org/not-github', redacted: false, linkKind: 'constructed' })}\n\n`
+  ].join('');
+  const invalidClient = clientWithResponse(sseResponse(invalidSource), { webMode: 'legacy' }).client;
+  await assert.rejects(() => invalidClient.run({ prompt: 'domain', sessionId, receiptProfile: 'github-mcp-v1' }), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
+});
+
+test('Codex Gateway rejects incompatible activity snapshots before forwarding the terminal event', async () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const sessionId = 'gs_' + '3'.repeat(64);
+  const cases = [
+    {
+      name: 'known web action changes',
+      started: { tool: 'web_search', action: 'search' },
+      completed: { tool: 'web_search', action: 'open_page' },
+      profile: undefined
+    },
+    {
+      name: 'known web action returns to unknown',
+      started: { tool: 'web_search', action: 'search' },
+      completed: { tool: 'web_search', action: 'unknown' },
+      profile: undefined
+    },
+    {
+      name: 'GitHub action changes',
+      started: { tool: 'github_mcp', action: 'search_code' },
+      completed: { tool: 'github_mcp', action: 'list_commits' },
+      profile: 'github-mcp-v1'
+    }
+  ];
+  for (const item of cases) {
+    const started = {
+      requestId, activityId: 'wa_1', phase: 'started', outcome: 'unknown', ...item.started
+    };
+    const completed = {
+      requestId, activityId: 'wa_1', phase: 'completed', outcome: 'unknown', sources: 'none', ...item.completed
+    };
+    const stream = [
+      `event: session\ndata: ${JSON.stringify({ sessionId })}\n\n`,
+      `event: activity\ndata: ${JSON.stringify(started)}\n\n`,
+      `event: activity\ndata: ${JSON.stringify(completed)}\n\n`,
+      'event: completion\ndata: {"status":"completed"}\n\n'
+    ].join('');
+    const events = [];
+    const { client } = clientWithResponse(sseResponse(stream), { webMode: 'native' });
+    await assert.rejects(
+      () => client.run({ prompt: item.name, sessionId, receiptProfile: item.profile, onEvent: event => events.push(event) }),
+      error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE'
+    );
+    assert.deepEqual(events.map(event => event.type), ['session', 'activity'], item.name);
+  }
+});
+
+test('Codex client rejects receipt events after turn completion instead of ignoring them', async () => {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const sessionId = 'gs_' + '6'.repeat(64);
+  const stream = [
+    `event: session\ndata: ${JSON.stringify({ sessionId })}\n\n`,
+    'event: completion\ndata: {"status":"completed"}\n\n',
+    `event: activity\ndata: ${JSON.stringify({ requestId, activityId: 'wa_1', tool: 'github_mcp', phase: 'started', action: 'search_code', outcome: 'unknown' })}\n\n`
+  ].join('');
+  const { client } = clientWithResponse(sseResponse(stream), { webMode: 'legacy' });
+  await assert.rejects(() => client.run({ prompt: 'late', receiptProfile: 'github-mcp-v1' }), error => error.code === 'CODEX_GATEWAY_INVALID_RESPONSE');
 });
 
 test('Codex client rejects duplicate or uncorrelated native receipt events', async () => {

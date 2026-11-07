@@ -16,15 +16,7 @@ var SyncModule = (function() {
   var CODEX_SYNC_STATUSES = { running: true, completed: true, failed: true, canceled: true, unknown: true };
   var CODEX_TERMINAL_STATUSES = { completed: true, failed: true, canceled: true, unknown: true };
   var CODEX_PULL_MAX_PAGES = 1000;
-  var CODEX_RECEIPT_REQUEST_ID = /^wr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  var CODEX_RECEIPT_ACTIVITY_ID = /^wa_[1-9][0-9]*$/;
-  var CODEX_RECEIPT_SOURCE_ID = /^ws_[0-9a-f]{64}$/;
-  var CODEX_RECEIPT_REF_ID = /^[a-zA-Z0-9_-]{1,128}$/;
-  var CODEX_RECEIPT_MAX_ACTIVITIES = 64;
-  var CODEX_RECEIPT_MAX_SOURCES = 8;
-  var CODEX_RECEIPT_MAX_URL_BYTES = 2048;
-  var CODEX_RECEIPT_MAX_TITLE_BYTES = 256;
-  var CODEX_RECEIPT_MAX_BYTES = 64 * 1024;
+  var CODEX_RECEIPT_PROFILE = 'github-mcp-v1';
 
   function isCodexProject(project) {
     return !!project && project.id === CODEX_PROJECT_ID && project.runtime === CODEX_RUNTIME;
@@ -35,119 +27,72 @@ var SyncModule = (function() {
       ? message._codexTurnStatus : 'unknown';
   }
 
-  function receiptBytes(value) {
-    try {
-      if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).length;
-      return unescape(encodeURIComponent(value)).length;
-    } catch (_) { return Number.MAX_SAFE_INTEGER; }
+  function receiptContract() {
+    if (typeof CodexReceiptContract === 'undefined' || !CodexReceiptContract ||
+        typeof CodexReceiptContract.normalizeReceiptSet !== 'function' ||
+        typeof CodexReceiptContract.compactReceiptSet !== 'function') {
+      var unavailable = new Error('CODEX_RECEIPT_CONTRACT_UNAVAILABLE');
+      unavailable.code = 'CODEX_RECEIPT_CONTRACT_UNAVAILABLE';
+      throw unavailable;
+    }
+    return CodexReceiptContract;
   }
 
-  function receiptPublicUrl(value) {
-    if (typeof value !== 'string' || receiptBytes(value) > CODEX_RECEIPT_MAX_URL_BYTES || /[\s\u0000-\u001f\u007f\\]/.test(value)) return false;
-    if (!/^https?:\/\/[^/?#]+(?:[/?#]|$)/i.test(value)) return false;
-    try {
-      var parsed = new URL(value);
-      var host = String(parsed.hostname || '').toLowerCase();
-      return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && !parsed.username && !parsed.password && !parsed.port &&
-        !parsed.search && !parsed.hash && !/^\d+(?:\.\d+){3}$/.test(host) && host.indexOf(':') < 0 && host.indexOf('.') >= 0 &&
-        host.charAt(host.length - 1) !== '.' && !/(^|\.)(localhost|local|internal|invalid|test)$/.test(host) && /^[a-z0-9.-]+$/.test(host);
-    } catch (_) { return false; }
+  function receiptOptions(profile) {
+    if (profile === undefined) return undefined;
+    if (profile !== CODEX_RECEIPT_PROFILE) {
+      var unsupported = new Error('CODEX_RECEIPT_PROFILE_UNSUPPORTED');
+      unsupported.code = 'CODEX_RECEIPT_PROFILE_UNSUPPORTED';
+      throw unsupported;
+    }
+    return { profile: CODEX_RECEIPT_PROFILE };
   }
 
-  function compactCodexReceipts(receipts) {
-    var priorOmittedSources = Number.isInteger(receipts.omittedSources) ? receipts.omittedSources : 0;
-    var totalSources = priorOmittedSources + receipts.activities.reduce(function(total, activity) {
-      return total + (Array.isArray(activity.sourceCards) ? activity.sourceCards.length : 0);
-    }, 0);
-    var result = {
-      activities: receipts.activities.map(function(activity) {
-        var compacted = {
-          requestId: activity.requestId, activityId: activity.activityId,
-          tool: 'web_search', phase: activity.phase,
-          action: activity.action, outcome: 'unknown', sourceCards: []
-        };
-        if (activity.phase === 'completed') compacted.sources = activity.sources;
-        if (activity.phase === 'interrupted') compacted.reason = activity.reason;
-        return compacted;
-      }),
-      omitted: true,
-      omittedSources: totalSources
+  function normalizeCodexReceipts(receipts, profile) {
+    try {
+      return receiptContract().normalizeReceiptSet(receipts, receiptOptions(profile));
+    } catch (error) {
+      if (error && error.code === 'CODEX_RECEIPT_CONTRACT_UNAVAILABLE') throw error;
+      var invalid = new Error('CODEX_SYNC_INVALID_REQUEST');
+      invalid.code = 'CODEX_SYNC_INVALID_REQUEST';
+      throw invalid;
+    }
+  }
+
+  function compactCodexReceipts(receipts, profile) {
+    try {
+      return receiptContract().compactReceiptSet(receipts, receiptOptions(profile));
+    } catch (error) {
+      if (error && error.code === 'CODEX_RECEIPT_CONTRACT_UNAVAILABLE') throw error;
+      var invalid = new Error('CODEX_SYNC_INVALID_REQUEST');
+      invalid.code = 'CODEX_SYNC_INVALID_REQUEST';
+      throw invalid;
+    }
+  }
+
+  function hasOwn(value, key) {
+    return Object.prototype.hasOwnProperty.call(value, key);
+  }
+
+  function codexReceiptMetadata(message) {
+    var hasProfile = hasOwn(message, '_codexReceiptProfile');
+    var hasReceipts = hasOwn(message, '_codexReceipts') && message._codexReceipts !== undefined;
+    if (hasProfile && message._codexReceiptProfile !== CODEX_RECEIPT_PROFILE) {
+      var unsupported = new Error('CODEX_RECEIPT_PROFILE_UNSUPPORTED');
+      unsupported.code = 'CODEX_RECEIPT_PROFILE_UNSUPPORTED';
+      throw unsupported;
+    }
+    if (hasProfile && !hasReceipts) {
+      var missing = new Error('CODEX_RECEIPT_PROFILE_REQUIRES_RECEIPTS');
+      missing.code = 'CODEX_RECEIPT_PROFILE_REQUIRES_RECEIPTS';
+      throw missing;
+    }
+    return {
+      hasProfile: hasProfile,
+      hasReceipts: hasReceipts,
+      profile: hasProfile ? CODEX_RECEIPT_PROFILE : undefined,
+      receipts: hasReceipts ? compactCodexReceipts(message._codexReceipts, hasProfile ? CODEX_RECEIPT_PROFILE : undefined) : undefined
     };
-    var retainedSources = 0;
-    for (var activityIndex = 0; activityIndex < receipts.activities.length; activityIndex++) {
-      var sourceCards = Array.isArray(receipts.activities[activityIndex].sourceCards)
-        ? receipts.activities[activityIndex].sourceCards : [];
-      for (var sourceIndex = 0; sourceIndex < sourceCards.length; sourceIndex++) {
-        result.activities[activityIndex].sourceCards.push(sourceCards[sourceIndex]);
-        retainedSources += 1;
-        result.omittedSources = totalSources - retainedSources;
-        if (receiptBytes(JSON.stringify(result)) > CODEX_RECEIPT_MAX_BYTES) {
-          result.activities[activityIndex].sourceCards.pop();
-          retainedSources -= 1;
-          result.omittedSources = totalSources - retainedSources;
-        }
-      }
-    }
-    return result;
-  }
-
-  function normalizeCodexReceipts(receipts) {
-    if (!receipts || typeof receipts !== 'object' || Array.isArray(receipts) || !Array.isArray(receipts.activities) || receipts.activities.length > CODEX_RECEIPT_MAX_ACTIVITIES) throw new Error('invalid receipts');
-    if (receipts.omitted !== undefined && typeof receipts.omitted !== 'boolean') throw new Error('invalid receipts');
-    if (receipts.omittedSources !== undefined && (!Number.isInteger(receipts.omittedSources) || receipts.omittedSources < 0)) throw new Error('invalid receipts');
-    if (receipts.omittedSources > 0 && receipts.omitted !== true) throw new Error('invalid receipts');
-    var result = { activities: [] }, activityIds = {}, requestId = null;
-    receipts.activities.forEach(function(activity) {
-      if (!activity || typeof activity !== 'object' || Array.isArray(activity) || !CODEX_RECEIPT_REQUEST_ID.test(activity.requestId || '') ||
-          !CODEX_RECEIPT_ACTIVITY_ID.test(activity.activityId || '') || activityIds[activity.activityId] || activity.tool !== 'web_search' ||
-          ['started', 'completed', 'interrupted'].indexOf(activity.phase) < 0 || ['unknown', 'search', 'open_page'].indexOf(activity.action) < 0 || activity.outcome !== 'unknown') throw new Error('invalid receipts');
-      if (requestId && requestId !== activity.requestId) throw new Error('invalid receipts');
-      requestId = activity.requestId; activityIds[activity.activityId] = true;
-      var targetKeys = ['targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl'];
-      var hasTarget = targetKeys.some(function(key) { return Object.prototype.hasOwnProperty.call(activity, key); });
-      if (hasTarget && activity.action !== 'open_page') throw new Error('invalid receipts');
-      var normalized = { requestId: requestId, activityId: activity.activityId, tool: 'web_search', phase: activity.phase, action: activity.action, outcome: 'unknown' };
-      if (hasTarget) {
-        if (!CODEX_RECEIPT_SOURCE_ID.test(activity.targetSourceId || '') || !receiptPublicUrl(activity.targetDisplayUrl) || typeof activity.targetRedacted !== 'boolean') throw new Error('invalid receipts');
-        if (activity.targetRedacted ? Object.prototype.hasOwnProperty.call(activity, 'targetUrl') : !receiptPublicUrl(activity.targetUrl) || activity.targetUrl !== activity.targetDisplayUrl) throw new Error('invalid receipts');
-        normalized.targetSourceId = activity.targetSourceId; normalized.targetDisplayUrl = activity.targetDisplayUrl; normalized.targetRedacted = activity.targetRedacted;
-        if (!activity.targetRedacted) normalized.targetUrl = activity.targetUrl;
-      }
-      if (activity.phase === 'completed') {
-        if (['available', 'none', 'unknown'].indexOf(activity.sources) < 0) throw new Error('invalid receipts');
-        normalized.sources = activity.sources;
-      }
-      if (activity.phase === 'interrupted') {
-        if (['turn_ended', 'round_failed', 'cancelled'].indexOf(activity.reason) < 0) throw new Error('invalid receipts');
-        normalized.reason = activity.reason;
-      }
-      if (!Array.isArray(activity.sourceCards) || activity.sourceCards.length > CODEX_RECEIPT_MAX_SOURCES || (activity.phase !== 'completed' && activity.sourceCards.length)) throw new Error('invalid receipts');
-      var sourceIds = {};
-      normalized.sourceCards = activity.sourceCards.map(function(source) {
-        if (!source || typeof source !== 'object' || Array.isArray(source) || source.requestId !== requestId || source.activityId !== activity.activityId ||
-            !CODEX_RECEIPT_SOURCE_ID.test(source.sourceId || '') || sourceIds[source.sourceId] || !receiptPublicUrl(source.displayUrl) || typeof source.redacted !== 'boolean') throw new Error('invalid receipts');
-        if (source.redacted ? Object.prototype.hasOwnProperty.call(source, 'url') : !receiptPublicUrl(source.url) || source.url !== source.displayUrl) throw new Error('invalid receipts');
-        var normalizedSource = { requestId: requestId, activityId: activity.activityId, sourceId: source.sourceId, displayUrl: source.displayUrl, redacted: source.redacted };
-        if (!source.redacted) normalizedSource.url = source.url;
-        if (source.title !== undefined) {
-          if (typeof source.title !== 'string' || receiptBytes(source.title) > CODEX_RECEIPT_MAX_TITLE_BYTES) throw new Error('invalid receipts');
-          if (source.title) normalizedSource.title = source.title;
-        }
-        if (source.refId !== undefined) {
-          if (typeof source.refId !== 'string' || !CODEX_RECEIPT_REF_ID.test(source.refId)) throw new Error('invalid receipts');
-          normalizedSource.refId = source.refId;
-        }
-        sourceIds[source.sourceId] = true;
-        return normalizedSource;
-      });
-      result.activities.push(normalized);
-    });
-    if (receipts.omitted === true) {
-      result.omitted = true;
-      result.omittedSources = receipts.omittedSources || 0;
-    }
-    if (receiptBytes(JSON.stringify(result)) > CODEX_RECEIPT_MAX_BYTES) return compactCodexReceipts(result);
-    return result;
   }
 
   function codexMetadata(message) {
@@ -162,9 +107,9 @@ var SyncModule = (function() {
     else if (message.contentType !== undefined && message.contentType !== null && typeof message.contentType !== 'string') metadata.contentType = message.contentType;
     if (Number.isInteger(message._codexVersion)) metadata.version = message._codexVersion;
     if (message._codexWriterId) metadata.writerId = String(message._codexWriterId);
-    if (message._codexReceipts) {
-      metadata.receipts = normalizeCodexReceipts(message._codexReceipts);
-    }
+    var receiptMetadata = codexReceiptMetadata(message);
+    if (receiptMetadata.hasProfile) metadata.receiptProfile = receiptMetadata.profile;
+    if (receiptMetadata.hasReceipts) metadata.receipts = receiptMetadata.receipts;
     return metadata;
   }
 
@@ -356,6 +301,7 @@ var SyncModule = (function() {
     batches.forEach(function(batch) {
       chain = chain.then(function() {
         var snapshots = batch.map(function(message) {
+          var metadata = codexMetadata(message);
           return {
             message: message,
             id: message.id,
@@ -367,7 +313,8 @@ var SyncModule = (function() {
             updatedAt: message._codexUpdatedAt || message.createdAt || '',
             writerId: message._codexWriterId || '',
             tokenUsage: message._tokenUsage || 0,
-            metadata: codexMetadata(message)
+            metadata: metadata,
+            metadataJson: JSON.stringify(metadata)
           };
         });
         var rows = snapshots.map(function(snapshot) {
@@ -385,30 +332,39 @@ var SyncModule = (function() {
         });
         return fetch(AppCore.BACKEND_URL + '/api/codex/sync-messages', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: rows })
+          body: JSON.stringify({ receiptProfile: CODEX_RECEIPT_PROFILE, messages: rows })
         }).then(function(response) {
-          if (!response.ok) throw new Error('HTTP ' + response.status);
-          return response.json();
-        }).then(function(data) {
-          var accepted = data && Array.isArray(data.syncedMessageIds) ? data.syncedMessageIds : [];
-          var changed = false;
-          accepted.forEach(function(id) {
-            var snapshot = snapshots.find(function(item) { return item.id === id; });
-            var current = chat.messages.find(function(item) { return item.id === id; });
-            if (!snapshot || !current) return;
-            if (current.text !== snapshot.text || codexMessageStatus(current) !== snapshot.status ||
-                (Number.isInteger(current._codexVersion) ? current._codexVersion : 0) !== snapshot.version ||
-                (current._codexUpdatedAt || current.createdAt || '') !== snapshot.updatedAt ||
-                (current._codexWriterId || '') !== snapshot.writerId) return;
-            current._synced = true;
-            current._syncDirty = false;
-            changed = true;
+          return response.json().catch(function(error) {
+            if (!response.ok) return {};
+            throw error;
+          }).then(function(data) {
+            var accepted = data && Array.isArray(data.syncedMessageIds) ? data.syncedMessageIds : [];
+            var changed = false;
+            accepted.forEach(function(id) {
+              var snapshot = snapshots.find(function(item) { return item.id === id; });
+              var current = chat.messages.find(function(item) { return item.id === id; });
+              if (!snapshot || !current) return;
+              if (current.text !== snapshot.text || codexMessageStatus(current) !== snapshot.status ||
+                  (Number.isInteger(current._codexVersion) ? current._codexVersion : 0) !== snapshot.version ||
+                  (current._codexUpdatedAt || current.createdAt || '') !== snapshot.updatedAt ||
+                  (current._codexWriterId || '') !== snapshot.writerId) return;
+              var currentMetadata;
+              try { currentMetadata = JSON.stringify(codexMetadata(current)); } catch (_) { return; }
+              if (currentMetadata !== snapshot.metadataJson) return;
+              current._synced = true;
+              current._syncDirty = false;
+              changed = true;
+            });
+            if (changed) AppCore.saveStore();
+            if (!response.ok) throw new Error('HTTP ' + response.status);
           });
-          if (changed) AppCore.saveStore();
         });
       });
     });
-    return chain.catch(function(error) { console.warn('[codex-sync] upload failed:', error.message); });
+    return chain.catch(function(error) {
+      console.warn('[codex-sync] upload failed:', error.message);
+      return false;
+    });
   }
 
   function scheduleCodexMessageSync(projectId, chatId) {
@@ -418,8 +374,22 @@ var SyncModule = (function() {
 
   function codexCloudMessageToLocal(row) {
     var metadata = row.metadata || {};
+    var hasProfile = hasOwn(metadata, 'receiptProfile');
+    var hasReceipts = hasOwn(metadata, 'receipts') && metadata.receipts !== undefined;
+    if (hasProfile && metadata.receiptProfile !== CODEX_RECEIPT_PROFILE) {
+      var unsupported = new Error('CODEX_RECEIPT_PROFILE_UNSUPPORTED');
+      unsupported.code = 'CODEX_RECEIPT_PROFILE_UNSUPPORTED';
+      throw unsupported;
+    }
+    if (hasProfile && !hasReceipts) {
+      var missing = new Error('CODEX_RECEIPT_PROFILE_REQUIRES_RECEIPTS');
+      missing.code = 'CODEX_RECEIPT_PROFILE_REQUIRES_RECEIPTS';
+      throw missing;
+    }
+    var profile = hasProfile ? CODEX_RECEIPT_PROFILE : undefined;
+    var receipts = hasReceipts ? normalizeCodexReceipts(metadata.receipts, profile) : undefined;
     var parts = getLocalTimestampParts(row.createdAt);
-    return {
+    var result = {
       id: row.messageId, role: row.role === 'assistant' ? 'ai' : 'user', text: row.content || '',
       date: parts.date, time: parts.time, createdAt: row.createdAt,
       _codexRuntime: CODEX_RUNTIME, _codexTurnId: metadata.turnId || row.messageId,
@@ -428,9 +398,11 @@ var SyncModule = (function() {
       _codexUpdatedAt: metadata.updatedAt || row.createdAt,
       _codexVersion: Number.isInteger(metadata.version) ? metadata.version : 0,
       _codexWriterId: metadata.writerId || '', _synced: true, _syncDirty: false,
-      _codexRemote: true,
-      _codexReceipts: metadata.receipts ? normalizeCodexReceipts(metadata.receipts) : undefined
+      _codexRemote: true
     };
+    if (hasProfile) result._codexReceiptProfile = profile;
+    if (hasReceipts) result._codexReceipts = receipts;
+    return result;
   }
 
   function ensureCodexCloudChat(project, windowId) {
@@ -492,6 +464,22 @@ var SyncModule = (function() {
     else chat.messages.push(incoming);
   }
 
+  function assertCodexReceiptSnapshotCompatible(existing, incoming) {
+    if (!hasOwn(existing, '_codexReceiptProfile')) return;
+    if (!hasOwn(incoming, '_codexReceiptProfile') || !hasOwn(incoming, '_codexReceipts') ||
+        incoming._codexReceiptProfile !== existing._codexReceiptProfile) {
+      var mismatch = new Error('CODEX_RECEIPT_PROFILE_SNAPSHOT_MISMATCH');
+      mismatch.code = 'CODEX_RECEIPT_PROFILE_SNAPSHOT_MISMATCH';
+      throw mismatch;
+    }
+  }
+
+  function applyCodexCloudSnapshot(existing, incoming) {
+    if (!hasOwn(incoming, '_codexReceiptProfile')) delete existing._codexReceiptProfile;
+    if (!hasOwn(incoming, '_codexReceipts')) delete existing._codexReceipts;
+    Object.assign(existing, incoming);
+  }
+
   function mergeCodexCloudMessages(project, rows) {
     var changed = false;
     var chatTime = (typeof ChatTimeModule !== 'undefined' && ChatTimeModule) ||
@@ -513,9 +501,10 @@ var SyncModule = (function() {
       }
       var existing = chat.messages.find(function(message) { return message.id === incoming.id; });
       if (existing) {
+        assertCodexReceiptSnapshotCompatible(existing, incoming);
         if (!isNewerCodexRow(existing, incoming)) return;
         var wasLocal = existing._codexLocalDevice === true;
-        Object.assign(existing, incoming);
+        applyCodexCloudSnapshot(existing, incoming);
         if (wasLocal && incoming._codexTurnStatus === 'running') existing._codexLocalDevice = true;
       } else {
         mergeCodexNewMessage(chat, incoming, appendState);
@@ -539,7 +528,8 @@ var SyncModule = (function() {
     var rowsSeen = 0;
     var complete = false;
     for (var page = 0; page < CODEX_PULL_MAX_PAGES; page++) {
-      var url = AppCore.BACKEND_URL + '/api/codex/conversation-messages?projectId=' + encodeURIComponent(CODEX_PROJECT_ID) + '&limit=100';
+      var url = AppCore.BACKEND_URL + '/api/codex/conversation-messages?projectId=' + encodeURIComponent(CODEX_PROJECT_ID) +
+        '&receiptProfile=' + encodeURIComponent(CODEX_RECEIPT_PROFILE) + '&limit=100';
       if (cursor) url += '&cursor=' + encodeURIComponent(cursor);
       var response = await fetch(url);
       if (!response.ok) throw new Error('HTTP ' + response.status);
@@ -596,7 +586,9 @@ var SyncModule = (function() {
         .then(function(data) {
           if (data.synced > 0) {
             totalSynced += data.synced;
+            var confirmedIds = Array.isArray(data.syncedMessageIds) ? data.syncedMessageIds : null;
             for (var j = 0; j < batch.length; j++) {
+              if (confirmedIds && confirmedIds.indexOf(batch[j].message_id) < 0) continue;
               var msg = chat.messages.find(function(m2) { return m2.id === batch[j].message_id; });
               if (msg) msg._synced = true;
             }

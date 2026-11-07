@@ -12,6 +12,9 @@ test('Codex project is independently registered and loaded after ChatModule', ()
   assert.match(appCore, /codex-code-test/);
   assert.match(appCore, /codex-gateway/);
   assert.match(index, /js\/codex\.js/);
+  assert.match(index, /js\/codex-receipt-contract\.js/);
+  assert.ok(index.indexOf('js/codex-receipt-contract.js') < index.indexOf('js/sync.js'));
+  assert.ok(index.indexOf('js/codex-receipt-contract.js') < index.indexOf('js/codex.js'));
   assert.ok(index.indexOf('js/chat.js') < index.indexOf('js/codex.js'));
 });
 

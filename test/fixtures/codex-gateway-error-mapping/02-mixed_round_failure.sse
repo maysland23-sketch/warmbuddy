@@ -1,0 +1,24 @@
+event: session
+data: {"sessionId":"gs_0101010101010101010101010101010101010101010101010101010101010101"}
+
+event: status
+data: {"status":"running"}
+
+event: activity
+data: {"requestId":"wr_00000002-0000-4000-8000-000000000001","activityId":"wa_1","tool":"web_search","phase":"started","action":"unknown","outcome":"unknown"}
+
+event: activity
+data: {"requestId":"wr_00000002-0000-4000-8000-000000000001","activityId":"wa_2","tool":"github_mcp","action":"get_file_contents","phase":"started","outcome":"unknown","context":{"owner":"jonschlinkert","repo":"is-number","path":"index.js","commit":"98e8ff1da1a89f93d1397a24d7413ed15421c139"}}
+
+event: activity
+data: {"requestId":"wr_00000002-0000-4000-8000-000000000001","activityId":"wa_1","tool":"web_search","phase":"interrupted","action":"unknown","outcome":"unknown","reason":"round_failed"}
+
+event: activity
+data: {"requestId":"wr_00000002-0000-4000-8000-000000000001","activityId":"wa_2","tool":"github_mcp","action":"get_file_contents","phase":"interrupted","outcome":"unknown","context":{"owner":"jonschlinkert","repo":"is-number","path":"index.js","commit":"98e8ff1da1a89f93d1397a24d7413ed15421c139"},"reason":"round_failed"}
+
+event: error
+data: {"code":"TIMEOUT"}
+
+event: completion
+data: {"status":"failed"}
+

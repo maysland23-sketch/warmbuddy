@@ -34,7 +34,7 @@ test('Codex config exposes only the server-selected non-sensitive web mode', asy
     });
     assert.equal(legacy.status, 200);
     assert.equal(legacy.headers.get('cache-control'), 'no-store');
-    assert.deepEqual(await legacy.json(), { webMode: 'legacy' });
+    assert.deepEqual(await legacy.json(), { webMode: 'legacy', receiptProfile: null });
 
     app.locals.codexWebMode = 'native';
     const native = await fetch(`http://127.0.0.1:${api.address().port}/api/codex/config`, {
@@ -42,10 +42,30 @@ test('Codex config exposes only the server-selected non-sensitive web mode', asy
     });
     const nativeBody = await native.text();
     assert.equal(native.headers.get('cache-control'), 'no-store');
-    assert.deepEqual(JSON.parse(nativeBody), { webMode: 'native' });
+    assert.deepEqual(JSON.parse(nativeBody), { webMode: 'native', receiptProfile: null });
     assert.doesNotMatch(nativeBody, /token|gateway|thread|url/i);
   } finally {
     delete app.locals.codexWebMode;
+    await stopApi(api);
+  }
+});
+
+test('Codex stream keeps the E1-A request shape and rejects a profile while the E1-B gate is off', async () => {
+  let calls = 0;
+  app.locals.codexGatewayClient = { run: async () => { calls++; } };
+  const api = await startApi();
+  try {
+    const response = await fetch(`http://127.0.0.1:${api.address().port}/api/codex/stream`, {
+      method: 'POST', headers: PROXY_HEADERS,
+      body: JSON.stringify({ prompt: 'legacy', receiptProfile: 'github-mcp-v1' })
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: 'Invalid Codex request', code: 'CODEX_INVALID_REQUEST'
+    });
+    assert.equal(calls, 0);
+  } finally {
+    delete app.locals.codexGatewayClient;
     await stopApi(api);
   }
 });

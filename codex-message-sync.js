@@ -1,6 +1,6 @@
 'use strict';
 
-const { isIP } = require('node:net');
+const receiptContract = require('./public/js/codex-receipt-contract');
 
 const CODEX_PROJECT_ID = 'codex-code-test';
 const CODEX_RUNTIME = 'codex-gateway';
@@ -9,23 +9,210 @@ const CODEX_SYNC_STATUSES = new Set(['running', 'completed', 'failed', 'canceled
 const CODEX_ROLES = new Set(['user', 'assistant']);
 const CODEX_MAX_PAGE_SIZE = 100;
 const CODEX_MAX_CONTENT_BYTES = 4 * 1024 * 1024;
-const CODEX_METADATA_KEYS = new Set(['runtime', 'turnId', 'turnStatus', 'messageIndex', 'updatedAt', 'contentType', 'version', 'writerId', 'receipts']);
+const CODEX_METADATA_KEYS = new Set(['runtime', 'turnId', 'turnStatus', 'messageIndex', 'updatedAt', 'contentType', 'version', 'writerId', 'receipts', 'receiptProfile']);
 const CODEX_TERMINAL_STATUSES = new Set(['completed', 'failed', 'canceled', 'unknown']);
-const CODEX_RECEIPT_REQUEST_ID = /^wr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const CODEX_RECEIPT_ACTIVITY_ID = /^wa_[1-9][0-9]*$/;
-const CODEX_RECEIPT_SOURCE_ID = /^ws_[0-9a-f]{64}$/;
-const CODEX_RECEIPT_REF_ID = /^[a-zA-Z0-9_-]{1,128}$/;
-const CODEX_RECEIPT_MAX_ACTIVITIES = 64;
-const CODEX_RECEIPT_MAX_SOURCES = 8;
-const CODEX_RECEIPT_MAX_URL_BYTES = 2048;
-const CODEX_RECEIPT_MAX_TITLE_BYTES = 256;
-const CODEX_RECEIPT_MAX_BYTES = 64 * 1024;
+const CODEX_RECEIPT_PROFILE = receiptContract.PROFILE;
+const CODEX_RECEIPT_PROFILE_REQUIRED = 'CODEX_RECEIPT_PROFILE_REQUIRED';
+const CODEX_RECEIPT_PROFILE_UNSUPPORTED = 'CODEX_RECEIPT_PROFILE_UNSUPPORTED';
+const CODEX_RECEIPT_UPDATE_CONFLICT = 'CODEX_RECEIPT_UPDATE_CONFLICT';
+const CODEX_RECEIPT_MESSAGE_OWNERSHIP_CONFLICT = 'CODEX_RECEIPT_MESSAGE_OWNERSHIP_CONFLICT';
 
 function invalid(message = CODEX_SYNC_ERROR) {
   const error = new Error(message);
   error.code = CODEX_SYNC_ERROR;
   error.status = 400;
   return error;
+}
+
+function protectionError(code, status) {
+  const error = new Error(code);
+  error.code = code;
+  error.status = status;
+  return error;
+}
+
+function validateCodexReceiptProfile(value, { required = false } = {}) {
+  if (value === undefined) {
+    if (required) throw protectionError(CODEX_RECEIPT_PROFILE_REQUIRED, 428);
+    return undefined;
+  }
+  if (value !== CODEX_RECEIPT_PROFILE) throw protectionError(CODEX_RECEIPT_PROFILE_UNSUPPORTED, 400);
+  return CODEX_RECEIPT_PROFILE;
+}
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isCodexProtectedMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return false;
+  if (hasOwn(metadata, 'receiptProfile')) return true;
+  return !!(metadata.receipts && Array.isArray(metadata.receipts.activities) &&
+    metadata.receipts.activities.some(activity => activity && activity.tool === 'github_mcp'));
+}
+
+function isCodexProtectedRow(row) {
+  return !!row && isCodexProtectedMetadata(row.metadata);
+}
+
+function assertCodexMessageOwnership(existing, incoming) {
+  if (!existing || existing.project_id !== incoming.project_id || existing.window_id !== incoming.window_id ||
+      !existing.metadata || existing.metadata.runtime !== CODEX_RUNTIME) {
+    throw protectionError(CODEX_RECEIPT_MESSAGE_OWNERSHIP_CONFLICT, 409);
+  }
+}
+
+function protectedUpdateConflict() {
+  throw protectionError(CODEX_RECEIPT_UPDATE_CONFLICT, 409);
+}
+
+function equalCanonicalValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function assertOptionalContextCompatible(existing, incoming) {
+  if (!hasOwn(existing, 'context') || !hasOwn(incoming, 'context')) return;
+  const fields = ['owner', 'repo', 'path', 'ref', 'commit'];
+  for (const field of fields) {
+    if (hasOwn(existing.context, field) && hasOwn(incoming.context, field) &&
+        existing.context[field] !== incoming.context[field]) protectedUpdateConflict();
+  }
+}
+
+function assertOptionalDisplayCompatible(existing, incoming, fields) {
+  assertOptionalContextCompatible(existing, incoming);
+  for (const field of fields) {
+    if (field === 'context') continue;
+    if (hasOwn(existing, field) && hasOwn(incoming, field) &&
+        !equalCanonicalValue(existing[field], incoming[field])) protectedUpdateConflict();
+  }
+}
+
+function assertSourceCardCompatible(existing, incoming) {
+  const coreFields = ['requestId', 'activityId', 'sourceId', 'displayUrl', 'redacted', 'url', 'linkKind'];
+  for (const field of coreFields) {
+    if (hasOwn(existing, field) !== hasOwn(incoming, field) ||
+        (hasOwn(existing, field) && !equalCanonicalValue(existing[field], incoming[field]))) {
+      protectedUpdateConflict();
+    }
+  }
+  assertOptionalDisplayCompatible(existing, incoming, ['title', 'refId', 'context']);
+}
+
+function activityKey(activity) {
+  return activity.requestId + '\u0000' + activity.activityId;
+}
+
+function indexActivities(receipts) {
+  const result = new Map();
+  for (const activity of receipts.activities) result.set(activityKey(activity), activity);
+  return result;
+}
+
+function sourceStateRank(value) {
+  return value === 'none' ? 1 : value === 'available' ? 2 : 0;
+}
+
+function assertProtectedActivityCompatible(existing, incoming) {
+  for (const field of ['requestId', 'activityId', 'tool']) {
+    if (existing[field] !== incoming[field]) protectedUpdateConflict();
+  }
+  const canBindWebActionAtSettlement = existing.tool === 'web_search' &&
+    existing.phase === 'started' && existing.action === 'unknown' &&
+    (incoming.phase === 'completed' || incoming.phase === 'interrupted') &&
+    (incoming.action === 'search' || incoming.action === 'open_page');
+  if (existing.action !== incoming.action && !canBindWebActionAtSettlement) {
+    protectedUpdateConflict();
+  }
+
+  if (existing.phase === 'started') {
+    if (!['started', 'completed', 'interrupted'].includes(incoming.phase)) protectedUpdateConflict();
+    if (incoming.phase === 'started' && existing.outcome !== incoming.outcome) protectedUpdateConflict();
+  } else {
+    if (incoming.phase !== existing.phase || incoming.outcome !== existing.outcome) protectedUpdateConflict();
+    if (existing.phase === 'interrupted' && existing.reason !== incoming.reason) protectedUpdateConflict();
+    if (existing.outcome === 'failed' && hasOwn(existing, 'reason') &&
+        (!hasOwn(incoming, 'reason') || incoming.reason !== existing.reason)) protectedUpdateConflict();
+  }
+
+  if (existing.phase === 'completed' && incoming.phase === 'completed' &&
+      sourceStateRank(incoming.sources) < sourceStateRank(existing.sources)) protectedUpdateConflict();
+
+  assertOptionalDisplayCompatible(existing, incoming, [
+    'context', 'targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl'
+  ]);
+}
+
+function omissionCount(receipts) {
+  return Number.isSafeInteger(receipts.omittedSources) && receipts.omittedSources >= 0
+    ? receipts.omittedSources : 0;
+}
+
+function assertProtectedSourcesCompatible(existingReceipts, incomingReceipts, existingActivities, incomingActivities) {
+  const existingOmitted = omissionCount(existingReceipts);
+  const incomingOmitted = omissionCount(incomingReceipts);
+  if (incomingOmitted < existingOmitted) protectedUpdateConflict();
+
+  let missingVisibleSources = 0;
+  let sourcePrefixEnded = false;
+  for (const existingActivity of existingReceipts.activities) {
+    const incomingActivity = incomingActivities.get(activityKey(existingActivity));
+    if (!incomingActivity) protectedUpdateConflict();
+    const existingCards = existingActivity.sourceCards;
+    const incomingCards = incomingActivity.sourceCards;
+    if (sourcePrefixEnded && incomingCards.length > 0) protectedUpdateConflict();
+    const commonCount = Math.min(existingCards.length, incomingCards.length);
+    for (let index = 0; index < commonCount; index++) {
+      assertSourceCardCompatible(existingCards[index], incomingCards[index]);
+    }
+    if (incomingCards.length < existingCards.length) {
+      missingVisibleSources += existingCards.length - incomingCards.length;
+      sourcePrefixEnded = true;
+    }
+  }
+
+  if (sourcePrefixEnded) {
+    for (const [key, incomingActivity] of incomingActivities) {
+      if (!existingActivities.has(key) && incomingActivity.sourceCards.length > 0) {
+        protectedUpdateConflict();
+      }
+    }
+  }
+
+  if (missingVisibleSources > 0 &&
+      (incomingReceipts.omitted !== true || incomingOmitted < existingOmitted + missingVisibleSources)) {
+    protectedUpdateConflict();
+  }
+}
+
+function assertCodexProtectedUpdate(existing, incoming, requestProfile) {
+  if (!isCodexProtectedRow(existing)) return;
+  if (requestProfile !== CODEX_RECEIPT_PROFILE) throw protectionError(CODEX_RECEIPT_PROFILE_REQUIRED, 428);
+  const existingMetadata = existing.metadata;
+  const incomingMetadata = incoming.metadata;
+  const existingReceipts = existingMetadata && existingMetadata.receipts;
+  const incomingReceipts = incomingMetadata && incomingMetadata.receipts;
+  if (incomingMetadata.receiptProfile !== CODEX_RECEIPT_PROFILE || !incomingReceipts ||
+      !Array.isArray(incomingReceipts.activities) ||
+      !existingReceipts || !Array.isArray(existingReceipts.activities) ||
+      incomingReceipts.activities.length < existingReceipts.activities.length) {
+    throw protectionError(CODEX_RECEIPT_UPDATE_CONFLICT, 409);
+  }
+
+  const existingActivities = indexActivities(existingReceipts);
+  const incomingActivities = indexActivities(incomingReceipts);
+  for (const [key, existingActivity] of existingActivities) {
+    const incomingActivity = incomingActivities.get(key);
+    if (!incomingActivity) protectedUpdateConflict();
+    assertProtectedActivityCompatible(existingActivity, incomingActivity);
+  }
+  assertProtectedSourcesCompatible(existingReceipts, incomingReceipts, existingActivities, incomingActivities);
+}
+
+function codexMessagesEqual(existing, incoming) {
+  const normalizedExisting = normalizeCodexMessage(existing);
+  if (!normalizedExisting) return false;
+  return JSON.stringify(normalizedExisting) === JSON.stringify(incoming);
 }
 
 function text(value, field, { required = true, maxBytes = 256 } = {}) {
@@ -38,154 +225,39 @@ function text(value, field, { required = true, maxBytes = 256 } = {}) {
   return value;
 }
 
-function receiptText(value, maxBytes) {
-  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= maxBytes;
-}
-
-function receiptPublicUrl(value) {
-  if (!receiptText(value, CODEX_RECEIPT_MAX_URL_BYTES) || /[\s\u0000-\u001f\u007f\\]/.test(value)) return false;
-  if (!/^https?:\/\/[^/?#]+(?:[/?#]|$)/i.test(value)) return false;
+function normalizeCodexReceipts(receipts, options) {
   try {
-    const parsed = new URL(value);
-    const host = String(parsed.hostname || '').toLowerCase();
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
-      !parsed.username && !parsed.password && !parsed.port && !parsed.search && !parsed.hash &&
-      isIP(host) === 0 && host.includes('.') && !host.endsWith('.') &&
-      !/(^|\.)(localhost|local|internal|invalid|test)$/.test(host) && /^[a-z0-9.-]+$/.test(host);
+    return receiptContract.normalizeReceiptSet(receipts, options);
   } catch {
-    return false;
-  }
-}
-
-function normalizeCodexReceiptSource(source, requestId, activityId, sourceIds) {
-  if (!source || typeof source !== 'object' || Array.isArray(source) ||
-      source.requestId !== requestId || source.activityId !== activityId ||
-      !CODEX_RECEIPT_SOURCE_ID.test(source.sourceId || '') || sourceIds.has(source.sourceId) ||
-      !receiptPublicUrl(source.displayUrl) || typeof source.redacted !== 'boolean') throw invalid();
-  if (source.redacted) {
-    if (Object.prototype.hasOwnProperty.call(source, 'url')) throw invalid();
-  } else if (!receiptPublicUrl(source.url) || source.url !== source.displayUrl) {
     throw invalid();
   }
-  const result = {
-    requestId, activityId, sourceId: source.sourceId,
-    displayUrl: source.displayUrl, redacted: source.redacted
-  };
-  if (!source.redacted) result.url = source.url;
-  if (source.title !== undefined) {
-    if (!receiptText(source.title, CODEX_RECEIPT_MAX_TITLE_BYTES)) throw invalid();
-    if (source.title) result.title = source.title;
-  }
-  if (source.refId !== undefined) {
-    if (typeof source.refId !== 'string' || !CODEX_RECEIPT_REF_ID.test(source.refId)) throw invalid();
-    result.refId = source.refId;
-  }
-  sourceIds.add(source.sourceId);
-  return result;
 }
 
-function compactCodexReceipts(receipts) {
-  const priorOmittedSources = Number.isInteger(receipts.omittedSources) ? receipts.omittedSources : 0;
-  const totalSources = priorOmittedSources + receipts.activities.reduce((total, activity) => (
-    total + (Array.isArray(activity.sourceCards) ? activity.sourceCards.length : 0)
-  ), 0);
-  const result = {
-    activities: receipts.activities.map(activity => {
-      const compacted = {
-        requestId: activity.requestId, activityId: activity.activityId,
-        tool: 'web_search', phase: activity.phase,
-        action: activity.action, outcome: 'unknown', sourceCards: []
-      };
-      if (activity.phase === 'completed') compacted.sources = activity.sources;
-      if (activity.phase === 'interrupted') compacted.reason = activity.reason;
-      return compacted;
-    }),
-    omitted: true,
-    omittedSources: totalSources
-  };
-  let retainedSources = 0;
-  for (let activityIndex = 0; activityIndex < receipts.activities.length; activityIndex++) {
-    const sourceCards = Array.isArray(receipts.activities[activityIndex].sourceCards)
-      ? receipts.activities[activityIndex].sourceCards : [];
-    for (const source of sourceCards) {
-      result.activities[activityIndex].sourceCards.push(source);
-      result.omittedSources = totalSources - (++retainedSources);
-      if (Buffer.byteLength(JSON.stringify(result), 'utf8') > CODEX_RECEIPT_MAX_BYTES) {
-        result.activities[activityIndex].sourceCards.pop();
-        retainedSources--;
-        result.omittedSources = totalSources - retainedSources;
-      }
-    }
+function compactCodexReceipts(receipts, options) {
+  try {
+    return receiptContract.compactReceiptSet(receipts, options);
+  } catch {
+    throw invalid();
   }
-  return result;
-}
-
-function normalizeCodexReceipts(receipts) {
-  if (!receipts || typeof receipts !== 'object' || Array.isArray(receipts) || !Array.isArray(receipts.activities) ||
-      receipts.activities.length > CODEX_RECEIPT_MAX_ACTIVITIES) throw invalid();
-  if (receipts.omitted !== undefined && typeof receipts.omitted !== 'boolean') throw invalid();
-  if (receipts.omittedSources !== undefined &&
-      (!Number.isInteger(receipts.omittedSources) || receipts.omittedSources < 0)) throw invalid();
-  if (receipts.omittedSources > 0 && receipts.omitted !== true) throw invalid();
-  const result = { activities: [] };
-  const activityIds = new Set();
-  let requestId = null;
-  for (const activity of receipts.activities) {
-    if (!activity || typeof activity !== 'object' || Array.isArray(activity) ||
-        !CODEX_RECEIPT_REQUEST_ID.test(activity.requestId || '') ||
-        !CODEX_RECEIPT_ACTIVITY_ID.test(activity.activityId || '') || activityIds.has(activity.activityId) ||
-        activity.tool !== 'web_search' || !['started', 'completed', 'interrupted'].includes(activity.phase) ||
-        !['unknown', 'search', 'open_page'].includes(activity.action) || activity.outcome !== 'unknown') throw invalid();
-    if (requestId && requestId !== activity.requestId) throw invalid();
-    requestId = activity.requestId;
-    activityIds.add(activity.activityId);
-    const hasTarget = ['targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl']
-      .some(key => Object.prototype.hasOwnProperty.call(activity, key));
-    if (hasTarget && activity.action !== 'open_page') throw invalid();
-    const normalized = {
-      requestId, activityId: activity.activityId, tool: 'web_search', phase: activity.phase,
-      action: activity.action, outcome: 'unknown'
-    };
-    if (hasTarget) {
-      if (!CODEX_RECEIPT_SOURCE_ID.test(activity.targetSourceId || '') ||
-          !receiptPublicUrl(activity.targetDisplayUrl) || typeof activity.targetRedacted !== 'boolean') throw invalid();
-      if (activity.targetRedacted) {
-        if (Object.prototype.hasOwnProperty.call(activity, 'targetUrl')) throw invalid();
-      } else if (!receiptPublicUrl(activity.targetUrl) || activity.targetUrl !== activity.targetDisplayUrl) {
-        throw invalid();
-      }
-      normalized.targetSourceId = activity.targetSourceId;
-      normalized.targetDisplayUrl = activity.targetDisplayUrl;
-      normalized.targetRedacted = activity.targetRedacted;
-      if (!activity.targetRedacted) normalized.targetUrl = activity.targetUrl;
-    }
-    if (activity.phase === 'completed') {
-      if (!['available', 'none', 'unknown'].includes(activity.sources)) throw invalid();
-      normalized.sources = activity.sources;
-    }
-    if (activity.phase === 'interrupted') {
-      if (!['turn_ended', 'round_failed', 'cancelled'].includes(activity.reason)) throw invalid();
-      normalized.reason = activity.reason;
-    }
-    if (!Array.isArray(activity.sourceCards) || activity.sourceCards.length > CODEX_RECEIPT_MAX_SOURCES || activity.phase !== 'completed' && activity.sourceCards.length) throw invalid();
-    const sourceIds = new Set();
-    normalized.sourceCards = activity.sourceCards.map(source => normalizeCodexReceiptSource(source, requestId, activity.activityId, sourceIds));
-    result.activities.push(normalized);
-  }
-  if (receipts.omitted === true) {
-    result.omitted = true;
-    result.omittedSources = receipts.omittedSources || 0;
-  }
-  if (Buffer.byteLength(JSON.stringify(result), 'utf8') > CODEX_RECEIPT_MAX_BYTES) {
-    return compactCodexReceipts(result);
-  }
-  return result;
 }
 
 function normalizeCodexMetadata(metadata) {
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) throw invalid();
+  const hasReceiptProfile = Object.prototype.hasOwnProperty.call(metadata, 'receiptProfile');
+  const hasReceipts = Object.prototype.hasOwnProperty.call(metadata, 'receipts') && metadata.receipts !== undefined;
+  if (hasReceiptProfile && metadata.receiptProfile !== CODEX_RECEIPT_PROFILE) throw invalid();
+  if (hasReceiptProfile && !hasReceipts) throw invalid();
+  const receiptOptions = hasReceiptProfile ? { profile: CODEX_RECEIPT_PROFILE } : undefined;
   const result = {};
   for (const key of CODEX_METADATA_KEYS) {
+    if (key === 'receiptProfile') {
+      if (hasReceiptProfile) result.receiptProfile = CODEX_RECEIPT_PROFILE;
+      continue;
+    }
+    if (key === 'receipts') {
+      if (hasReceipts) result.receipts = normalizeCodexReceipts(metadata.receipts, receiptOptions);
+      continue;
+    }
     if (metadata[key] === undefined) continue;
     if (key === 'messageIndex') {
       if (!Number.isInteger(metadata[key]) || metadata[key] < 0 || metadata[key] > 4095) throw invalid();
@@ -205,10 +277,6 @@ function normalizeCodexMetadata(metadata) {
     if (key === 'runtime') {
       if (metadata[key] !== CODEX_RUNTIME) throw invalid();
       result[key] = CODEX_RUNTIME;
-      continue;
-    }
-    if (key === 'receipts') {
-      result.receipts = normalizeCodexReceipts(metadata[key]);
       continue;
     }
     result[key] = text(metadata[key], key, { maxBytes: key === 'contentType' ? 128 : 256 });
@@ -302,6 +370,11 @@ function buildCodexConversationQuery({ projectId, windowId = '', cursor = '', li
 }
 
 module.exports = {
+  CODEX_RECEIPT_PROFILE,
+  CODEX_RECEIPT_PROFILE_REQUIRED,
+  CODEX_RECEIPT_PROFILE_UNSUPPORTED,
+  CODEX_RECEIPT_UPDATE_CONFLICT,
+  CODEX_RECEIPT_MESSAGE_OWNERSHIP_CONFLICT,
   CODEX_MAX_PAGE_SIZE,
   CODEX_PROJECT_ID,
   CODEX_RUNTIME,
@@ -312,5 +385,11 @@ module.exports = {
   normalizeCodexReceipts,
   compactCodexReceipts,
   compareCodexUpdates,
-  shouldApplyCodexUpdate
+  shouldApplyCodexUpdate,
+  validateCodexReceiptProfile,
+  isCodexProtectedMetadata,
+  isCodexProtectedRow,
+  assertCodexMessageOwnership,
+  assertCodexProtectedUpdate,
+  codexMessagesEqual
 };

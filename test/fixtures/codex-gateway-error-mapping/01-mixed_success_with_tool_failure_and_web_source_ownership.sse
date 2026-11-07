@@ -1,0 +1,42 @@
+event: session
+data: {"sessionId":"gs_0101010101010101010101010101010101010101010101010101010101010101"}
+
+event: status
+data: {"status":"running"}
+
+event: activity
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_1","tool":"web_search","phase":"started","action":"unknown","outcome":"unknown"}
+
+event: activity
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_2","tool":"github_mcp","action":"get_file_contents","phase":"started","outcome":"unknown","context":{"owner":"jonschlinkert","repo":"is-number","path":"index.js","commit":"98e8ff1da1a89f93d1397a24d7413ed15421c139"}}
+
+event: activity
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_3","tool":"web_search","phase":"started","action":"unknown","outcome":"unknown"}
+
+event: activity
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_4","tool":"github_mcp","action":"get_file_contents","phase":"started","outcome":"unknown","context":{"owner":"jonschlinkert","repo":"is-number","path":"index.js","commit":"98e8ff1da1a89f93d1397a24d7413ed15421c139"}}
+
+event: activity
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_4","tool":"github_mcp","action":"get_file_contents","phase":"completed","outcome":"failed","context":{"owner":"jonschlinkert","repo":"is-number","path":"index.js","commit":"98e8ff1da1a89f93d1397a24d7413ed15421c139"},"sources":"unknown"}
+
+event: activity
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_3","tool":"web_search","phase":"completed","action":"search","outcome":"unknown","sources":"available"}
+
+event: source
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_3","sourceId":"ws_0000000000000000000000000000000000000000000000000000000000000001","displayUrl":"https://example.org/shared","url":"https://example.org/shared","redacted":false,"title":"Second","refId":"Second"}
+
+event: activity
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_2","tool":"github_mcp","action":"get_file_contents","phase":"completed","outcome":"unknown","context":{"owner":"jonschlinkert","repo":"is-number","path":"index.js","commit":"98e8ff1da1a89f93d1397a24d7413ed15421c139"},"sources":"unknown"}
+
+event: activity
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_1","tool":"web_search","phase":"completed","action":"search","outcome":"unknown","sources":"available"}
+
+event: source
+data: {"requestId":"wr_00000001-0000-4000-8000-000000000001","activityId":"wa_1","sourceId":"ws_0000000000000000000000000000000000000000000000000000000000000001","displayUrl":"https://example.org/shared","url":"https://example.org/shared","redacted":false,"title":"First","refId":"First"}
+
+event: message
+data: {"text":"Synthetic answer"}
+
+event: completion
+data: {"status":"completed"}
+

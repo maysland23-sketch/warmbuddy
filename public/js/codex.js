@@ -8,6 +8,7 @@ var CodexModule = (function() {
 
   var PROJECT_ID = 'codex-code-test';
   var RUNTIME = 'codex-gateway';
+  var CODEX_RECEIPT_PROFILE = 'github-mcp-v1';
   var SESSION_PREFIX = 'codex-session-v1:';
   var PENDING_DISCONNECT_PREFIX = 'codex-pending-disconnect-v1:';
   var MAX_PROMPT_BYTES = 32768;
@@ -20,15 +21,6 @@ var CodexModule = (function() {
   var MAX_MESSAGE_COUNT = 4096;
   var MAX_ERROR_BODY_BYTES = 64 * 1024;
   var EVENT_TYPES = { session: true, status: true, message: true, error: true, completion: true, activity: true, source: true };
-  var REQUEST_ID_PATTERN = /^wr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  var ACTIVITY_ID_PATTERN = /^wa_[1-9][0-9]*$/;
-  var SOURCE_ID_PATTERN = /^ws_[0-9a-f]{64}$/;
-  var REF_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
-  var MAX_WEB_ACTIVITIES = 64;
-  var MAX_WEB_SOURCES_PER_ACTIVITY = 8;
-  var MAX_WEB_URL_BYTES = 2048;
-  var MAX_WEB_TITLE_BYTES = 256;
-  var MAX_RECEIPT_BYTES = 64 * 1024;
   var ERROR_CODES = {
     BUSY: true,
     UNKNOWN_SESSION: true,
@@ -48,7 +40,9 @@ var CodexModule = (function() {
     CODEX_INVALID_SESSION: true,
     CODEX_SESSION_MISMATCH: true,
     CODEX_MISSING_SESSION: true,
-    CODEX_SYNC_INVALID_REQUEST: true
+    CODEX_SYNC_INVALID_REQUEST: true,
+    CODEX_RECEIPT_PROFILE_REQUIRED: true,
+    CODEX_RECEIPT_PROFILE_UNSUPPORTED: true
   };
   var SESSION_PATTERN = /^gs_[0-9a-f]{64}$/;
   var locks = {};
@@ -112,50 +106,118 @@ var CodexModule = (function() {
     return copy;
   }
 
-  function compactTurnReceipts(receipts) {
-    if (utf8Bytes(JSON.stringify(receipts)) <= MAX_RECEIPT_BYTES) return receipts;
-    var priorOmittedSources = Number.isInteger(receipts.omittedSources) ? receipts.omittedSources : 0;
-    var totalSources = priorOmittedSources + receipts.activities.reduce(function(total, activity) {
-      return total + (Array.isArray(activity.sourceCards) ? activity.sourceCards.length : 0);
-    }, 0);
-    var result = {
-      activities: receipts.activities.map(function(activity) {
-        var compacted = {
-          requestId: activity.requestId, activityId: activity.activityId,
-          tool: 'web_search', phase: activity.phase,
-          action: activity.action, outcome: 'unknown', sourceCards: []
-        };
-        if (activity.phase === 'completed') compacted.sources = activity.sources;
-        if (activity.phase === 'interrupted') compacted.reason = activity.reason;
-        return compacted;
-      }),
-      omitted: true,
-      omittedSources: totalSources
-    };
-    var retainedSources = 0;
-    for (var activityIndex = 0; activityIndex < receipts.activities.length; activityIndex++) {
-      var sourceCards = Array.isArray(receipts.activities[activityIndex].sourceCards)
-        ? receipts.activities[activityIndex].sourceCards : [];
-      for (var sourceIndex = 0; sourceIndex < sourceCards.length; sourceIndex++) {
-        result.activities[activityIndex].sourceCards.push(sourceCards[sourceIndex]);
-        retainedSources += 1;
-        result.omittedSources = totalSources - retainedSources;
-        if (utf8Bytes(JSON.stringify(result)) > MAX_RECEIPT_BYTES) {
-          result.activities[activityIndex].sourceCards.pop();
-          retainedSources -= 1;
-          result.omittedSources = totalSources - retainedSources;
-        }
-      }
+  function receiptContract() {
+    if (typeof CodexReceiptContract === 'undefined' || !CodexReceiptContract ||
+        typeof CodexReceiptContract.normalizeReceiptSet !== 'function' ||
+        typeof CodexReceiptContract.compactReceiptSet !== 'function') {
+      throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
     }
-    return result;
+    return CodexReceiptContract;
   }
 
-  function updateTurnReceipt(chat, userMessageIds, event) {
+  function receiptOptions(profile) {
+    if (profile === undefined) return undefined;
+    if (profile !== CODEX_RECEIPT_PROFILE) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+    return { profile: profile };
+  }
+
+  function receiptProfileForMessage(message) {
+    if (!Object.prototype.hasOwnProperty.call(message, '_codexReceiptProfile')) return undefined;
+    if (message._codexReceiptProfile !== CODEX_RECEIPT_PROFILE) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+    return message._codexReceiptProfile;
+  }
+
+  function receiptProfileForMessages(chat, userMessageIds) {
+    var selected = (chat.messages || []).filter(function(message) {
+      return userMessageIds.indexOf(message.id) >= 0 && message.role === 'user';
+    });
+    var hasProfile = selected.some(function(message) {
+      return Object.prototype.hasOwnProperty.call(message, '_codexReceiptProfile');
+    });
+    if (!hasProfile) return undefined;
+    var profile;
+    selected.forEach(function(message) {
+      var current = receiptProfileForMessage(message);
+      if (current === undefined || (profile !== undefined && profile !== current)) {
+        throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+      }
+      profile = current;
+    });
+    return profile;
+  }
+
+  function copyReceiptSet(receipts) {
+    if (!receipts || typeof receipts !== 'object' || Array.isArray(receipts) || !Array.isArray(receipts.activities)) {
+      throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+    }
+    var copy = { activities: [] };
+    if (Object.prototype.hasOwnProperty.call(receipts, 'omitted')) copy.omitted = receipts.omitted;
+    if (Object.prototype.hasOwnProperty.call(receipts, 'omittedSources')) copy.omittedSources = receipts.omittedSources;
+    (receipts.activities || []).forEach(function(activity) {
+      var activityCopy = {};
+      Object.keys(activity || {}).forEach(function(key) {
+        if (key !== 'sourceCards') activityCopy[key] = activity[key];
+      });
+      activityCopy.sourceCards = (Array.isArray(activity && activity.sourceCards) ? activity.sourceCards : []).map(function(source) {
+        var sourceCopy = {};
+        Object.keys(source || {}).forEach(function(key) { sourceCopy[key] = source[key]; });
+        return sourceCopy;
+      });
+      copy.activities.push(activityCopy);
+    });
+    return copy;
+  }
+
+  function compactTurnReceipts(receipts, profile) {
+    try {
+      return receiptContract().compactReceiptSet(receipts, receiptOptions(profile));
+    } catch (_) {
+      throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+    }
+  }
+
+  function normalizedReceiptSidecar(receipts, profile) {
+    try {
+      return receiptContract().normalizeReceiptSet(receipts, receiptOptions(profile));
+    } catch (_) {
+      throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+    }
+  }
+
+  function prepareSettledReceiptSnapshot(receipts, profile, reason) {
+    var candidate = copyReceiptSet(receipts);
+    var changed = false;
+    candidate.activities.forEach(function(activity) {
+      if (activity.phase === 'started') {
+        activity.phase = 'interrupted';
+        activity.reason = reason;
+        delete activity.sources;
+        activity.sourceCards = [];
+        changed = true;
+      }
+    });
+    return { changed: changed, receipts: compactTurnReceipts(candidate, profile) };
+  }
+
+  function settledReceiptSnapshot(receipts, profile, reason) {
+    var prepared = prepareSettledReceiptSnapshot(receipts, profile, reason);
+    return prepared.changed ? prepared.receipts : null;
+  }
+
+  function updateTurnReceipt(chat, userMessageIds, event, profile) {
     if (!chat || !Array.isArray(chat.messages) || !event || (event.type !== 'activity' && event.type !== 'source')) return false;
     var message = chat.messages.find(function(item) { return userMessageIds.indexOf(item.id) >= 0 && item.role === 'user'; });
     if (!message) return false;
+    var messageProfile = receiptProfileForMessage(message);
+    if (profile !== undefined && profile !== messageProfile) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+    profile = messageProfile;
     var payload = event.payload || {};
-    var receipts = message._codexReceipts || { activities: [] };
+    var receipts;
+    if (Object.prototype.hasOwnProperty.call(message, '_codexReceipts')) {
+      receipts = copyReceiptSet(message._codexReceipts);
+    } else {
+      receipts = { activities: [] };
+    }
     var activity = receipts.activities.find(function(item) {
       return item.requestId === payload.requestId && item.activityId === payload.activityId;
     });
@@ -173,7 +235,7 @@ var CodexModule = (function() {
       if (!activity.sourceCards) activity.sourceCards = [];
       if (!activity.sourceCards.some(function(source) { return source.sourceId === payload.sourceId; })) activity.sourceCards.push(payload);
     }
-    message._codexReceipts = compactTurnReceipts(receipts);
+    message._codexReceipts = compactTurnReceipts(receipts, profile);
     message._codexVersion = (Number.isInteger(message._codexVersion) ? message._codexVersion : 0) + 1;
     message._codexUpdatedAt = new Date().toISOString();
     message._codexWriterId = writerId;
@@ -181,21 +243,17 @@ var CodexModule = (function() {
     return true;
   }
 
-  function settleTurnReceipts(chat, userMessageIds, reason) {
+  function settleTurnReceipts(chat, userMessageIds, reason, profile) {
     if (!chat || !Array.isArray(chat.messages)) return false;
     var message = chat.messages.find(function(item) { return userMessageIds.indexOf(item.id) >= 0 && item.role === 'user'; });
-    if (!message || !message._codexReceipts || !Array.isArray(message._codexReceipts.activities)) return false;
-    var changed = false;
-    message._codexReceipts.activities.forEach(function(activity) {
-      if (activity.phase === 'started') {
-        activity.phase = 'interrupted';
-        activity.reason = reason;
-        delete activity.sources;
-        activity.sourceCards = [];
-        changed = true;
-      }
-    });
-    if (!changed) return false;
+    if (!message || !Object.prototype.hasOwnProperty.call(message, '_codexReceipts')) return false;
+    if (!message._codexReceipts || typeof message._codexReceipts !== 'object' || Array.isArray(message._codexReceipts) ||
+        !Array.isArray(message._codexReceipts.activities)) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+    var messageProfile = receiptProfileForMessage(message);
+    if (profile !== undefined && profile !== messageProfile) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+    var settled = settledReceiptSnapshot(message._codexReceipts, messageProfile, reason);
+    if (!settled) return false;
+    message._codexReceipts = settled;
     message._codexVersion = (Number.isInteger(message._codexVersion) ? message._codexVersion : 0) + 1;
     message._codexUpdatedAt = new Date().toISOString();
     message._codexWriterId = writerId;
@@ -295,7 +353,7 @@ var CodexModule = (function() {
     }
   }
 
-  async function getWebMode(signal) {
+  async function getCodexConfig(signal) {
     var response;
     try {
       response = await fetch(AppCore.BACKEND_URL + '/api/codex/config', {
@@ -324,7 +382,37 @@ var CodexModule = (function() {
         typeof data.webMode !== 'string' || !isWebMode(data.webMode)) {
       throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
     }
-    return data.webMode;
+    var receiptProfile;
+    if (Object.prototype.hasOwnProperty.call(data, 'receiptProfile')) {
+      if (data.receiptProfile !== null && data.receiptProfile !== CODEX_RECEIPT_PROFILE) {
+        throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+      }
+      receiptProfile = data.receiptProfile;
+    }
+    return { webMode: data.webMode, receiptProfile: receiptProfile };
+  }
+
+  function bindTurnReceiptProfile(chat, userMessageIds, profile) {
+    if (profile === undefined || profile === null) return;
+    if (profile !== CODEX_RECEIPT_PROFILE) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+    var pending = [];
+    (chat.messages || []).forEach(function(message) {
+      if (userMessageIds.indexOf(message.id) < 0 || message.role !== 'user') return;
+      var current = receiptProfileForMessage(message);
+      if (current !== undefined && current !== profile) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+      var hasReceipts = Object.prototype.hasOwnProperty.call(message, '_codexReceipts');
+      if (hasReceipts) normalizedReceiptSidecar(message._codexReceipts, profile);
+      if (current === undefined) pending.push({
+        message: message,
+        receipts: normalizedReceiptSidecar(hasReceipts ? message._codexReceipts : { activities: [] }, profile)
+      });
+    });
+    pending.forEach(function(item) {
+      item.message._codexReceiptProfile = profile;
+      item.message._codexReceipts = item.receipts;
+      item.message._syncDirty = true;
+      item.message._synced = false;
+    });
   }
 
   function appendAssistantMessage(chat, turnId, generation, text, stage, index) {
@@ -367,6 +455,8 @@ var CodexModule = (function() {
     if (options.projectId !== PROJECT_ID || !options.chatId) throw makeError('CODEX_CONTEXT_NOT_FOUND');
     var chat = activeChat(options.projectId, options.chatId);
     if (!chat) throw makeError('CODEX_CONTEXT_NOT_FOUND');
+    var userIds = options.userMessageIds || [];
+    var receiptProfile = receiptProfileForMessages(chat, userIds);
     var key = sessionKey(RUNTIME, options.projectId, options.chatId);
     if (pageTurnLock || turnLocks[key] || locks[key]) throw makeError('BUSY');
     turnLocks[key] = true;
@@ -382,7 +472,6 @@ var CodexModule = (function() {
       if (options.signal.aborted) controller.abort();
       else options.signal.addEventListener('abort', callerAbort, { once: true });
     }
-    var userIds = options.userMessageIds || [];
     chat.messages.forEach(function(message) {
       if (userIds.indexOf(message.id) >= 0) markMessageRunning(message, turnId, generation);
     });
@@ -402,7 +491,7 @@ var CodexModule = (function() {
       assertCurrentTurn(key, generation, controller);
       if (event.type === 'session') completedSession = event.payload.sessionId;
       if (event.type === 'activity' || event.type === 'source') {
-        if (updateTurnReceipt(chat, receiptUserIds, event)) {
+        if (updateTurnReceipt(chat, receiptUserIds, event, receiptProfile)) {
           renderOriginalChat(options.projectId, options.chatId);
           if (AppCore.saveStore) AppCore.saveStore();
           var receiptSync = AppCore.getModule && AppCore.getModule('sync');
@@ -425,7 +514,12 @@ var CodexModule = (function() {
       assertCurrentTurn(key, generation, controller);
       var existingSession = await getSession(options.projectId, options.chatId);
       assertCurrentTurn(key, generation, controller);
-      var webMode = await getWebMode(controller.signal);
+      var codexConfig = await getCodexConfig(controller.signal);
+      var webMode = codexConfig.webMode;
+      var requestReceiptProfile = codexConfig.receiptProfile === CODEX_RECEIPT_PROFILE
+        ? CODEX_RECEIPT_PROFILE : undefined;
+      bindTurnReceiptProfile(chat, receiptUserIds, requestReceiptProfile);
+      if (requestReceiptProfile !== undefined) receiptProfile = requestReceiptProfile;
       assertCurrentTurn(key, generation, controller);
       var context = ChatModule.buildCodexPromptContext({
         projectId: options.projectId,
@@ -440,6 +534,8 @@ var CodexModule = (function() {
         projectId: options.projectId, chatId: options.chatId, prompt: context.prompt,
         signal: controller.signal, controller: controller, keepController: true,
         webMode: webMode,
+        receiptProfile: receiptProfile,
+        requestReceiptProfile: requestReceiptProfile,
         isCurrent: function() { return isCurrentTurn(key, generation, controller); },
         onPromptAccepted: context.commitDynamicContextSnapshot,
         onEvent: onEvent
@@ -463,6 +559,8 @@ var CodexModule = (function() {
           projectId: options.projectId, chatId: options.chatId, prompt: integration.prompt,
           signal: controller.signal, controller: controller, keepController: true,
           webMode: webMode,
+          receiptProfile: receiptProfile,
+          requestReceiptProfile: requestReceiptProfile,
           isCurrent: function() { return isCurrentTurn(key, generation, controller); },
           onPromptAccepted: integration.commitDynamicContextSnapshot,
           onEvent: onEvent
@@ -471,7 +569,7 @@ var CodexModule = (function() {
         finalAssistantMessages = assistantMessages.slice();
       }
       assertCurrentTurn(key, generation, controller);
-      settleTurnReceipts(chat, receiptUserIds, 'turn_ended');
+      settleTurnReceipts(chat, receiptUserIds, 'turn_ended', receiptProfile);
       markTurnMessages(chat, turnId, 'completed');
       chat._codexLastCompletedGeneration = generation;
       if (ChatModule.commitCodexResponse) {
@@ -493,7 +591,7 @@ var CodexModule = (function() {
       var finalStatus = error.code === 'CODEX_GATEWAY_ABORTED' ? 'canceled' : 'failed';
       if (error.code === 'CODEX_GATEWAY_TIMEOUT' || error.code === 'CODEX_GATEWAY_INCOMPLETE') finalStatus = 'unknown';
       var receiptReason = finalStatus === 'canceled' ? 'cancelled' : finalStatus === 'unknown' ? 'turn_ended' : 'round_failed';
-      settleTurnReceipts(chat, receiptUserIds, receiptReason);
+      settleTurnReceipts(chat, receiptUserIds, receiptReason, receiptProfile);
       markTurnMessages(chat, turnId, finalStatus);
       if (error.code === 'UNKNOWN_SESSION') chat._codexSessionInvalid = true;
       if (AppCore.saveStore) AppCore.saveStore();
@@ -522,7 +620,8 @@ var CodexModule = (function() {
     cancel(projectId, chatId);
     var chat = activeChat(projectId, chatId);
     if (wasRunning && chat && chat._codexTurnId) {
-      settleTurnReceipts(chat, chat.messages.filter(function(message) { return message._codexTurnId === chat._codexTurnId && message.role === 'user'; }).map(function(message) { return message.id; }), 'cancelled');
+      var receiptIds = chat.messages.filter(function(message) { return message._codexTurnId === chat._codexTurnId && message.role === 'user'; }).map(function(message) { return message.id; });
+      settleTurnReceipts(chat, receiptIds, 'cancelled', receiptProfileForMessages(chat, receiptIds));
       markTurnMessages(chat, chat._codexTurnId, 'canceled');
       var sync = AppCore.getModule && AppCore.getModule('sync');
       if (sync && sync.scheduleCodexMessageSync) sync.scheduleCodexMessageSync(projectId, chatId);
@@ -565,35 +664,51 @@ var CodexModule = (function() {
     if (!project) return;
     var changed = false;
     var changedChats = {};
-    (project.chats || []).forEach(function(chat) {
-      (chat.messages || []).forEach(function(message) {
-        if (message._codexRuntime === RUNTIME && message._codexLocalDevice && message._codexTurnStatus === 'running') {
-          message._codexTurnStatus = 'unknown';
-          message._codexVersion = (Number.isInteger(message._codexVersion) ? message._codexVersion : 0) + 1;
-          message._codexUpdatedAt = new Date().toISOString();
-          message._codexWriterId = writerId;
+    function persistReloadChanges() {
+      if (!changed) return;
+      if (AppCore.saveStore) AppCore.saveStore();
+      if (AppCore.getModule) {
+        var sync = AppCore.getModule('sync');
+        if (sync && sync.scheduleCodexMessageSync) Object.keys(changedChats).forEach(function(chatId) {
+          sync.scheduleCodexMessageSync(PROJECT_ID, chatId);
+        });
+      }
+    }
+    function prepareReloadedTurn(message) {
+      var profile = receiptProfileForMessage(message);
+      var hasReceipts = Object.prototype.hasOwnProperty.call(message, '_codexReceipts');
+      if (profile !== undefined && !hasReceipts) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+      var receipts = null;
+      if (hasReceipts) receipts = prepareSettledReceiptSnapshot(message._codexReceipts, profile, 'turn_ended').receipts;
+      return {
+        status: 'unknown',
+        version: (Number.isInteger(message._codexVersion) ? message._codexVersion : 0) + 1,
+        updatedAt: new Date().toISOString(),
+        writerId: writerId,
+        hasReceipts: hasReceipts,
+        receipts: receipts
+      };
+    }
+    try {
+      (project.chats || []).forEach(function(chat) {
+        (chat.messages || []).forEach(function(message) {
+          if (message._codexRuntime !== RUNTIME || !message._codexLocalDevice || message._codexTurnStatus !== 'running') return;
+          var prepared = prepareReloadedTurn(message);
+          message._codexTurnStatus = prepared.status;
+          message._codexVersion = prepared.version;
+          message._codexUpdatedAt = prepared.updatedAt;
+          message._codexWriterId = prepared.writerId;
+          if (prepared.hasReceipts) message._codexReceipts = prepared.receipts;
           message._syncDirty = true;
-          if (message._codexReceipts && Array.isArray(message._codexReceipts.activities)) {
-            message._codexReceipts.activities.forEach(function(activity) {
-              if (activity.phase === 'started') {
-                activity.phase = 'interrupted';
-                activity.reason = 'turn_ended';
-                activity.sourceCards = [];
-              }
-            });
-          }
           changed = true;
           changedChats[chat.id] = true;
-        }
+        });
       });
-    });
-    if (changed && AppCore.saveStore) AppCore.saveStore();
-    if (changed && AppCore.getModule) {
-      var sync = AppCore.getModule('sync');
-      if (sync && sync.scheduleCodexMessageSync) Object.keys(changedChats).forEach(function(chatId) {
-        sync.scheduleCodexMessageSync(PROJECT_ID, chatId);
-      });
+    } catch (error) {
+      persistReloadChanges();
+      throw error;
     }
+    persistReloadChanges();
   }
 
   function updateUi() {
@@ -662,10 +777,13 @@ var CodexModule = (function() {
     return sessionId;
   }
 
-  function createRequestBody(prompt, sessionId, extraFields) {
-    if (extraFields !== undefined) throw makeError('CODEX_INVALID_REQUEST');
+  function createRequestBody(prompt, sessionId, receiptProfile) {
+    if (receiptProfile !== undefined && receiptProfile !== CODEX_RECEIPT_PROFILE) {
+      throw makeError('CODEX_INVALID_REQUEST');
+    }
     assertPrompt(prompt);
     var body = sessionId === undefined ? { prompt: prompt } : { prompt: prompt, sessionId: assertSession(sessionId) };
+    if (receiptProfile !== undefined) body.receiptProfile = receiptProfile;
     var serialized = JSON.stringify(body);
     if (utf8Bytes(serialized) > MAX_BODY_BYTES) throw makeError('CODEX_GATEWAY_REJECTED');
     return serialized;
@@ -728,111 +846,68 @@ var CodexModule = (function() {
     throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
   }
 
-  function boundedText(value, maxBytes) {
-    return typeof value === 'string' && utf8Bytes(value) <= maxBytes;
-  }
-
-  function isPublicUrl(value) {
-    if (!boundedText(value, MAX_WEB_URL_BYTES) || /[\s\u0000-\u001f\u007f\\]/.test(value)) return false;
-    if (!/^https?:\/\/[^/?#]+(?:[/?#]|$)/i.test(value)) return false;
-    try {
-      var url = new URL(value);
-      var host = String(url.hostname || '').toLowerCase();
-      return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password && !url.port &&
-        !url.search && !url.hash && !/^\d+(?:\.\d+){3}$/.test(host) && host.indexOf(':') < 0 && host.indexOf('.') >= 0 &&
-        host.charAt(host.length - 1) !== '.' && !/(^|\.)(localhost|local|internal|invalid|test)$/.test(host) &&
-        /^[a-z0-9.-]+$/.test(host);
-    } catch (_) { return false; }
-  }
-
   function receiptRequestId(payload, state) {
-    if (!payload || !REQUEST_ID_PATTERN.test(payload.requestId || '')) invalidReceipt();
+    if (!payload || typeof payload.requestId !== 'string') invalidReceipt();
     if (state.requestId && state.requestId !== payload.requestId) invalidReceipt();
     state.requestId = state.requestId || payload.requestId;
     return payload.requestId;
   }
 
-  function normalizeTarget(payload, action) {
-    var keys = ['targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl'];
-    var present = keys.some(function(key) { return Object.prototype.hasOwnProperty.call(payload, key); });
-    if (present && action !== 'open_page') invalidReceipt();
-    if (!present) return {};
-    if (!SOURCE_ID_PATTERN.test(payload.targetSourceId || '') || !isPublicUrl(payload.targetDisplayUrl) ||
-        typeof payload.targetRedacted !== 'boolean') invalidReceipt();
-    if (payload.targetRedacted) {
-      if (Object.prototype.hasOwnProperty.call(payload, 'targetUrl')) invalidReceipt();
-    } else if (!isPublicUrl(payload.targetUrl) || payload.targetUrl !== payload.targetDisplayUrl) {
-      invalidReceipt();
-    }
-    var result = {
-      targetSourceId: payload.targetSourceId,
-      targetDisplayUrl: payload.targetDisplayUrl,
-      targetRedacted: payload.targetRedacted
-    };
-    if (!payload.targetRedacted) result.targetUrl = payload.targetUrl;
+  function stripActivitySources(activity) {
+    var result = {};
+    Object.keys(activity).forEach(function(key) {
+      if (key !== 'sourceCards') result[key] = activity[key];
+    });
     return result;
   }
 
-  function normalizeActivity(payload, state) {
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.tool !== 'web_search' ||
-        ['started', 'completed', 'interrupted'].indexOf(payload.phase) < 0 ||
-        ['unknown', 'search', 'open_page'].indexOf(payload.action) < 0 || payload.outcome !== 'unknown' ||
-        !ACTIVITY_ID_PATTERN.test(payload.activityId || '')) invalidReceipt();
+  function normalizeActivity(payload, state, profile) {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) invalidReceipt();
     var requestId = receiptRequestId(payload, state);
     var activityId = payload.activityId;
+    if (typeof activityId !== 'string') invalidReceipt();
     var existing = state.activities.get(activityId);
     if (payload.phase === 'started') {
-      if (existing || state.activities.size >= MAX_WEB_ACTIVITIES) invalidReceipt();
+      if (existing || state.activities.size >= receiptContract().MAX_ACTIVITIES) invalidReceipt();
     } else if (!existing || existing.terminal) {
       invalidReceipt();
     }
-    var normalized = {
-      requestId: requestId, activityId: activityId, tool: 'web_search', phase: payload.phase,
-      action: payload.action, outcome: 'unknown'
-    };
-    Object.assign(normalized, normalizeTarget(payload, payload.action));
-    if (payload.phase === 'completed') {
-      if (['available', 'none', 'unknown'].indexOf(payload.sources) < 0) invalidReceipt();
-      normalized.sources = payload.sources;
-    }
-    if (payload.phase === 'interrupted') {
-      if (['turn_ended', 'round_failed', 'cancelled'].indexOf(payload.reason) < 0) invalidReceipt();
-      normalized.reason = payload.reason;
+    var candidate = {};
+    Object.keys(payload).forEach(function(key) { if (key !== 'sourceCards') candidate[key] = payload[key]; });
+    candidate.requestId = requestId;
+    candidate.sourceCards = [];
+    var normalized;
+    try {
+      normalized = receiptContract().normalizeReceiptSet({ activities: [candidate] }, receiptOptions(profile)).activities[0];
+    } catch (_) { invalidReceipt(); }
+    if (existing) {
+      try { receiptContract().assertActivityTransition(existing.activity, normalized); }
+      catch (_) { invalidReceipt(); }
     }
     state.activities.set(activityId, {
-      phase: payload.phase, terminal: payload.phase !== 'started',
-      sourceIds: existing ? existing.sourceIds : {}
+      phase: normalized.phase, terminal: normalized.phase !== 'started', activity: normalized
     });
-    return normalized;
+    return stripActivitySources(normalized);
   }
 
-  function normalizeSource(payload, state) {
+  function normalizeSource(payload, state, profile) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) invalidReceipt();
-    var requestId = receiptRequestId(payload, state);
-    var activity = state.activities.get(payload.activityId);
-    if (!activity || activity.phase !== 'completed' || !ACTIVITY_ID_PATTERN.test(payload.activityId || '') ||
-        !SOURCE_ID_PATTERN.test(payload.sourceId || '') || typeof payload.redacted !== 'boolean' ||
-        !isPublicUrl(payload.displayUrl)) invalidReceipt();
-    if (Object.prototype.hasOwnProperty.call(activity.sourceIds, payload.sourceId) ||
-        Object.keys(activity.sourceIds).length >= MAX_WEB_SOURCES_PER_ACTIVITY) invalidReceipt();
-    if (payload.redacted) {
-      if (Object.prototype.hasOwnProperty.call(payload, 'url')) invalidReceipt();
-    } else if (!isPublicUrl(payload.url) || payload.url !== payload.displayUrl) {
-      invalidReceipt();
-    }
-    var normalized = {
-      requestId: requestId, activityId: payload.activityId, sourceId: payload.sourceId,
-      displayUrl: payload.displayUrl, redacted: payload.redacted
-    };
-    if (!payload.redacted) normalized.url = payload.url;
-    if (boundedText(payload.title, MAX_WEB_TITLE_BYTES) && payload.title.trim() &&
-        !/[\u0000-\u001f\u007f]|:\/\//.test(payload.title)) normalized.title = payload.title;
-    if (typeof payload.refId === 'string' && REF_ID_PATTERN.test(payload.refId)) normalized.refId = payload.refId;
-    activity.sourceIds[payload.sourceId] = true;
-    return normalized;
+    receiptRequestId(payload, state);
+    if (typeof payload.activityId !== 'string') invalidReceipt();
+    var activityEntry = state.activities.get(payload.activityId);
+    if (!activityEntry || activityEntry.phase !== 'completed') invalidReceipt();
+    var candidate = {};
+    Object.keys(activityEntry.activity).forEach(function(key) { candidate[key] = activityEntry.activity[key]; });
+    candidate.sourceCards = activityEntry.activity.sourceCards.concat([payload]);
+    var normalized;
+    try {
+      normalized = receiptContract().normalizeReceiptSet({ activities: [candidate] }, receiptOptions(profile)).activities[0];
+    } catch (_) { invalidReceipt(); }
+    activityEntry.activity = normalized;
+    return normalized.sourceCards[normalized.sourceCards.length - 1];
   }
 
-  function parseEventPayload(eventName, rawData) {
+  function parseEventPayload(eventName, rawData, receiptState, profile) {
     if (!rawData || utf8Bytes(rawData) > MAX_EVENT_BYTES) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
     var payload;
     try { payload = JSON.parse(rawData); } catch (_) { throw makeError('CODEX_GATEWAY_INVALID_RESPONSE'); }
@@ -859,7 +934,8 @@ var CodexModule = (function() {
       if (payload.status !== 'completed' && payload.status !== 'failed') throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
       return { status: payload.status };
     }
-    if (eventName === 'activity' || eventName === 'source') return payload;
+    if (eventName === 'activity') return normalizeActivity(payload, receiptState, profile);
+    if (eventName === 'source') return normalizeSource(payload, receiptState, profile);
     throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
   }
 
@@ -930,11 +1006,10 @@ var CodexModule = (function() {
 
     async function dispatch() {
       if (!eventName && dataLines.length === 0) return;
-      if (!EVENT_TYPES[eventName] || dataLines.length === 0 ||
-          (webMode !== 'native' && (eventName === 'activity' || eventName === 'source'))) {
+      if (!EVENT_TYPES[eventName] || dataLines.length === 0) {
         throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
       }
-      var payload = parseEventPayload(eventName, dataLines.join('\n'));
+      var payload = parseEventPayload(eventName, dataLines.join('\n'), receiptState, options.receiptProfile);
       var event;
       if (eventName === 'session') {
         if (currentSessionId && currentSessionId !== payload.sessionId) throw makeError('CODEX_SESSION_MISMATCH');
@@ -949,17 +1024,20 @@ var CodexModule = (function() {
       } else if (eventName === 'error') {
         event = { type: 'error', payload: payload };
       } else if (eventName === 'completion') {
-        if (webMode === 'native') {
-          var unfinished = false;
-          receiptState.activities.forEach(function(activity) { if (!activity.terminal) unfinished = true; });
-          if (unfinished) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
-        }
+        var unfinished = false;
+        receiptState.activities.forEach(function(activity) { if (!activity.terminal) unfinished = true; });
+        if (unfinished) throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
         completionStatus = payload.status;
         event = { type: 'completion', payload: payload };
       } else if (eventName === 'activity') {
-        event = { type: 'activity', payload: normalizeActivity(payload, receiptState) };
+        if (payload.tool === 'web_search' && webMode !== 'native') throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+        event = { type: 'activity', payload: payload };
       } else if (eventName === 'source') {
-        event = { type: 'source', payload: normalizeSource(payload, receiptState) };
+        var sourceActivity = receiptState.activities.get(payload.activityId);
+        if (sourceActivity && sourceActivity.activity.tool === 'web_search' && webMode !== 'native') {
+          throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+        }
+        event = { type: 'source', payload: payload };
       }
       eventName = '';
       dataLines = [];
@@ -1009,6 +1087,9 @@ var CodexModule = (function() {
         if (buffer || eventName || dataLines.length > 0) throw makeError('CODEX_GATEWAY_INCOMPLETE');
         throw makeError('CODEX_GATEWAY_INCOMPLETE');
       }
+      if (completionStatus !== null && (buffer || eventName || dataLines.length > 0)) {
+        throw makeError('CODEX_GATEWAY_INVALID_RESPONSE');
+      }
     } finally {
       try { await reader.cancel(); } catch (_) {}
       try { reader.releaseLock(); } catch (_) {}
@@ -1021,7 +1102,7 @@ var CodexModule = (function() {
     options = options || {};
     var fetchImpl = options.fetchImpl || (typeof fetch === 'function' ? fetch : null);
     if (!fetchImpl) throw makeError('CODEX_GATEWAY_UNAVAILABLE');
-    var body = createRequestBody(options.prompt, options.sessionId);
+    var body = createRequestBody(options.prompt, options.sessionId, options.requestReceiptProfile);
     if (options.onPromptAccepted) await options.onPromptAccepted();
     var response;
     try {
@@ -1079,6 +1160,8 @@ var CodexModule = (function() {
         fetchImpl: options.fetchImpl,
         expectedSessionId: oldSession,
         webMode: options.webMode,
+        receiptProfile: options.receiptProfile,
+        requestReceiptProfile: options.requestReceiptProfile,
         onPromptAccepted: options.onPromptAccepted,
         onEvent: onEvent,
         onHeartbeat: options.onHeartbeat

@@ -3,14 +3,16 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const serverSync = require('../codex-message-sync');
+const sharedReceiptContract = require('../public/js/codex-receipt-contract');
 
-function loadSync(store, fetchImpl) {
+function loadSync(store, fetchImpl, options = {}) {
   const timeSource = fs.readFileSync('public/js/chat-time.js', 'utf8');
   const source = fs.readFileSync('public/js/sync.js', 'utf8');
   let module;
   const modules = {};
   const sandbox = {
     console, Date, Promise, encodeURIComponent, URL,
+    CodexReceiptContract: options.receiptContract === undefined ? sharedReceiptContract : options.receiptContract,
     fetch: fetchImpl,
     renderChatMessages() {},
     toLocalDisplayTime: value => value,
@@ -43,6 +45,13 @@ function makeStore(messages) {
   };
 }
 
+function makeGenericStore(messages) {
+  return {
+    activeProject: 'ordinary-project', activeChat: 'chat-1',
+    projects: [{ id: 'ordinary-project', runtime: 'web', chats: [{ id: 'chat-1', messages }] }]
+  };
+}
+
 function makeOversizedReceipts() {
   const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
   const longPath = 'y'.repeat(1850);
@@ -59,6 +68,74 @@ function makeOversizedReceipts() {
             requestId, activityId, sourceId: 'ws_' + hex,
             displayUrl, url: displayUrl, redacted: false,
             title: 'source-' + activityIndex + '-' + sourceIndex, refId: 'ref_' + sourceIndex
+          };
+        })
+      };
+    })
+  };
+}
+
+function makeGithubReceipts() {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  const commit = 'a'.repeat(40);
+  return {
+    activities: [
+      {
+        requestId, activityId: 'wa_1', tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown',
+        sources: 'available', sourceCards: [{
+          requestId, activityId: 'wa_1', sourceId: 'ws_' + '1'.repeat(64),
+          displayUrl: 'https://example.org/web', redacted: true, title: 'web source'
+        }]
+      },
+      {
+        requestId, activityId: 'wa_2', tool: 'github_mcp', phase: 'completed', action: 'search_repositories', outcome: 'unknown',
+        sources: 'available', context: { owner: 'Neverland', repo: 'warmbuddy', ref: 'main', commit },
+        sourceCards: [{
+          requestId, activityId: 'wa_2', sourceId: 'ws_' + '2'.repeat(64),
+          displayUrl: 'https://github.com/Neverland/warmbuddy', url: 'https://github.com/Neverland/warmbuddy',
+          redacted: false, title: 'repository', refId: 'repo_1', linkKind: 'constructed'
+        }]
+      },
+      {
+        requestId, activityId: 'wa_3', tool: 'github_mcp', phase: 'completed', action: 'search_code', outcome: 'failed',
+        sources: 'none', reason: 'tool_failed', sourceCards: []
+      },
+      {
+        requestId, activityId: 'wa_4', tool: 'github_mcp', phase: 'completed', action: 'get_file_contents', outcome: 'unknown',
+        sources: 'unknown', sourceCards: []
+      },
+      {
+        requestId, activityId: 'wa_5', tool: 'github_mcp', phase: 'interrupted', action: 'list_commits', outcome: 'unknown',
+        reason: 'cancelled', sourceCards: []
+      }
+    ]
+  };
+}
+
+function makeWebReceipts() {
+  return { activities: [{
+    requestId: 'wr_123e4567-e89b-12d3-a456-426614174000', activityId: 'wa_1',
+    tool: 'web_search', phase: 'completed', action: 'search', outcome: 'unknown',
+    sources: 'none', sourceCards: []
+  }] };
+}
+
+function makeOversizedGithubReceipts() {
+  const requestId = 'wr_123e4567-e89b-12d3-a456-426614174000';
+  return {
+    activities: Array.from({ length: 64 }, (_, activityIndex) => {
+      const activityId = 'wa_' + (activityIndex + 1);
+      const failed = activityIndex === 0;
+      return {
+        requestId, activityId, tool: 'github_mcp', phase: 'completed', action: 'search_code',
+        outcome: failed ? 'failed' : 'unknown', sources: failed ? 'none' : 'available',
+        ...(failed ? { reason: 'tool_failed' } : {}), sourceCards: Array.from({ length: 8 }, (_, sourceIndex) => {
+          const commit = (activityIndex * 8 + sourceIndex).toString(16).padStart(40, '0');
+          const displayUrl = 'https://github.com/Neverland/warmbuddy/blob/' + commit + '/' + 'y'.repeat(1750);
+          return {
+            requestId, activityId, sourceId: 'ws_' + (activityIndex * 8 + sourceIndex).toString(16).padStart(64, '0'),
+            displayUrl, url: displayUrl, redacted: false, title: 'source-' + activityIndex + '-' + sourceIndex,
+            refId: 'ref_' + sourceIndex, linkKind: 'constructed'
           };
         })
       };
@@ -115,6 +192,27 @@ test('Codex sync keeps marker-cleaned text dirty after acknowledging the uploade
 
   assert.equal(message._synced, false);
   assert.equal(message._syncDirty, true);
+});
+
+test('Generic sync marks only explicitly confirmed IDs after a partial response', async () => {
+  const messages = [1, 2].map(index => ({
+    id: 'generic-' + index, role: index === 1 ? 'user' : 'ai', text: 'message-' + index,
+    createdAt: '2026-10-06T00:00:0' + index + '.000Z', _synced: false
+  }));
+  const store = makeGenericStore(messages);
+  let release;
+  const sync = loadSync(store, () => new Promise(resolve => { release = resolve; }));
+
+  sync.syncMessagesToBackend();
+  while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+  release({
+    ok: false,
+    json: async () => ({ synced: 1, syncedMessageIds: ['generic-1'], partial: true })
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  assert.equal(messages[0]._synced, true);
+  assert.equal(messages[1]._synced, false);
 });
 
 test('Codex sync marks only server-confirmed message IDs in a partial response', async () => {
@@ -209,7 +307,9 @@ test('Codex frontend uploads bounded receipts and hydrates them without exposing
     return { ok: true, json: async () => ({ syncedMessageIds: ['user-receipt'] }) };
   });
   await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+  assert.equal(requestBody.receiptProfile, 'github-mcp-v1');
   assert.deepEqual(requestBody.messages[0].metadata.receipts, message._codexReceipts);
+  assert.equal(requestBody.messages[0].metadata.receiptProfile, undefined);
   assert.doesNotMatch(JSON.stringify(requestBody), /sessionId|threadId|sidecar/);
 
   const incomingStore = makeStore([]);
@@ -219,6 +319,272 @@ test('Codex frontend uploads bounded receipts and hydrates them without exposing
     createdAt: message.createdAt, metadata: requestBody.messages[0].metadata
   }]);
   assert.equal(JSON.stringify(incomingStore.projects[0].chats[0].messages[0]._codexReceipts), JSON.stringify(message._codexReceipts));
+});
+
+test('Codex frontend round-trips a GitHub profile, mixed receipts, and a zero-assistant terminal user row', async () => {
+  const message = {
+    id: 'github-user', role: 'user', text: '检查仓库', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'github-turn', _codexTurnStatus: 'failed',
+    _codexVersion: 4, _codexUpdatedAt: '2026-10-06T00:00:04.000Z', _codexWriterId: 'writer-a',
+    _codexReceiptProfile: 'github-mcp-v1', _codexReceipts: makeGithubReceipts(),
+    _synced: false, _syncDirty: true
+  };
+  const store = makeStore([message]);
+  let requestBody;
+  const sync = loadSync(store, async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ syncedMessageIds: [message.id] }) };
+  });
+
+  await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+
+  const row = requestBody.messages[0];
+  assert.equal(row.metadata.receiptProfile, 'github-mcp-v1');
+  assert.equal(row.metadata.receipts.activities[1].tool, 'github_mcp');
+  assert.equal(row.metadata.receipts.activities[2].outcome, 'failed');
+  assert.equal(row.metadata.receipts.activities[2].reason, 'tool_failed');
+  assert.equal(row.metadata.receipts.activities[1].sourceCards[0].linkKind, 'constructed');
+  assert.ok(serverSync.normalizeCodexMessage(row));
+  assert.equal(message._synced, true);
+  assert.equal(message._syncDirty, false);
+
+  const incomingStore = makeStore([]);
+  const incomingSync = loadSync(incomingStore, async () => ({ ok: true, json: async () => ({ messages: [] }) }));
+  incomingSync.mergeCodexCloudMessages(incomingStore.projects[0], [{
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: message.id, role: 'user', content: message.text,
+    createdAt: message.createdAt, metadata: row.metadata
+  }]);
+  const hydrated = incomingStore.projects[0].chats[0].messages[0];
+  assert.equal(hydrated._codexReceiptProfile, 'github-mcp-v1');
+  assert.equal(hydrated._codexReceipts.activities[2].outcome, 'failed');
+  assert.equal(hydrated._codexReceipts.activities[4].reason, 'cancelled');
+  assert.equal(hydrated.role, 'user');
+  assert.equal(incomingStore.projects[0].chats[0].messages.filter(item => item.role === 'ai').length, 0);
+});
+
+test('Codex cloud merge removes stale receipt sidecars from an authoritative old web-only snapshot', () => {
+  const existing = {
+    id: 'web-stale-sidecar', role: 'user', text: 'old text', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-web', _codexTurnStatus: 'completed',
+    _codexVersion: 1, _codexUpdatedAt: '2026-10-06T00:00:01.000Z', _codexWriterId: 'old-writer',
+    _codexReceipts: makeWebReceipts(), _synced: false, _syncDirty: true
+  };
+  const store = makeStore([existing]);
+  const sync = loadSync(store, async () => ({ ok: true, json: async () => ({ messages: [] }) }));
+  sync.mergeCodexCloudMessages(store.projects[0], [{
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: existing.id, role: 'user',
+    content: 'cloud text', createdAt: existing.createdAt,
+    metadata: {
+      turnId: 'turn-web', turnStatus: 'completed', version: 2,
+      updatedAt: '2026-10-06T00:00:02.000Z', writerId: 'cloud-writer'
+    }
+  }]);
+
+  assert.equal(existing.text, 'cloud text');
+  assert.equal(existing._codexVersion, 2);
+  assert.equal(Object.prototype.hasOwnProperty.call(existing, '_codexReceipts'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(existing, '_codexReceiptProfile'), false);
+  assert.equal(existing._synced, true);
+  assert.equal(existing._syncDirty, false);
+});
+
+test('Codex cloud merge rejects a higher-version snapshot that drops a local profile-bearing sidecar', () => {
+  const existing = {
+    id: 'github-preserve', role: 'user', text: 'local text', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-github', _codexTurnStatus: 'completed',
+    _codexVersion: 1, _codexUpdatedAt: '2026-10-06T00:00:01.000Z', _codexWriterId: 'local-writer',
+    _codexReceiptProfile: 'github-mcp-v1', _codexReceipts: makeGithubReceipts(),
+    _synced: false, _syncDirty: true
+  };
+  const store = makeStore([existing]);
+  const before = JSON.parse(JSON.stringify(existing));
+  const sync = loadSync(store, async () => ({ ok: true, json: async () => ({ messages: [] }) }));
+
+  assert.throws(() => sync.mergeCodexCloudMessages(store.projects[0], [{
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: existing.id, role: 'user',
+    content: 'cloud text must not apply', createdAt: existing.createdAt,
+    metadata: {
+      turnId: 'turn-github', turnStatus: 'completed', version: 2,
+      updatedAt: '2026-10-06T00:00:02.000Z', writerId: 'cloud-writer'
+    }
+  }]), error => error.code === 'CODEX_RECEIPT_PROFILE_SNAPSHOT_MISMATCH');
+  assert.deepEqual(existing, before);
+});
+
+test('Codex cloud merge rejects an unsupported profile without changing the local snapshot', () => {
+  const existing = {
+    id: 'github-profile-mismatch', role: 'user', text: 'local text', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-github', _codexTurnStatus: 'completed',
+    _codexVersion: 1, _codexUpdatedAt: '2026-10-06T00:00:01.000Z', _codexWriterId: 'local-writer',
+    _codexReceiptProfile: 'github-mcp-v1', _codexReceipts: makeGithubReceipts(),
+    _synced: false, _syncDirty: true
+  };
+  const store = makeStore([existing]);
+  const before = JSON.parse(JSON.stringify(existing));
+  const sync = loadSync(store, async () => ({ ok: true, json: async () => ({ messages: [] }) }));
+
+  assert.throws(() => sync.mergeCodexCloudMessages(store.projects[0], [{
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: existing.id, role: 'user',
+    content: 'cloud text must not apply', createdAt: existing.createdAt,
+    metadata: {
+      turnId: 'turn-github', turnStatus: 'completed', version: 2,
+      updatedAt: '2026-10-06T00:00:02.000Z', writerId: 'cloud-writer',
+      receiptProfile: 'github-mcp-v2', receipts: { activities: [] }
+    }
+  }]), error => error.code === 'CODEX_RECEIPT_PROFILE_UNSUPPORTED');
+  assert.deepEqual(existing, before);
+});
+
+test('Codex cloud merge applies a higher-version same-profile snapshot as one receipt-bearing snapshot', () => {
+  const existing = {
+    id: 'github-update', role: 'user', text: 'old text', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-github', _codexTurnStatus: 'unknown',
+    _codexVersion: 1, _codexUpdatedAt: '2026-10-06T00:00:01.000Z', _codexWriterId: 'old-writer',
+    _codexReceiptProfile: 'github-mcp-v1', _codexReceipts: makeGithubReceipts(),
+    _synced: false, _syncDirty: true
+  };
+  const store = makeStore([existing]);
+  const sync = loadSync(store, async () => ({ ok: true, json: async () => ({ messages: [] }) }));
+  const receipts = makeGithubReceipts();
+
+  sync.mergeCodexCloudMessages(store.projects[0], [{
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: existing.id, role: 'user',
+    content: 'new text', createdAt: existing.createdAt,
+    metadata: {
+      turnId: 'turn-github', turnStatus: 'failed', version: 2,
+      updatedAt: '2026-10-06T00:00:02.000Z', writerId: 'cloud-writer',
+      receiptProfile: 'github-mcp-v1', receipts
+    }
+  }]);
+
+  assert.equal(existing.text, 'new text');
+  assert.equal(existing._codexTurnStatus, 'failed');
+  assert.equal(existing._codexVersion, 2);
+  assert.equal(existing._codexReceiptProfile, 'github-mcp-v1');
+  assert.deepEqual(existing._codexReceipts, receipts);
+  assert.equal(existing._synced, true);
+  assert.equal(existing._syncDirty, false);
+});
+
+test('Codex frontend round-trips failed, canceled, and unknown turn statuses with receipt profiles', async () => {
+  const statuses = ['failed', 'canceled', 'unknown'];
+  const messages = statuses.map((status, index) => ({
+    id: 'github-status-' + status, role: 'user', text: status, createdAt: `2026-10-06T00:00:0${index}.000Z`,
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-' + status, _codexTurnStatus: status,
+    _codexVersion: index + 1, _codexUpdatedAt: `2026-10-06T00:00:0${index}.000Z`, _codexWriterId: 'writer-a',
+    _codexReceiptProfile: 'github-mcp-v1', _codexReceipts: makeGithubReceipts(), _syncDirty: true, _synced: false
+  }));
+  const store = makeStore(messages);
+  let requestBody;
+  const sync = loadSync(store, async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ syncedMessageIds: messages.map(message => message.id) }) };
+  });
+  await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+  assert.deepEqual(requestBody.messages.map(row => row.metadata.turnStatus), statuses);
+  for (const row of requestBody.messages) assert.ok(serverSync.normalizeCodexMessage(row));
+  assert.deepEqual(messages.map(message => message._syncDirty), [false, false, false]);
+});
+
+test('Codex frontend compacts oversized GitHub receipts with shared semantics and keeps constructed markers', async () => {
+  const message = {
+    id: 'github-oversized', role: 'user', text: 'large', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'github-large', _codexTurnStatus: 'unknown',
+    _codexReceiptProfile: 'github-mcp-v1', _codexReceipts: makeOversizedGithubReceipts(),
+    _syncDirty: true, _synced: false
+  };
+  const store = makeStore([message]);
+  let requestBody;
+  const sync = loadSync(store, async (_url, init) => {
+    requestBody = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ syncedMessageIds: [message.id] }) };
+  });
+  await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+  const receipts = requestBody.messages[0].metadata.receipts;
+  assert.ok(Buffer.byteLength(JSON.stringify(receipts), 'utf8') <= 64 * 1024);
+  assert.equal(receipts.omitted, true);
+  assert.ok(receipts.omittedSources > 0);
+  assert.equal(receipts.activities[0].outcome, 'failed');
+  assert.equal(receipts.activities[0].reason, 'tool_failed');
+  assert.ok(receipts.activities.every(activity => activity.tool === 'github_mcp'));
+  assert.ok(receipts.activities.flatMap(activity => activity.sourceCards).every(source => source.linkKind === 'constructed'));
+});
+
+test('Codex frontend rejects invalid receipt sidecars and never clears dirty state', async () => {
+  const invalidMessages = [
+    {
+      id: 'github-no-receipts', role: 'user', text: 'missing', createdAt: '2026-10-06T00:00:00.000Z',
+      _codexRuntime: 'codex-gateway', _codexTurnId: 'missing', _codexTurnStatus: 'failed',
+      _codexReceiptProfile: 'github-mcp-v1', _syncDirty: true, _synced: false
+    },
+    {
+      id: 'github-no-profile', role: 'user', text: 'profile', createdAt: '2026-10-06T00:00:01.000Z',
+      _codexRuntime: 'codex-gateway', _codexTurnId: 'no-profile', _codexTurnStatus: 'failed',
+      _codexReceipts: { activities: [{
+        requestId: 'wr_123e4567-e89b-12d3-a456-426614174000', activityId: 'wa_1', tool: 'github_mcp',
+        phase: 'completed', action: 'search_code', outcome: 'unknown', sources: 'none', sourceCards: []
+      }] }, _syncDirty: true, _synced: false
+    },
+    {
+      id: 'github-unknown-profile', role: 'user', text: 'unknown', createdAt: '2026-10-06T00:00:02.000Z',
+      _codexRuntime: 'codex-gateway', _codexTurnId: 'unknown-profile', _codexTurnStatus: 'unknown',
+      _codexReceiptProfile: 'github-mcp-v2', _codexReceipts: { activities: [] }, _syncDirty: true, _synced: false
+    }
+  ];
+  const store = makeStore(invalidMessages);
+  let calls = 0;
+  const sync = loadSync(store, async () => { calls++; return { ok: true, json: async () => ({ syncedMessageIds: invalidMessages.map(message => message.id) }) }; });
+  const syncResult = await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+  assert.equal(calls, 0);
+  assert.equal(syncResult, false);
+  for (const message of invalidMessages) {
+    assert.equal(message._synced, false);
+    assert.equal(message._syncDirty, true);
+  }
+
+  const incomingStore = makeStore([]);
+  const incomingSync = loadSync(incomingStore, async () => ({ ok: true, json: async () => ({ messages: [] }) }));
+  assert.throws(() => incomingSync.mergeCodexCloudMessages(incomingStore.projects[0], [{
+    projectId: 'codex-code-test', windowId: 'chat-1', messageId: 'bad-cloud', role: 'user', content: 'bad',
+    createdAt: '2026-10-06T00:00:00.000Z', metadata: { receiptProfile: 'github-mcp-v1' }
+  }]), error => error.code === 'CODEX_RECEIPT_PROFILE_REQUIRES_RECEIPTS');
+});
+
+test('Codex sync fails closed when the shared receipt module is unavailable', async () => {
+  const message = {
+    id: 'missing-contract', role: 'user', text: 'receipt', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'missing-contract', _codexTurnStatus: 'completed',
+    _codexReceipts: { activities: [] }, _syncDirty: true, _synced: false
+  };
+  const store = makeStore([message]);
+  let calls = 0;
+  const sync = loadSync(store, async () => { calls++; return { ok: true, json: async () => ({ syncedMessageIds: [message.id] }) }; }, { receiptContract: null });
+  const syncResult = await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+  assert.equal(calls, 0);
+  assert.equal(syncResult, false);
+  assert.equal(message._synced, false);
+  assert.equal(message._syncDirty, true);
+});
+
+test('Codex frontend does not clear a receipt row when its profile changes during upload', async () => {
+  const message = {
+    id: 'github-race', role: 'user', text: 'race', createdAt: '2026-10-06T00:00:00.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'race', _codexTurnStatus: 'completed',
+    _codexVersion: 1, _codexUpdatedAt: '2026-10-06T00:00:01.000Z', _codexWriterId: 'writer-a',
+    _codexReceiptProfile: 'github-mcp-v1', _codexReceipts: makeGithubReceipts(), _syncDirty: true, _synced: false
+  };
+  const store = makeStore([message]);
+  let release;
+  const sync = loadSync(store, () => new Promise(resolve => {
+    release = () => resolve({ ok: true, json: async () => ({ syncedMessageIds: [message.id] }) });
+  }));
+  const upload = sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+  while (!release) await new Promise(resolve => setTimeout(resolve, 0));
+  message._codexReceiptProfile = undefined;
+  release();
+  await upload;
+  assert.equal(message._synced, false);
+  assert.equal(message._syncDirty, true);
 });
 
 test('Codex sync projects and hydrates an oversized terminal receipt summary', async () => {
@@ -307,6 +673,7 @@ test('Codex conversation pagination continues beyond the former 2000-row cap', a
   let calls = 0;
   const sync = loadSync(store, async url => {
     calls++;
+    assert.equal(new URL(url).searchParams.get('receiptProfile'), 'github-mcp-v1');
     const cursor = Number(new URL(url).searchParams.get('cursor') || 0);
     const rows = allRows.slice(cursor, cursor + 100);
     return {
@@ -320,4 +687,33 @@ test('Codex conversation pagination continues beyond the former 2000-row cap', a
   assert.equal(store.projects[0].chats[0].messages.length, total);
   assert.equal(calls, 21);
   assert.equal(store.projects[0].chats[0].messages.at(-1).id, 'cloud-2000');
+});
+
+test('Codex browser sync applies explicit partial confirmations from a conflict and keeps other messages dirty', async () => {
+  const messages = ['partial-clean', 'partial-dirty'].map((id, index) => ({
+    id, role: 'user', text: id, createdAt: '2026-10-06T00:00:0' + index + '.000Z',
+    _codexRuntime: 'codex-gateway', _codexTurnId: 'turn-' + id, _codexTurnStatus: 'failed',
+    _codexVersion: 1, _codexUpdatedAt: '2026-10-06T00:00:0' + index + '.000Z', _codexWriterId: 'writer-a',
+    _synced: false, _syncDirty: true
+  }));
+  const store = makeStore(messages);
+  const sync = loadSync(store, async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(body.receiptProfile, 'github-mcp-v1');
+    return {
+      ok: false, status: 409,
+      json: async () => ({
+        error: 'CODEX_RECEIPT_UPDATE_CONFLICT', code: 'CODEX_RECEIPT_UPDATE_CONFLICT',
+        synced: 1, syncedMessageIds: ['partial-clean'], partial: true
+      })
+    };
+  });
+
+  const result = await sync.syncCodexMessagesToBackend('codex-code-test', 'chat-1');
+
+  assert.equal(result, false);
+  assert.equal(messages[0]._synced, true);
+  assert.equal(messages[0]._syncDirty, false);
+  assert.equal(messages[1]._synced, false);
+  assert.equal(messages[1]._syncDirty, true);
 });

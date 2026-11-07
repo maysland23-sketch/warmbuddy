@@ -31,6 +31,7 @@ const {
   serializeCodexRequest
 } = require('./codex-gateway');
 const { buildMemoryRows } = require('./memories-persistence');
+const CodexReceiptContract = require('./public/js/codex-receipt-contract');
 const { createEmailService } = require('./email-service');
 const {
   parseProactiveReply,
@@ -46,26 +47,71 @@ const {
 } = require('./render-api-security');
 const {
   CODEX_PROJECT_ID,
+  CODEX_RUNTIME,
+  CODEX_RECEIPT_PROFILE,
+  CODEX_RECEIPT_PROFILE_REQUIRED,
+  CODEX_RECEIPT_PROFILE_UNSUPPORTED,
+  CODEX_RECEIPT_UPDATE_CONFLICT,
+  CODEX_RECEIPT_MESSAGE_OWNERSHIP_CONFLICT,
   CODEX_MAX_PAGE_SIZE,
   buildCodexConversationQuery,
   normalizeCodexMessage,
+  validateCodexReceiptProfile,
+  isCodexProtectedMetadata,
+  isCodexProtectedRow,
+  assertCodexMessageOwnership,
+  assertCodexProtectedUpdate,
+  codexMessagesEqual,
   shouldApplyCodexUpdate
 } = require('./codex-message-sync');
 
-async function conditionallyStoreCodexMessage(database, message) {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const existingResult = await database.from('chat_messages')
-      .select('project_id, window_id, message_id, role, content, token_usage, created_at, metadata')
-      .eq('message_id', message.message_id)
-      .maybeSingle();
-    if (existingResult.error) throw existingResult.error;
-    if (existingResult.data && !shouldApplyCodexUpdate(existingResult.data, message)) return false;
+const CODEX_MESSAGE_SELECT = 'project_id, window_id, message_id, role, content, token_usage, created_at, metadata';
 
-    if (existingResult.data) {
+function getChatMessagesDatabase() {
+  return app.locals.chatMessagesSupabase || supabase;
+}
+
+async function readCodexMessageById(database, messageId) {
+  const result = await database.from('chat_messages')
+    .select(CODEX_MESSAGE_SELECT)
+    .eq('message_id', messageId)
+    .maybeSingle();
+  if (result.error) throw result.error;
+  return result.data || null;
+}
+
+async function preflightCodexMessageBatch(database, messages, receiptProfile) {
+  const existingById = new Map();
+  for (const message of messages) {
+    if (existingById.has(message.message_id)) continue;
+    const existing = await readCodexMessageById(database, message.message_id);
+    existingById.set(message.message_id, existing);
+  }
+  for (const message of messages) {
+    const existing = existingById.get(message.message_id);
+    if (!existing) continue;
+    assertCodexMessageOwnership(existing, message);
+    assertCodexProtectedUpdate(existing, message, receiptProfile);
+  }
+  return existingById;
+}
+
+async function conditionallyStoreCodexMessage(database, message, { receiptProfile } = {}) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const existing = await readCodexMessageById(database, message.message_id);
+    if (existing) {
+      assertCodexMessageOwnership(existing, message);
+      assertCodexProtectedUpdate(existing, message, receiptProfile);
+    }
+    if (existing && !shouldApplyCodexUpdate(existing, message)) return codexMessagesEqual(existing, message);
+
+    if (existing) {
       const updateResult = await database.from('chat_messages')
         .update(message)
         .eq('message_id', message.message_id)
-        .eq('metadata', JSON.stringify(existingResult.data.metadata))
+        .eq('project_id', existing.project_id)
+        .eq('window_id', existing.window_id)
+        .eq('metadata', JSON.stringify(existing.metadata))
         .select('message_id')
         .maybeSingle();
       if (updateResult.error) throw updateResult.error;
@@ -78,7 +124,111 @@ async function conditionallyStoreCodexMessage(database, message) {
     if (insertResult.error.code === '23505') continue;
     throw insertResult.error;
   }
-  return false;
+  const conflict = new Error(CODEX_RECEIPT_UPDATE_CONFLICT);
+  conflict.code = CODEX_RECEIPT_UPDATE_CONFLICT;
+  conflict.status = 409;
+  throw conflict;
+}
+
+function genericChatMessageProtectionConflict() {
+  const error = new Error(CODEX_RECEIPT_UPDATE_CONFLICT);
+  error.code = CODEX_RECEIPT_UPDATE_CONFLICT;
+  error.status = 409;
+  throw error;
+}
+
+function isCodexRuntimeMetadata(metadata) {
+  return !!(metadata && typeof metadata === 'object' && !Array.isArray(metadata) &&
+    Object.prototype.hasOwnProperty.call(metadata, 'runtime') && metadata.runtime === CODEX_RUNTIME);
+}
+
+function assertGenericChatMessageProjectBoundary(existing, incoming) {
+  if ((existing && (existing.project_id === CODEX_PROJECT_ID || isCodexRuntimeMetadata(existing.metadata))) ||
+      (incoming && (incoming.project_id === CODEX_PROJECT_ID || isCodexRuntimeMetadata(incoming.metadata)))) {
+    genericChatMessageProtectionConflict();
+  }
+}
+
+function assertGenericChatMessageUnprotected(existing, incoming, { enforceProjectBoundary = true } = {}) {
+  if (enforceProjectBoundary) assertGenericChatMessageProjectBoundary(existing, incoming);
+  if ((existing && isCodexProtectedRow(existing)) ||
+      (incoming && isCodexProtectedMetadata(incoming.metadata))) {
+    genericChatMessageProtectionConflict();
+  }
+}
+
+async function preflightGenericChatMessageBatch(database, messages) {
+  const existingById = new Map();
+  for (const message of messages) {
+    assertGenericChatMessageUnprotected(null, message);
+    if (existingById.has(message.message_id)) continue;
+    existingById.set(message.message_id, await readCodexMessageById(database, message.message_id));
+  }
+  for (const message of messages) {
+    assertGenericChatMessageUnprotected(existingById.get(message.message_id), message);
+  }
+  return existingById;
+}
+
+function applyGenericMessageSnapshotFilters(query, existing) {
+  let filtered = query
+    .eq('message_id', existing.message_id)
+    .eq('project_id', existing.project_id)
+    .eq('window_id', existing.window_id);
+  if (existing.metadata !== undefined) filtered = filtered.eq('metadata', JSON.stringify(existing.metadata));
+  return filtered;
+}
+
+async function conditionallyStoreGenericChatMessage(database, message) {
+  assertGenericChatMessageUnprotected(null, message);
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const existing = await readCodexMessageById(database, message.message_id);
+    assertGenericChatMessageUnprotected(existing, message);
+    if (!existing) {
+      const insertResult = await database.from('chat_messages').insert(message);
+      if (!insertResult.error) return true;
+      if (insertResult.error.code === '23505') continue;
+      throw insertResult.error;
+    }
+
+    const updateResult = await applyGenericMessageSnapshotFilters(
+      database.from('chat_messages').update(message), existing
+    ).select('message_id').maybeSingle();
+    if (updateResult.error) throw updateResult.error;
+    if (updateResult.data) return true;
+  }
+  genericChatMessageProtectionConflict();
+}
+
+async function conditionallyDeleteGenericChatMessage(database, messageId) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const existing = await readCodexMessageById(database, messageId);
+    if (!existing) return false;
+    assertGenericChatMessageUnprotected(existing, null, { enforceProjectBoundary: false });
+    const deleteResult = await applyGenericMessageSnapshotFilters(
+      database.from('chat_messages').delete(), existing
+    ).select('message_id').maybeSingle();
+    if (deleteResult.error) throw deleteResult.error;
+    if (deleteResult.data) return true;
+  }
+  genericChatMessageProtectionConflict();
+}
+
+async function readCodexProjectMetadata(database) {
+  const rows = [];
+  for (let offset = 0; offset < CODEX_MAX_PAGE_SIZE * 1000; offset += CODEX_MAX_PAGE_SIZE) {
+    const result = await database.from('chat_messages')
+      .select('metadata')
+      .eq('project_id', CODEX_PROJECT_ID)
+      .range(offset, offset + CODEX_MAX_PAGE_SIZE - 1);
+    if (result.error) throw result.error;
+    const page = Array.isArray(result.data) ? result.data : [];
+    rows.push(...page);
+    if (page.length < CODEX_MAX_PAGE_SIZE) return rows;
+  }
+  const error = new Error('CODEX_SYNC_UNAVAILABLE');
+  error.code = 'CODEX_SYNC_UNAVAILABLE';
+  throw error;
 }
 
 // Proxy for outbound API calls (set HTTPS_PROXY in .env, e.g. http://127.0.0.1:7897)
@@ -90,6 +240,13 @@ if (OUTBOUND_PROXY) {
 const app = express();
 const IS_RENDER = String(process.env.RENDER || '').toLowerCase() === 'true';
 const CODEX_WEB_MODE = normalizeCodexWebMode(process.env.CODEX_WEB_MODE);
+function parseCodexE1bEnabled(value) {
+  if (value === undefined) return false;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error('CODEX_E1B_ENABLED must be exactly "true" or "false"');
+}
+const CODEX_E1B_ENABLED = parseCodexE1bEnabled(process.env.CODEX_E1B_ENABLED);
 const CODEX_PUBLIC_EVENT_TYPES = new Set(['session', 'status', 'message', 'error', 'completion', 'activity', 'source']);
 
 app.use((req, res, next) => {
@@ -124,7 +281,10 @@ app.use(express.json({ limit: '5mb' }));
 app.get('/api/codex/config', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
-    res.json({ webMode: normalizeCodexWebMode(app.locals.codexWebMode ?? CODEX_WEB_MODE) });
+    res.json({
+      webMode: normalizeCodexWebMode(app.locals.codexWebMode ?? CODEX_WEB_MODE),
+      receiptProfile: CODEX_E1B_ENABLED ? CODEX_RECEIPT_PROFILE : null
+    });
   } catch (error) {
     const payload = codexErrorPayload(error);
     res.status(codexErrorStatus(error, payload.code)).json(payload);
@@ -250,6 +410,8 @@ function codexErrorStatus(error, code) {
   if (code === 'CODEX_GATEWAY_NOT_CONFIGURED') return 503;
   if (code === 'CODEX_GATEWAY_TIMEOUT') return 504;
   if (code === 'CODEX_GATEWAY_ABORTED') return 499;
+  if (code === CODEX_RECEIPT_PROFILE_REQUIRED) return 428;
+  if (code === CODEX_RECEIPT_PROFILE_UNSUPPORTED) return 400;
   if (code === 'BUSY' || code === 'SESSION_ACTIVE') return 409;
   if (code === 'UNKNOWN_SESSION') return 404;
   if (code === 'CODEX_INVALID_REQUEST' || code === 'CODEX_INVALID_PROMPT' || code === 'CODEX_INVALID_SESSION') return 400;
@@ -1206,7 +1368,8 @@ function proactiveMessageBaseId(eventId, chatId) {
  * The event ID is used as the stable identity, so retries are safe.
  */
 async function saveProactiveChatMessages(event, aiName) {
-  if (!supabase || !event || !event.projectId || !event.chatId || !event.id) return { saved: 0 };
+  const database = getChatMessagesDatabase();
+  if (!database || !event || !event.projectId || !event.chatId || !event.id) return { saved: 0 };
   const baseId = proactiveMessageBaseId(event.id, event.chatId);
   const rows = [];
   const content = String(event.content || '').trim();
@@ -1253,20 +1416,21 @@ async function saveProactiveChatMessages(event, aiName) {
   }
   if (rows.length === 0) return { saved: 0 };
 
-  const { error } = await supabase.from('chat_messages').upsert(rows, { onConflict: 'message_id' });
-  if (error) throw error;
+  await preflightGenericChatMessageBatch(database, rows);
+  for (const row of rows) await conditionallyStoreGenericChatMessage(database, row);
   console.log('[proactive-msg] Saved', rows.length, 'chat rows for event', event.id, 'window:', event.chatId);
   return { saved: rows.length };
 }
 
 async function backfillProactiveChatMessages(projectId, windowId) {
-  if (!supabase || !projectId || !windowId) return 0;
+  const database = getChatMessagesDatabase();
+  if (!database || !projectId || !windowId) return 0;
   try {
-    const { data: events, error } = await supabase.from('system_events')
+    const { data: events, error } = await database.from('system_events')
       .select('*').eq('project_id', projectId).order('created_at', { ascending: true }).limit(500);
     if (error) throw error;
     if (!events || events.length === 0) return 0;
-    const { data: existingRows, error: existingError } = await supabase.from('chat_messages')
+    const { data: existingRows, error: existingError } = await database.from('chat_messages')
       .select('message_id').eq('project_id', projectId).contains('metadata', { proactive: true }).limit(2000);
     if (existingError) throw existingError;
     const existingIds = new Set((existingRows || []).map(row => row.message_id));
@@ -2322,13 +2486,33 @@ function mergeUsageSnapshots(current, next) {
 app.post('/api/codex/stream', async (req, res) => {
   const body = req.body || {};
   const keys = Object.keys(body);
-  if (keys.some(key => key !== 'prompt' && key !== 'sessionId')) {
+  const allowedKeys = CODEX_E1B_ENABLED
+    ? new Set(['prompt', 'sessionId', 'receiptProfile'])
+    : new Set(['prompt', 'sessionId']);
+  if (keys.some(key => !allowedKeys.has(key))) {
     return res.status(400).json({ error: CODEX_ERROR_MESSAGES.CODEX_INVALID_REQUEST, code: 'CODEX_INVALID_REQUEST' });
+  }
+
+  if (CODEX_E1B_ENABLED) {
+    try {
+      validateCodexReceiptProfile(
+        Object.prototype.hasOwnProperty.call(body, 'receiptProfile') ? body.receiptProfile : undefined,
+        { required: true }
+      );
+    } catch (error) {
+      const code = error.code === CODEX_RECEIPT_PROFILE_REQUIRED || error.code === CODEX_RECEIPT_PROFILE_UNSUPPORTED
+        ? error.code : 'CODEX_INVALID_REQUEST';
+      return res.status(error.status || 400).json({ error: code, code });
+    }
   }
 
   let request;
   try {
-    request = JSON.parse(serializeCodexRequest(body.prompt, body.sessionId));
+    request = JSON.parse(serializeCodexRequest(
+      body.prompt,
+      body.sessionId,
+      CODEX_E1B_ENABLED ? body.receiptProfile : undefined
+    ));
   } catch (error) {
     const payload = codexErrorPayload(error);
     return res.status(codexErrorStatus(error, payload.code)).json(payload);
@@ -2354,17 +2538,69 @@ app.post('/api/codex/stream', async (req, res) => {
   let pendingCompletion = null;
   let completionSent = false;
   let emittedError = false;
-  const projectCodexReceiptPayload = (type, payload) => {
+  const receiptState = { requestId: null, activities: new Map(), completed: false };
+  const receiptContractOptions = request.receiptProfile === undefined
+    ? undefined : { profile: request.receiptProfile };
+  const receiptFields = {
+    activity: ['requestId', 'activityId', 'tool', 'phase', 'action', 'outcome', 'sources', 'reason',
+      'targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl', 'context'],
+    source: ['requestId', 'activityId', 'sourceId', 'displayUrl', 'redacted', 'url', 'title', 'refId',
+      'context', 'linkKind']
+  };
+  const normalizeProjectedReceipt = (type, payload) => {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new CodexGatewayError('Codex Gateway returned an invalid receipt', { status: 502, code: 'CODEX_GATEWAY_INVALID_RESPONSE' });
     }
-    const fields = type === 'activity'
-      ? ['requestId', 'activityId', 'tool', 'phase', 'action', 'outcome', 'sources', 'reason', 'targetSourceId', 'targetDisplayUrl', 'targetRedacted', 'targetUrl']
-      : ['requestId', 'activityId', 'sourceId', 'displayUrl', 'redacted', 'url', 'title', 'refId'];
-    const result = {};
-    fields.forEach(field => {
-      if (Object.prototype.hasOwnProperty.call(payload, field)) result[field] = payload[field];
+    if (receiptState.completed) {
+      throw new CodexGatewayError('Codex Gateway returned a receipt after completion', { status: 502, code: 'CODEX_GATEWAY_INVALID_RESPONSE' });
+    }
+    const candidatePayload = {};
+    receiptFields[type].forEach(field => {
+      if (Object.prototype.hasOwnProperty.call(payload, field)) candidatePayload[field] = payload[field];
     });
+    let normalized;
+    try {
+      if (type === 'activity') {
+        const existing = receiptState.activities.get(candidatePayload.activityId);
+        if (candidatePayload.phase === 'started') {
+          if (existing || receiptState.activities.size >= CodexReceiptContract.MAX_ACTIVITIES) throw new Error('lifecycle');
+        } else if (!existing || existing.phase !== 'started') {
+          throw new Error('lifecycle');
+        }
+        candidatePayload.sourceCards = [];
+        normalized = CodexReceiptContract.normalizeReceiptSet(
+          { activities: [candidatePayload] }, receiptContractOptions
+        ).activities[0];
+        if (normalized.tool === 'web_search' && normalizeCodexWebMode(app.locals.codexWebMode ?? CODEX_WEB_MODE) !== 'native') {
+          throw new Error('web mode');
+        }
+        if (existing) CodexReceiptContract.assertActivityTransition(existing, normalized);
+        receiptState.requestId = receiptState.requestId || normalized.requestId;
+        if (receiptState.requestId !== normalized.requestId) throw new Error('request');
+        receiptState.activities.set(normalized.activityId, normalized);
+        const result = { ...normalized };
+        delete result.sourceCards;
+        return result;
+      }
+
+      const existing = receiptState.activities.get(candidatePayload.activityId);
+      if (!existing || existing.phase !== 'completed') throw new Error('source lifecycle');
+      if (receiptState.requestId && receiptState.requestId !== candidatePayload.requestId) throw new Error('request');
+      normalized = CodexReceiptContract.normalizeReceiptSet(
+        { activities: [{ ...existing, sourceCards: existing.sourceCards.concat([candidatePayload]) }] },
+        receiptContractOptions
+      ).activities[0];
+      if (normalized.tool === 'web_search' && normalizeCodexWebMode(app.locals.codexWebMode ?? CODEX_WEB_MODE) !== 'native') {
+        throw new Error('web mode');
+      }
+      receiptState.activities.set(normalized.activityId, normalized);
+      return normalized.sourceCards[normalized.sourceCards.length - 1];
+    } catch (_) {
+      throw new CodexGatewayError('Codex Gateway returned an invalid receipt', { status: 502, code: 'CODEX_GATEWAY_INVALID_RESPONSE' });
+    }
+  };
+  const projectCodexReceiptPayload = (type, payload) => {
+    const result = normalizeProjectedReceipt(type, payload);
     if (type === 'source' && result.redacted === true) delete result.url;
     if (type === 'activity' && result.targetRedacted === true) delete result.targetUrl;
     return result;
@@ -2380,13 +2616,13 @@ app.post('/api/codex/stream', async (req, res) => {
       }, clientAbortContext.signal);
     }
     if (event.type === 'completion') {
+      if ([...receiptState.activities.values()].some(activity => activity.phase === 'started')) {
+        throw new CodexGatewayError('Codex Gateway returned an incomplete receipt', { status: 502, code: 'CODEX_GATEWAY_INVALID_RESPONSE' });
+      }
+      receiptState.completed = true;
       completionStatus = event.payload.status;
       pendingCompletion = event.payload;
       return true;
-    }
-    if ((event.type === 'activity' || event.type === 'source') &&
-        normalizeCodexWebMode(app.locals.codexWebMode ?? CODEX_WEB_MODE) !== 'native') {
-      throw new CodexGatewayError('Codex receipt event is not enabled', { status: 502, code: 'CODEX_GATEWAY_INVALID_RESPONSE' });
     }
     if (event.type === 'activity' || event.type === 'source') {
       return writeCodexGatewaySse(res, event.type, projectCodexReceiptPayload(event.type, event.payload), clientAbortContext.signal);
@@ -2395,13 +2631,15 @@ app.post('/api/codex/stream', async (req, res) => {
   };
 
   try {
-    const result = await client.run({
+    const gatewayRequest = {
       prompt: request.prompt,
       sessionId: request.sessionId,
       signal: clientAbortContext.signal,
       onEvent: handleGatewayEvent,
       onHeartbeat: () => writeCodexGatewayHeartbeat(res, clientAbortContext.signal)
-    });
+    };
+    if (request.receiptProfile !== undefined) gatewayRequest.receiptProfile = request.receiptProfile;
+    const result = await client.run(gatewayRequest);
     if (clientAbortContext.isDisconnected() || res.destroyed) return;
     if (!result?.completed || completionStatus !== 'completed') {
       throw new CodexGatewayError(CODEX_ERROR_MESSAGES.CODEX_GATEWAY_INCOMPLETE, {
@@ -2413,7 +2651,7 @@ app.post('/api/codex/stream', async (req, res) => {
     completionSent = true;
     if (!res.writableEnded) res.end();
   } catch (error) {
-    if (clientAbortContext.isDisconnected() || error?.code === 'CODEX_GATEWAY_ABORTED') return;
+    if (clientAbortContext.isDisconnected()) return;
     if (error?.code === CODEX_RESPONSE_BACKPRESSURE_TIMEOUT) {
       if (!res.destroyed) res.destroy();
       return;
@@ -3450,13 +3688,42 @@ app.get('/api/projects/configs', async (req, res) => {
 // Session IDs, Gateway credentials, and Gateway URLs are intentionally not
 // accepted by this contract.  The existing chat_messages table is reused;
 // no schema migration is needed for the allowlisted metadata sidecar.
+const CODEX_SYNC_PUBLIC_ERRORS = new Map([
+  ['CODEX_SYNC_INVALID_REQUEST', 400],
+  [CODEX_RECEIPT_PROFILE_UNSUPPORTED, 400],
+  [CODEX_RECEIPT_PROFILE_REQUIRED, 428],
+  [CODEX_RECEIPT_UPDATE_CONFLICT, 409],
+  [CODEX_RECEIPT_MESSAGE_OWNERSHIP_CONFLICT, 409]
+]);
+
+function sendCodexSyncError(res, error, partial = {}) {
+  const code = error?.code;
+  const status = CODEX_SYNC_PUBLIC_ERRORS.get(code) || 500;
+  const payload = status === 500
+    ? { error: 'CODEX_SYNC_UNAVAILABLE', code: 'CODEX_SYNC_UNAVAILABLE' }
+    : { error: code, code };
+  Object.assign(payload, partial);
+  return res.status(status).json(payload);
+}
+
 app.post('/api/codex/sync-messages', async (req, res) => {
+  let synced = 0;
+  const syncedMessageIds = [];
   try {
-    const rawMessages = req.body && req.body.messages;
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const requestProfile = validateCodexReceiptProfile(
+      Object.prototype.hasOwnProperty.call(body, 'receiptProfile') ? body.receiptProfile : undefined
+    );
+    const rawMessages = body.messages;
     if (!Array.isArray(rawMessages) || rawMessages.length > CODEX_MAX_PAGE_SIZE) {
       return res.status(400).json({ error: 'CODEX_SYNC_INVALID_REQUEST', code: 'CODEX_SYNC_INVALID_REQUEST' });
     }
     if (rawMessages.length === 0) return res.json({ synced: 0 });
+    if (!requestProfile && rawMessages.some(message => isCodexProtectedMetadata(message && message.metadata))) {
+      throw Object.assign(new Error(CODEX_RECEIPT_PROFILE_REQUIRED), {
+        code: CODEX_RECEIPT_PROFILE_REQUIRED, status: 428
+      });
+    }
     const messages = rawMessages.map(normalizeCodexMessage);
     if (messages.some(message => !message)) {
       return res.status(400).json({ error: 'CODEX_SYNC_INVALID_REQUEST', code: 'CODEX_SYNC_INVALID_REQUEST' });
@@ -3464,10 +3731,9 @@ app.post('/api/codex/sync-messages', async (req, res) => {
     const database = app.locals.codexSupabase || supabase;
     if (!database) return res.json({ synced: 0, note: 'sync unavailable' });
 
-    let synced = 0;
-    const syncedMessageIds = [];
+    await preflightCodexMessageBatch(database, messages, requestProfile);
     for (const message of messages) {
-      if (await conditionallyStoreCodexMessage(database, message)) {
+      if (await conditionallyStoreCodexMessage(database, message, { receiptProfile: requestProfile })) {
         synced++;
         syncedMessageIds.push(message.message_id);
       }
@@ -3475,12 +3741,16 @@ app.post('/api/codex/sync-messages', async (req, res) => {
     return res.json({ synced, syncedMessageIds });
   } catch (error) {
     console.error('[codex-sync] upload failed:', error?.code || 'database_error');
-    return res.status(500).json({ error: 'CODEX_SYNC_UNAVAILABLE', code: 'CODEX_SYNC_UNAVAILABLE' });
+    const partial = synced > 0 ? { synced, syncedMessageIds, partial: true } : {};
+    return sendCodexSyncError(res, error, partial);
   }
 });
 
 app.get('/api/codex/conversation-messages', async (req, res) => {
   try {
+    const requestProfile = validateCodexReceiptProfile(
+      Object.prototype.hasOwnProperty.call(req.query || {}, 'receiptProfile') ? req.query.receiptProfile : undefined
+    );
     const query = buildCodexConversationQuery({
       projectId: req.query.projectId,
       windowId: req.query.windowId || '',
@@ -3489,9 +3759,17 @@ app.get('/api/codex/conversation-messages', async (req, res) => {
     });
     const database = app.locals.codexSupabase || supabase;
     if (!database) return res.json({ messages: [], nextCursor: null });
+    if (!requestProfile) {
+      const protectedRows = await readCodexProjectMetadata(database);
+      if (protectedRows.some(isCodexProtectedRow)) {
+        throw Object.assign(new Error(CODEX_RECEIPT_PROFILE_REQUIRED), {
+          code: CODEX_RECEIPT_PROFILE_REQUIRED, status: 428
+        });
+      }
+    }
     const offset = query.cursor === '' ? 0 : Number(query.cursor);
     let dbQuery = database.from('chat_messages')
-      .select('project_id, window_id, message_id, role, content, token_usage, created_at, metadata')
+      .select(CODEX_MESSAGE_SELECT)
       .eq('project_id', CODEX_PROJECT_ID)
       .order('created_at', { ascending: true })
       .order('message_id', { ascending: true })
@@ -3499,7 +3777,13 @@ app.get('/api/codex/conversation-messages', async (req, res) => {
     if (query.windowId) dbQuery = dbQuery.eq('window_id', query.windowId);
     const result = await dbQuery;
     if (result.error) throw result.error;
-    const rows = (result.data || []).map(row => ({
+    const fetchedRows = Array.isArray(result.data) ? result.data : [];
+    if (!requestProfile && fetchedRows.some(isCodexProtectedRow)) {
+      throw Object.assign(new Error(CODEX_RECEIPT_PROFILE_REQUIRED), {
+        code: CODEX_RECEIPT_PROFILE_REQUIRED, status: 428
+      });
+    }
+    const rows = fetchedRows.map(row => ({
       projectId: row.project_id,
       windowId: row.window_id,
       messageId: row.message_id,
@@ -3511,33 +3795,32 @@ app.get('/api/codex/conversation-messages', async (req, res) => {
     }));
     return res.json({ messages: rows, nextCursor: rows.length === query.limit ? String(offset + rows.length) : null });
   } catch (error) {
-    if (error?.code === 'CODEX_SYNC_INVALID_REQUEST') {
-      return res.status(400).json({ error: 'CODEX_SYNC_INVALID_REQUEST', code: 'CODEX_SYNC_INVALID_REQUEST' });
-    }
     console.error('[codex-sync] conversation read failed:', error?.code || 'database_error');
-    return res.status(500).json({ error: 'CODEX_SYNC_UNAVAILABLE', code: 'CODEX_SYNC_UNAVAILABLE' });
+    return sendCodexSyncError(res, error);
   }
 });
 
 // ── Chat message sync (frontend → Supabase chat_messages) ──
 app.post('/api/sync-messages', async (req, res) => {
+  let synced = 0;
+  const syncedMessageIds = [];
   try {
     const { messages } = (req.body || {});
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return res.json({ synced: 0 });
     }
-    if (!supabase) {
+    const database = getChatMessagesDatabase();
+    if (!database) {
       return res.json({ synced: 0, note: 'supabase unavailable' });
     }
 
-    let synced = 0;
+    const rows = [];
     for (const msg of messages) {
       if (!msg.message_id || !msg.project_id || !msg.window_id) {
         console.log('[sync-msgs] Skipping msg (missing fields):', JSON.stringify({ id: msg.message_id, pid: msg.project_id, wid: msg.window_id }));
         continue;
       }
-      console.log('[sync-msgs] Upserting:', msg.message_id, 'role:', msg.role);
-      const { data, error } = await supabase.from('chat_messages').upsert({
+      rows.push({
         project_id: msg.project_id,
         window_id: msg.window_id,
         message_id: msg.message_id,
@@ -3546,30 +3829,40 @@ app.post('/api/sync-messages', async (req, res) => {
         token_usage: msg.token_usage || 0,
         created_at: msg.created_at || new Date().toISOString(),
         metadata: msg.metadata || {}
-      }, { onConflict: 'message_id' });
-      if (error) {
-        console.error('[sync-msgs] Upsert error for', msg.message_id, ':', error.message, error.code, error.details);
-      } else {
+      });
+    }
+    if (rows.length === 0) return res.json({ synced: 0 });
+
+    await preflightGenericChatMessageBatch(database, rows);
+    for (const row of rows) {
+      console.log('[sync-msgs] Upserting:', row.message_id, 'role:', row.role);
+      if (await conditionallyStoreGenericChatMessage(database, row)) {
         synced++;
+        syncedMessageIds.push(row.message_id);
       }
     }
     if (synced > 0) console.log(`[sync-msgs] Synced ${synced} messages`);
     res.json({ synced });
   } catch (e) {
     console.error('[sync-msgs] Error:', e.message);
-    res.status(500).json({ error: e.message });
+    const partial = synced > 0 ? { synced, syncedMessageIds, partial: true } : {};
+    if (e.code === CODEX_RECEIPT_UPDATE_CONFLICT) {
+      return res.status(409).json({ error: e.code, code: e.code, ...partial });
+    }
+    res.status(500).json({ error: e.message, ...partial });
   }
 });
 
 // ── Chat message read path (Supabase → frontend) ──
 app.get('/api/chat-messages', async (req, res) => {
   const { projectId, windowId, targetWindowId, since } = req.query;
-  if (!supabase) return res.json({ messages: [] });
+  const database = getChatMessagesDatabase();
+  if (!database) return res.json({ messages: [] });
   if (!projectId) return res.status(400).json({ error: 'Missing projectId' });
   try {
     // Repair missing legacy proactive rows on every pull; the helper only upserts IDs that are absent.
     if (targetWindowId) await backfillProactiveChatMessages(projectId, targetWindowId);
-    let query = supabase.from('chat_messages')
+    let query = database.from('chat_messages')
       .select('project_id, window_id, message_id, role, content, token_usage, created_at, metadata')
       .eq('project_id', projectId)
       .contains('metadata', { proactive: true })
@@ -3870,7 +4163,8 @@ app.get('/api/user-status', async (req, res) => {
 app.post('/api/log-token-call', async (req, res) => {
   const { projectId, windowId, actionType, inputTokens, outputTokens, model, interactionId, stage, timestamp, metadata } = req.body || {};
   if (!projectId || !windowId) return res.json({ ok: false });
-  if (!supabase) return res.json({ ok: false, note: 'supabase unavailable' });
+  const database = getChatMessagesDatabase();
+  if (!database) return res.json({ ok: false, note: 'supabase unavailable' });
   try {
     const msgId = interactionId
       ? 'tok_' + interactionId + '_' + (stage || 'single')
@@ -3897,8 +4191,7 @@ app.post('/api/log-token-call', async (req, res) => {
       createdAt: timestamp,
       metadata: metadata || {}
     });
-    await persistTokenUsageEvent(event);
-    const { error } = await supabase.from('chat_messages').upsert({
+    const chatRow = {
       project_id: projectId,
       window_id: windowId,
       message_id: msgId,
@@ -3907,12 +4200,17 @@ app.post('/api/log-token-call', async (req, res) => {
       token_usage: (inputTokens || 0) + (outputTokens || 0),
       created_at: new Date().toISOString(),
       metadata: { _token_log: true, action_type: actionType, model: model || 'unknown', input_tokens: inputTokens || 0, output_tokens: outputTokens || 0 }
-    }, { onConflict: 'message_id' });
-    if (error) throw error;
+    };
+    await preflightGenericChatMessageBatch(database, [chatRow]);
+    await persistTokenUsageEvent(event);
+    await conditionallyStoreGenericChatMessage(database, chatRow);
     console.log('[token-log] proactive', actionType, 'in:', inputTokens, 'out:', outputTokens, 'window:', windowId);
     res.json({ ok: true });
   } catch (e) {
     console.error('[token-log] Error:', e.message);
+    if (e.code === CODEX_RECEIPT_UPDATE_CONFLICT) {
+      return res.status(409).json({ ok: false, error: e.code, code: e.code });
+    }
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -4003,14 +4301,17 @@ app.get('/api/token-logs', async (req, res) => {
 app.post('/api/delete-message', async (req, res) => {
   const { messageId } = req.body || {};
   if (!messageId) return res.status(400).json({ ok: false, error: 'Missing messageId' });
-  if (!supabase) return res.json({ ok: false, note: 'supabase unavailable' });
+  const database = getChatMessagesDatabase();
+  if (!database) return res.json({ ok: false, note: 'supabase unavailable' });
   try {
-    const { error } = await supabase.from('chat_messages').delete().eq('message_id', messageId);
-    if (error) throw error;
+    await conditionallyDeleteGenericChatMessage(database, messageId);
     console.log('[delete-msg] Deleted:', messageId);
     res.json({ ok: true });
   } catch (e) {
     console.error('[delete-msg] Error:', e.message);
+    if (e.code === CODEX_RECEIPT_UPDATE_CONFLICT) {
+      return res.status(409).json({ error: e.code, code: e.code });
+    }
     res.status(500).json({ ok: false, error: e.message });
   }
 });

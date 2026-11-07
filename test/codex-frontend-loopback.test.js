@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
 const vm = require('node:vm');
+const sharedReceiptContract = require('../public/js/codex-receipt-contract');
 
 function loadCodex(baseUrl, store, storage, state) {
   const source = fs.readFileSync('public/js/codex.js', 'utf8');
@@ -25,6 +26,7 @@ function loadCodex(baseUrl, store, storage, state) {
     TextDecoder,
     ReadableStream,
     AbortController,
+    CodexReceiptContract: sharedReceiptContract,
     fetch,
     setTimeout,
     clearTimeout,
