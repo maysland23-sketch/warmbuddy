@@ -213,6 +213,66 @@ var ChatModule = (function() {
        { label: 'create', cls: 'confirm', onclick: saveChatWithMemories }]);
   }
 
+  var COMPLETE_WINDOW_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})$/;
+  var WINDOW_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  function parseCompleteWindowTimestamp(value) {
+    if (typeof value !== 'string' || value.length > 64 || !COMPLETE_WINDOW_TIMESTAMP_RE.test(value)) return null;
+    if (parseWindowDate(value.slice(0, 10)) === null) return null;
+    var parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function parseWindowDate(value) {
+    if (typeof value !== 'string' || value.length > 10 || !WINDOW_DATE_RE.test(value)) return null;
+    var parsed = Date.parse(value + 'T00:00:00.000Z');
+    if (!Number.isFinite(parsed)) return null;
+    var normalized = new Date(parsed).toISOString().slice(0, 10);
+    return normalized === value ? parsed : null;
+  }
+
+  function isWindowConversationMessage(message) {
+    if (!message || ['user', 'ai', 'assistant'].indexOf(message.role) < 0) return false;
+    if (message._isHandoffNote || Object.prototype.hasOwnProperty.call(message, '_inheritedFromWindow') || message._searchResult) return false;
+    return true;
+  }
+
+  function hasWindowConversationMessage(chat) {
+    return Array.isArray(chat.messages) && chat.messages.some(isWindowConversationMessage);
+  }
+
+  function getWindowActivitySortKey(chat) {
+    var interactionTime = parseCompleteWindowTimestamp(chat.lastInteractionTime);
+    if (interactionTime !== null) return { value: interactionTime };
+
+    var latestMessageTime = null;
+    (Array.isArray(chat.messages) ? chat.messages : []).filter(isWindowConversationMessage).forEach(function(message) {
+      var messageTime = parseCompleteWindowTimestamp(message && message.createdAt);
+      if (messageTime !== null && (latestMessageTime === null || messageTime > latestMessageTime)) latestMessageTime = messageTime;
+    });
+    if (latestMessageTime !== null) return { value: latestMessageTime };
+
+    var conversationDate = parseWindowDate(chat.lastConversationDate);
+    if (conversationDate !== null) return { value: conversationDate };
+    return null;
+  }
+
+  function selectWindowInheritanceSource(project, excludedChatId) {
+    if (!project || !Array.isArray(project.chats)) return null;
+    var selected = null;
+    var selectedKey = null;
+    for (var i = 0; i < project.chats.length; i++) {
+      var chat = project.chats[i];
+      if (!chat || (excludedChatId !== undefined && chat.id === excludedChatId) || !hasWindowConversationMessage(chat)) continue;
+      var key = getWindowActivitySortKey(chat);
+      if (!selected || (key && (!selectedKey || key.value > selectedKey.value))) {
+        selected = chat;
+        selectedKey = key;
+      }
+    }
+    return selected;
+  }
+
   function saveChatWithMemories() {
     var store = AppCore.getStore();
     var pid = AppCore.$('newChatProjId').value;
@@ -228,10 +288,7 @@ var ChatModule = (function() {
 
     syncProjectMemories(pid);
 
-    var sortedChats = proj.chats.concat().sort(function(a, b) {
-      return (b.lastConversationDate || '').localeCompare(a.lastConversationDate || '');
-    });
-    var prevChat = sortedChats[0];
+    var prevChat = selectWindowInheritanceSource(proj, cid);
     var inheritedMsgs = [];
     if (prevChat) {
       inheritedMsgs = prevChat.messages.slice(-12).map(function(m) {
@@ -3271,10 +3328,7 @@ var ChatModule = (function() {
 
       syncProjectMemories(p.id);
 
-      var sortedChats = p.chats.concat().sort(function(a, b) {
-        return (b.lastConversationDate || '').localeCompare(a.lastConversationDate || '');
-      });
-      var prevChat = sortedChats[0];
+      var prevChat = selectWindowInheritanceSource(p, cid);
 
       var inheritedMsgs = [];
       if (prevChat) {
@@ -3476,6 +3530,7 @@ var ChatModule = (function() {
     buildRetrievalBlock: buildRetrievalBlock,
     queueEvictedMessageWrite: queueEvictedMessageWrite,
     triggerWindowHandoff: triggerWindowHandoff,
+    selectWindowInheritanceSource: selectWindowInheritanceSource,
     buildSystemPrompt: buildSystemPrompt,
     buildDynamicContextBlock: buildDynamicContextBlock,
     buildRecentMsgIdBlock: buildRecentMsgIdBlock,
